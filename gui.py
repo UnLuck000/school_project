@@ -11,12 +11,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from scanner.hashing import load_signatures, scan_dir
+from scanner.hashing import load_signatures
+from scanner.engine import scan_tree
+from scanner.yara_engine import load_rules
 from quarantine import (
     QUARANTINE_DIR, quarantine_file, list_quarantine, restore_file, delete_file,
 )
 
 SIGNATURES = Path("signatures/hashes.txt")
+RULES_DIR = Path("signatures/rules")
 
 
 class ScanWorker(QThread):
@@ -41,10 +44,13 @@ class ScanWorker(QThread):
             self.error.emit(f"Не удалось загрузить базу сигнатур: {e}")
             return
 
+        rules, rule_errors = load_rules(RULES_DIR)
+        for err in rule_errors:
+            self.threat_found.emit(f"[YARA] правило пропущено: {err}")
+
         last_emit = 0.0
 
         def on_file(path):
-            # сигналы шлём не чаще 10 раз в секунду, чтобы не заваливать интерфейс
             nonlocal last_emit
             now = time.monotonic()
             if now - last_emit > 0.1:
@@ -52,14 +58,16 @@ class ScanWorker(QThread):
                 self.file_checked.emit(str(path))
 
         found = 0
-        for infected in scan_dir(Path(self.root), sigs, exclude=QUARANTINE_DIR,
-                                 on_file=on_file, stop=self.stop_event):
+        for infected, reason in scan_tree(
+                Path(self.root), sigs, rules,
+                exclude=[QUARANTINE_DIR, RULES_DIR.resolve()],
+                on_file=on_file, stop=self.stop_event):
             found += 1
             try:
-                quarantine_file(infected, reason="hash match")
-                self.threat_found.emit(f"[!] {infected} -> в карантине")
+                quarantine_file(infected, reason=reason)
+                self.threat_found.emit(f"[!] {infected} ({reason}) -> в карантине")
             except OSError as e:
-                self.threat_found.emit(f"[!] {infected} -> не удалось изолировать: {e}")
+                self.threat_found.emit(f"[!] {infected} ({reason}) -> не удалось изолировать: {e}")
 
         self.scan_finished.emit(found, self.stop_event.is_set())
 
