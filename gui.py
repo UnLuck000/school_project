@@ -3,12 +3,13 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
-    QWidget,
+    QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+    QTabWidget, QToolTip, QVBoxLayout, QWidget,
 )
 
 from scanner.hashing import load_signatures
@@ -22,12 +23,30 @@ SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
 
 
+class ElidedTooltipDelegate(QStyledItemDelegate):
+    """Показывает всплывающую подсказку с полным текстом ячейки,
+    только если текст не помещается в столбец и обрезан многоточием."""
+
+    def helpEvent(self, event, view, option, index):
+        if event.type() == QEvent.Type.ToolTip:
+            text = index.data(Qt.ItemDataRole.DisplayRole)
+            if text:
+                text_width = QFontMetrics(option.font).horizontalAdvance(str(text))
+                # +10 пикселей на внутренние отступы ячейки
+                if text_width + 10 > option.rect.width():
+                    QToolTip.showText(event.globalPos(), str(text), view)
+                    return True
+            QToolTip.hideText()
+            return True
+        return super().helpEvent(event, view, option, index)
+
+
 class ScanWorker(QThread):
     """Сканирует папку в отдельном потоке и сообщает о ходе работы сигналами."""
-    file_checked = Signal(str)       # текущий файл (для строки состояния)
-    threat_found = Signal(str)       # строка для журнала
+    file_checked = Signal(str)
+    threat_found = Signal(str)
     error = Signal(str)
-    scan_finished = Signal(int, bool)  # найдено угроз, была ли остановка
+    scan_finished = Signal(int, bool)
 
     def __init__(self, root: str):
         super().__init__()
@@ -67,16 +86,26 @@ class ScanWorker(QThread):
                 quarantine_file(infected, reason=reason)
                 self.threat_found.emit(f"[!] {infected} ({reason}) -> в карантине")
             except OSError as e:
-                self.threat_found.emit(f"[!] {infected} ({reason}) -> не удалось изолировать: {e}")
+                self.threat_found.emit(
+                    f"[!] {infected} ({reason}) -> не удалось изолировать: {e}")
 
         self.scan_finished.emit(found, self.stop_event.is_set())
 
 
 class MainWindow(QMainWindow):
+    # заголовки и начальная ширина столбцов таблицы карантина
+    QUAR_COLUMNS = [
+        ("Дата", 140),
+        ("Исходный путь", 300),
+        ("Размер, КБ", 90),
+        ("SHA-256", 220),
+        ("Причина", 160),
+    ]
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Учебный антивирус")
-        self.resize(900, 560)
+        self.resize(1000, 560)
         self.worker: ScanWorker | None = None
 
         tabs = QTabWidget()
@@ -113,7 +142,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 1)  # 0..1 = пустая полоса, (0, 0) = бегущая
+        self.progress.setRange(0, 1)
         self.progress.setTextVisible(False)
         layout.addWidget(self.progress)
 
@@ -135,7 +164,7 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self.scan_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.progress.setRange(0, 0)  # бегущий индикатор
+        self.progress.setRange(0, 0)
 
         self.worker = ScanWorker(root)
         self.worker.file_checked.connect(
@@ -170,15 +199,26 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Дата", "Исходный путь", "Причина"])
+        self.table = QTableWidget(0, len(self.QUAR_COLUMNS))
+        self.table.setHorizontalHeaderLabels([name for name, _ in self.QUAR_COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)  # длинный текст -> "..."
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(0, 150)
-        self.table.setColumnWidth(2, 120)
+
+        # ширину каждого столбца можно менять перетаскиванием границы в заголовке
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(50)
+        for i, (_, width) in enumerate(self.QUAR_COLUMNS):
+            self.table.setColumnWidth(i, width)
+
+        # подсказка с полным текстом для обрезанных ячеек
+        self.table.setItemDelegate(ElidedTooltipDelegate(self.table))
+
         layout.addWidget(self.table)
 
         row = QHBoxLayout()
@@ -197,12 +237,21 @@ class MainWindow(QMainWindow):
         for m in list_quarantine():
             row = self.table.rowCount()
             self.table.insertRow(row)
+
+            size_kb = f"{m.get('size', 0) / 1024:,.1f}".replace(",", " ")
+            size_item = QTableWidgetItem(size_kb)
+            size_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
             date_item = QTableWidgetItem(m["quarantined_at"])
             # идентификатор элемента карантина прячем в данных ячейки
             date_item.setData(Qt.ItemDataRole.UserRole, m["id"])
+
             self.table.setItem(row, 0, date_item)
             self.table.setItem(row, 1, QTableWidgetItem(m["original_path"]))
-            self.table.setItem(row, 2, QTableWidgetItem(m["reason"]))
+            self.table.setItem(row, 2, size_item)
+            self.table.setItem(row, 3, QTableWidgetItem(m.get("sha256", "")))
+            self.table.setItem(row, 4, QTableWidgetItem(m["reason"]))
 
     def _selected_id(self) -> str | None:
         row = self.table.currentRow()
@@ -237,7 +286,6 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def closeEvent(self, event):
-        # корректно останавливаем поток, иначе Qt выдаст ошибку при выходе
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(5000)
