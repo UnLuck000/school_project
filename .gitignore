@@ -6,3 +6,6 @@ quarantine_data/
 test_samples/
 signatures/whitelist.json
 .pytest_cache/
+signatures/feeds/
+signatures/rules/community/
+signatures/.abusech_key

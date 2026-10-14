@@ -6,6 +6,15 @@ import yara
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # файлы больше 100 МБ пропускаем
 
+def _externals(path: Path | None = None) -> dict:
+    return {
+        "filename": path.name if path else "",
+        "filepath": str(path) if path else "",
+        "extension": path.suffix.lower() if path else "",
+        "filetype": "",
+        "owner": "",
+    }
+
 
 def load_rules(rules_dir: Path):
     """Компилирует все .yar/.yara из папки. Возвращает (rules | None, список ошибок).

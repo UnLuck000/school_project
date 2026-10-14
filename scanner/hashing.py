@@ -36,3 +36,15 @@ def scan_dir(root: Path, signatures: set[str], exclude: Path | None = None,
                 yield p
         except (PermissionError, OSError):
             continue
+
+def load_all_signatures(sig_dir: Path) -> set[str]:
+    """hashes.txt плюс все файлы из signatures/feeds/*.txt."""
+    sigs: set[str] = set()
+    main = sig_dir / "hashes.txt"
+    if main.exists():
+        sigs |= load_signatures(main)
+    feeds = sig_dir / "feeds"
+    if feeds.is_dir():
+        for f in feeds.glob("*.txt"):
+            sigs |= load_signatures(f)
+    return sigs

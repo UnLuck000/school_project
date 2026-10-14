@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from scanner.whitelist import load_whitelist, remove_from_whitelist
-from scanner.hashing import load_signatures
+from scanner.hashing import load_all_signatures
 from scanner.engine import scan_tree
 from scanner.yara_engine import load_rules
 from quarantine import (
@@ -66,7 +66,7 @@ class ScanWorker(QThread):
 
     def run(self):
         try:
-            sigs = load_signatures(SIGNATURES)
+            sigs = load_all_signatures(SIGNATURES.parent)
         except OSError as e:
             self.error.emit(f"Не удалось загрузить базу сигнатур: {e}")
             return
