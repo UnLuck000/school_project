@@ -2,7 +2,7 @@ from pathlib import Path
 from scanner.hashing import sha256_of
 from scanner.whitelist import load_whitelist, WHITELIST_FILE
 
-f = Path(r"C:/Users/vlsin/Desktop/folderF/PythonProjects/NewEra/myav/test_samples/eicar.exe")
+f = Path(r"/test_samples/eicar.exe")
 h = sha256_of(f)
 wl = load_whitelist()
 
