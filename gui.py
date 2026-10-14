@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
-    QTabWidget, QToolTip, QVBoxLayout, QWidget,
+    QTabWidget, QToolTip, QVBoxLayout, QWidget, QCheckBox
 )
 
 from scanner.whitelist import load_whitelist, remove_from_whitelist
@@ -90,7 +90,8 @@ class ScanWorker(QThread):
         for infected, reason in scan_tree(
                 Path(self.root), sigs, rules,
                 exclude=[QUARANTINE_DIR, RULES_DIR.resolve()],
-                on_file=on_file, stop=self.stop_event):
+                on_file=on_file, stop=self.stop_event,
+                whitelist=whitelist):
             found += 1
             try:
                 quarantine_file(infected, reason=reason)

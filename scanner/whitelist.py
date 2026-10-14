@@ -3,7 +3,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-WHITELIST_FILE = Path("signatures/whitelist.json")
+BASE_DIR = Path(__file__).resolve().parent.parent  # корень проекта
+WHITELIST_FILE = BASE_DIR / "signatures" / "whitelist.json"
 
 
 def load_whitelist() -> dict[str, dict]:
