@@ -4,3 +4,5 @@ __pycache__/
 .idea/
 quarantine_data/
 test_samples/
+signatures/whitelist.json
+.pytest_cache/
