@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
-    QTabWidget, QToolTip, QVBoxLayout, QWidget, QCheckBox
+    QTabWidget, QToolTip, QVBoxLayout, QWidget, QCheckBox, QLabel,
+    QListWidgetItem
 )
 
 from scanner.whitelist import load_whitelist, remove_from_whitelist
@@ -21,9 +22,13 @@ from quarantine import (
     QUARANTINE_DIR, STATUS_QUARANTINED, quarantine_file, list_quarantine, restore_file, delete_file,
 )
 from monitor import RealtimeMonitor
+from networkmonitor.connections import LEVEL_TEXT, terminate_process
+from networkmonitor.netmon import NetworkMonitor
+
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
+NETFEEDS_DIR = Path("signatures/netfeeds")
 ID_ROLE = Qt.ItemDataRole.UserRole
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
 STATUS_TEXT = {
@@ -32,6 +37,10 @@ STATUS_TEXT = {
     "deleted": "Удалено",
 }
 DEFAULT_WATCH = [str(Path.home() / "Downloads")]
+
+
+class NetBridge(QObject):
+    event = Signal(str, object)
 
 
 class MonitorBridge(QObject):
@@ -131,10 +140,15 @@ class MainWindow(QMainWindow):
         self.monitor: RealtimeMonitor | None = None
         self.bridge = MonitorBridge()
         self.bridge.event.connect(self.on_monitor_event)
+        self.net_monitor: NetworkMonitor | None = None
+        self.net_alerts: list = []  # порядок совпадает со строками таблицы
+        self.net_bridge = NetBridge()
+        self.net_bridge.event.connect(self.on_net_event)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_scan_tab(), "Сканирование")
         tabs.addTab(self._build_protection_tab(), "Защита")
+        tabs.addTab(self._build_network_tab(), "Сеть")
         tabs.addTab(self._build_quarantine_tab(), "Карантин")
         tabs.addTab(self._build_whitelist_tab(), "Белый список")
         self.setCentralWidget(tabs)
@@ -142,6 +156,113 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
+
+    # ---------- вкладка «Сеть» ----------
+    NET_COLUMNS = [("Время", 70), ("Уровень", 100), ("Процесс", 130), ("PID", 60),
+                   ("Адрес", 160), ("Правило", 80), ("Подробности", 420)]
+
+    def _build_network_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        row = QHBoxLayout()
+        self.net_btn = QPushButton("Включить мониторинг сети")
+        self.net_btn.clicked.connect(self.toggle_network)
+        kill_btn = QPushButton("Завершить процесс")
+        kill_btn.clicked.connect(self.kill_selected_process)
+        clear_btn = QPushButton("Очистить")
+        clear_btn.clicked.connect(self.clear_net_alerts)
+        for w in (self.net_btn, kill_btn, clear_btn):
+            row.addWidget(w)
+        row.addStretch()
+        layout.addLayout(row)
+
+        self.net_status = QLabel("Мониторинг сети выключен")
+        layout.addWidget(self.net_status)
+
+        self.net_table = QTableWidget(0, len(self.NET_COLUMNS))
+        self.net_table.setHorizontalHeaderLabels([n for n, _ in self.NET_COLUMNS])
+        self.net_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.net_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.net_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.net_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.net_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.net_table.verticalHeader().setVisible(False)
+        header = self.net_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(50)
+        for i, (_, width) in enumerate(self.NET_COLUMNS):
+            self.net_table.setColumnWidth(i, width)
+        self.net_table.setItemDelegate(ElidedTooltipDelegate(self.net_table))
+        layout.addWidget(self.net_table)
+        return tab
+
+    def toggle_network(self):
+        if self.net_monitor is not None:
+            self.net_btn.setEnabled(False)
+            self.net_monitor.stop()
+            self._net_stopped()
+            return
+        self.net_monitor = NetworkMonitor(
+            sig_dir=SIGNATURES.parent, rules_dir=RULES_DIR, netfeeds_dir=NETFEEDS_DIR,
+            on_event=lambda kind, payload: self.net_bridge.event.emit(kind, payload),
+        )
+        self.net_monitor.start()
+        self.net_btn.setText("Выключить мониторинг сети")
+        self.net_status.setText("Запускаю...")
+
+    def _net_stopped(self):
+        self.net_monitor = None
+        self.net_btn.setEnabled(True)
+        self.net_btn.setText("Включить мониторинг сети")
+        self.net_status.setText("Мониторинг сети выключен")
+
+    def on_net_event(self, kind: str, payload):
+        if kind == "status":
+            self.net_status.setText(payload)
+        elif kind == "error":
+            self.net_status.setText(f"Ошибка: {payload}")
+        elif kind == "stopped":
+            self._net_stopped()
+        elif kind == "alert":
+            self._add_net_alert(payload)
+
+    def _add_net_alert(self, a):
+        row = self.net_table.rowCount()
+        self.net_table.insertRow(row)
+        values = [a.time, LEVEL_TEXT.get(a.level, a.level), a.name, str(a.pid),
+                  a.remote, a.rule, a.detail]
+        color = QColor("red") if a.level == "critical" else QColor("darkorange")
+        for col, text in enumerate(values):
+            item = QTableWidgetItem(text)
+            item.setForeground(QBrush(color))
+            self.net_table.setItem(row, col, item)
+        self.net_alerts.append(a)
+        if len(self.net_alerts) > 500:  # таблица и список обрезаются синхронно
+            self.net_table.removeRow(0)
+            self.net_alerts.pop(0)
+        self.net_table.scrollToBottom()
+        self.statusBar().showMessage(f"[Сеть] {a.name}: {a.detail}")
+
+    def kill_selected_process(self):
+        row = self.net_table.currentRow()
+        if row < 0 or row >= len(self.net_alerts):
+            QMessageBox.information(self, "Сеть", "Сначала выберите строку в списке")
+            return
+        alert = self.net_alerts[row]
+        answer = QMessageBox.question(
+            self, "Завершить процесс",
+            f"Завершить {alert.name} (PID {alert.pid})?\n\n{alert.exe or 'путь неизвестен'}\n\n"
+            "Несохранённые данные программы будут потеряны.")
+        if answer == QMessageBox.StandardButton.Yes:
+            message = terminate_process(alert)
+            self.statusBar().showMessage(message)
+            QMessageBox.information(self, "Сеть", message)
+
+    def clear_net_alerts(self):
+        self.net_table.setRowCount(0)
+        self.net_alerts.clear()
 
     # ---------- вкладка «Защита» (мониторинг) ----------
     def _build_protection_tab(self) -> QWidget:
@@ -515,6 +636,8 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def closeEvent(self, event):
+        if self.net_monitor is not None:
+            self.net_monitor.stop()
         if self.monitor is not None:
             self.monitor.stop()
         if self.worker and self.worker.isRunning():

@@ -5,6 +5,7 @@ import sys
 import urllib.request
 import zipfile
 from pathlib import Path
+import ipaddress
 
 BASE_DIR = Path(__file__).resolve().parent
 FEEDS_DIR = BASE_DIR / "signatures" / "feeds"
@@ -14,6 +15,34 @@ KEY_FILE = BASE_DIR / "signatures" / ".abusech_key"
 SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
 MB_URL = "https://mb-api.abuse.ch/v2/files/exports/{key}/{name}"
 RULES_ZIP = "https://github.com/Neo23x0/signature-base/archive/refs/heads/master.zip"
+NETFEEDS_DIR = BASE_DIR / "signatures" / "netfeeds"
+FEODO_URL = "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"
+
+
+def update_ips() -> None:
+    try:
+        text = _download(FEODO_URL).decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"Не удалось скачать список C2: {type(e).__name__}: {e}")
+        return
+    if "Feodo Tracker" not in text:  # защита: пришла не та страница
+        print("Неожиданный ответ сервера, файл не изменён")
+        return
+
+    ips = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            ips.add(str(ipaddress.ip_address(line)))
+        except ValueError:
+            continue
+
+    NETFEEDS_DIR.mkdir(parents=True, exist_ok=True)
+    (NETFEEDS_DIR / "feodo.txt").write_text(
+        "# Feodo Tracker (abuse.ch)\n" + "\n".join(sorted(ips)) + "\n", encoding="utf-8")
+    print(f"Адреса C2: {len(ips)} -> {NETFEEDS_DIR / 'feodo.txt'}")
 
 
 def _download(url: str, timeout: int = 120) -> bytes:
@@ -88,3 +117,5 @@ if __name__ == "__main__":
         update_hashes(sys.argv[2] if len(sys.argv) > 2 else "recent.csv")
     if what in ("all", "rules"):
         update_rules()
+    if what in ("all", "ips"):
+        update_ips()

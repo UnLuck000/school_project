@@ -10,3 +10,5 @@ signatures/feeds/
 signatures/rules/community/
 signatures/.abusech_key
 .abusech_key
+signatures/netfeeds/
+signatures/netfeeds/feodo.txt
