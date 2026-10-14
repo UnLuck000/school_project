@@ -2,8 +2,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+import json
 
-from PySide6.QtCore import QEvent, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings
 from PySide6.QtGui import QFontMetrics, QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
@@ -19,6 +20,7 @@ from scanner.yara_engine import load_rules
 from quarantine import (
     QUARANTINE_DIR, STATUS_QUARANTINED, quarantine_file, list_quarantine, restore_file, delete_file,
 )
+from monitor import RealtimeMonitor
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
@@ -29,6 +31,12 @@ STATUS_TEXT = {
     "restored": "Восстановлено",
     "deleted": "Удалено",
 }
+DEFAULT_WATCH = [str(Path.home() / "Downloads")]
+
+
+class MonitorBridge(QObject):
+    """Передаёт события из потока монитора в главный поток."""
+    event = Signal(str, str)
 
 
 class ElidedTooltipDelegate(QStyledItemDelegate):
@@ -119,9 +127,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Учебный антивирус")
         self.resize(1000, 560)
         self.worker: ScanWorker | None = None
+        self.settings = QSettings("StudyAV", "myav")
+        self.monitor: RealtimeMonitor | None = None
+        self.bridge = MonitorBridge()
+        self.bridge.event.connect(self.on_monitor_event)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_scan_tab(), "Сканирование")
+        tabs.addTab(self._build_protection_tab(), "Защита")
         tabs.addTab(self._build_quarantine_tab(), "Карантин")
         tabs.addTab(self._build_whitelist_tab(), "Белый список")
         self.setCentralWidget(tabs)
@@ -129,6 +142,118 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
+
+    # ---------- вкладка «Защита» (мониторинг) ----------
+    def _build_protection_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        layout.addWidget(QLabel("Папки под наблюдением:"))
+        self.watch_list = QListWidget()
+        self.watch_list.setMaximumHeight(120)
+        for folder in self._load_watch_folders():
+            self.watch_list.addItem(folder)
+        layout.addWidget(self.watch_list)
+
+        row = QHBoxLayout()
+        self.watch_add_btn = QPushButton("Добавить папку...")
+        self.watch_add_btn.clicked.connect(self.add_watch_folder)
+        self.watch_remove_btn = QPushButton("Убрать выбранную")
+        self.watch_remove_btn.clicked.connect(self.remove_watch_folder)
+        self.protect_btn = QPushButton("Включить защиту")
+        self.protect_btn.clicked.connect(self.toggle_protection)
+        row.addWidget(self.watch_add_btn)
+        row.addWidget(self.watch_remove_btn)
+        row.addStretch()
+        row.addWidget(self.protect_btn)
+        layout.addLayout(row)
+
+        self.protect_status = QLabel("Защита выключена")
+        layout.addWidget(self.protect_status)
+
+        self.protect_log = QListWidget()
+        layout.addWidget(self.protect_log)
+        return tab
+
+    def _load_watch_folders(self) -> list[str]:
+        raw = self.settings.value("monitor/folders", None)
+        if raw:
+            try:
+                folders = json.loads(raw)
+                if isinstance(folders, list):
+                    return [str(f) for f in folders]
+            except (TypeError, ValueError):
+                pass
+        return list(DEFAULT_WATCH)
+
+    def _save_watch_folders(self):
+        folders = [self.watch_list.item(i).text() for i in range(self.watch_list.count())]
+        self.settings.setValue("monitor/folders", json.dumps(folders, ensure_ascii=False))
+
+    def add_watch_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Папка для наблюдения")
+        if folder and not self.watch_list.findItems(folder, Qt.MatchFlag.MatchExactly):
+            self.watch_list.addItem(folder)
+            self._save_watch_folders()
+
+    def remove_watch_folder(self):
+        row = self.watch_list.currentRow()
+        if row >= 0:
+            self.watch_list.takeItem(row)
+            self._save_watch_folders()
+
+    def toggle_protection(self):
+        if self.monitor is not None:
+            self.protect_btn.setEnabled(False)
+            self.monitor.stop()
+            self._protection_stopped()
+            return
+
+        folders = [self.watch_list.item(i).text() for i in range(self.watch_list.count())]
+        if not folders:
+            QMessageBox.warning(self, "Защита", "Добавьте хотя бы одну папку")
+            return
+
+        self.monitor = RealtimeMonitor(
+            folders,
+            sig_dir=SIGNATURES.parent,
+            rules_dir=RULES_DIR,
+            exclude=[QUARANTINE_DIR, SIGNATURES.parent.resolve()],
+            on_event=lambda kind, text: self.bridge.event.emit(kind, text),
+        )
+        self.monitor.start()
+        self._set_protection_ui(True)
+
+    def _set_protection_ui(self, running: bool):
+        self.protect_btn.setEnabled(True)
+        self.protect_btn.setText("Выключить защиту" if running else "Включить защиту")
+        for w in (self.watch_list, self.watch_add_btn, self.watch_remove_btn):
+            w.setEnabled(not running)
+        self.protect_status.setText("Запускаю..." if running else "Защита выключена")
+
+    def _protection_stopped(self):
+        self.monitor = None
+        self._set_protection_ui(False)
+
+    def on_monitor_event(self, kind: str, text: str):
+        if kind == "status":
+            self.protect_status.setText(text)
+            return
+        if kind == "stopped":
+            self._protection_stopped()
+            return
+        if kind == "threat":
+            self.refresh_quarantine()
+            self.statusBar().showMessage(text)
+
+        item = QListWidgetItem(f"{time.strftime('%H:%M:%S')}  {text}")
+        color = {"threat": "red", "error": "darkorange", "scanned": "gray"}.get(kind)
+        if color:
+            item.setForeground(QBrush(QColor(color)))
+        self.protect_log.addItem(item)
+        if self.protect_log.count() > 500:  # журнал не растёт бесконечно
+            self.protect_log.takeItem(0)
+        self.protect_log.scrollToBottom()
 
     # ---------- вкладка «Белый список» ----------
     def _build_whitelist_tab(self) -> QWidget:
@@ -390,6 +515,8 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def closeEvent(self, event):
+        if self.monitor is not None:
+            self.monitor.stop()
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(5000)

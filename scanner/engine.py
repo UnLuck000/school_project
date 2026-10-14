@@ -37,3 +37,19 @@ def scan_tree(root: Path, signatures: set[str], rules=None,
                     yield p, "YARA: " + ", ".join(names)
         except (PermissionError, OSError):
             continue
+
+
+def check_file(p: Path, signatures: set[str], rules=None,
+               whitelist: set[str] | None = None) -> str | None:
+    """Возвращает причину обнаружения или None, если файл чистый.
+    Может бросить OSError, если файл нельзя прочитать."""
+    digest = sha256_of(p)
+    if whitelist and digest in whitelist:
+        return None
+    if digest in signatures:
+        return "hash match"
+    if rules is not None:
+        names = match_file(rules, p)
+        if names:
+            return "YARA: " + ", ".join(names)
+    return None
