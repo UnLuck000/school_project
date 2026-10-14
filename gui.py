@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, Signal
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QFontMetrics, QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
@@ -12,15 +12,23 @@ from PySide6.QtWidgets import (
     QTabWidget, QToolTip, QVBoxLayout, QWidget,
 )
 
+from scanner.whitelist import load_whitelist, remove_from_whitelist
 from scanner.hashing import load_signatures
 from scanner.engine import scan_tree
 from scanner.yara_engine import load_rules
 from quarantine import (
-    QUARANTINE_DIR, quarantine_file, list_quarantine, restore_file, delete_file,
+    QUARANTINE_DIR, STATUS_QUARANTINED, quarantine_file, list_quarantine, restore_file, delete_file,
 )
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
+ID_ROLE = Qt.ItemDataRole.UserRole
+STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
+STATUS_TEXT = {
+    "quarantined": "В карантине",
+    "restored": "Восстановлено",
+    "deleted": "Удалено",
+}
 
 
 class ElidedTooltipDelegate(QStyledItemDelegate):
@@ -76,6 +84,8 @@ class ScanWorker(QThread):
                 last_emit = now
                 self.file_checked.emit(str(path))
 
+        whitelist = set(load_whitelist())
+
         found = 0
         for infected, reason in scan_tree(
                 Path(self.root), sigs, rules,
@@ -99,6 +109,7 @@ class MainWindow(QMainWindow):
         ("Исходный путь", 300),
         ("Размер, КБ", 90),
         ("SHA-256", 220),
+        ("Статус", 110),
         ("Причина", 160),
     ]
 
@@ -111,10 +122,72 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._build_scan_tab(), "Сканирование")
         tabs.addTab(self._build_quarantine_tab(), "Карантин")
+        tabs.addTab(self._build_whitelist_tab(), "Белый список")
         self.setCentralWidget(tabs)
 
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
+        self.refresh_whitelist()
+
+    # ---------- вкладка «Белый список» ----------
+    def _build_whitelist_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.wl_table = QTableWidget(0, 3)
+        self.wl_table.setHorizontalHeaderLabels(["Дата", "Путь при восстановлении", "SHA-256"])
+        self.wl_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.wl_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.wl_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.wl_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.wl_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.wl_table.verticalHeader().setVisible(False)
+
+        header = self.wl_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(50)
+        for i, width in enumerate((140, 380, 300)):
+            self.wl_table.setColumnWidth(i, width)
+
+        self.wl_table.setItemDelegate(ElidedTooltipDelegate(self.wl_table))
+        layout.addWidget(self.wl_table)
+
+        row = QHBoxLayout()
+        remove_btn = QPushButton("Убрать из белого списка")
+        remove_btn.clicked.connect(self.remove_from_wl)
+        row.addWidget(remove_btn)
+        row.addStretch()
+        layout.addLayout(row)
+        return tab
+
+    def refresh_whitelist(self):
+        self.wl_table.setRowCount(0)
+        entries = sorted(load_whitelist().items(), key=lambda kv: kv[1].get("added_at", ""))
+        for sha, info in entries:
+            row = self.wl_table.rowCount()
+            self.wl_table.insertRow(row)
+            self.wl_table.setItem(row, 0, QTableWidgetItem(info.get("added_at", "")))
+            self.wl_table.setItem(row, 1, QTableWidgetItem(info.get("path", "")))
+            self.wl_table.setItem(row, 2, QTableWidgetItem(sha))
+
+    def remove_from_wl(self):
+        row = self.wl_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Белый список", "Сначала выберите запись в списке")
+            return
+        sha = self.wl_table.item(row, 2).text()
+        answer = QMessageBox.question(
+            self, "Белый список",
+            "Файл с этим хэшем снова будет проверяться сканером. Продолжить?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            remove_from_whitelist(sha)
+            self.statusBar().showMessage("Хэш убран из белого списка")
+        except OSError as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+        self.refresh_whitelist()
 
     # ---------- вкладка «Сканирование» ----------
     def _build_scan_tab(self) -> QWidget:
@@ -205,10 +278,9 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)  # длинный текст -> "..."
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table.verticalHeader().setVisible(False)
 
-        # ширину каждого столбца можно менять перетаскиванием границы в заголовке
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
@@ -216,9 +288,7 @@ class MainWindow(QMainWindow):
         for i, (_, width) in enumerate(self.QUAR_COLUMNS):
             self.table.setColumnWidth(i, width)
 
-        # подсказка с полным текстом для обрезанных ячеек
         self.table.setItemDelegate(ElidedTooltipDelegate(self.table))
-
         layout.addWidget(self.table)
 
         row = QHBoxLayout()
@@ -228,61 +298,94 @@ class MainWindow(QMainWindow):
             btn = QPushButton(text)
             btn.clicked.connect(handler)
             row.addWidget(btn)
+
+        self.history_cb = QCheckBox("Показывать историю")
+        self.history_cb.setToolTip("Восстановленные и удалённые файлы")
+        self.history_cb.toggled.connect(lambda _: self.refresh_quarantine())
+        row.addWidget(self.history_cb)
         row.addStretch()
         layout.addLayout(row)
         return tab
 
     def refresh_quarantine(self):
         self.table.setRowCount(0)
-        for m in list_quarantine():
+        for m in list_quarantine(include_history=self.history_cb.isChecked()):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            size_kb = f"{m.get('size', 0) / 1024:,.1f}".replace(",", " ")
+            size_bytes = int(m.get("size", 0))
+            size_kb = f"{size_bytes / 1024:,.1f}".replace(",", " ")
             size_item = QTableWidgetItem(size_kb)
             size_item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
+            status = m["status"]
             date_item = QTableWidgetItem(m["quarantined_at"])
-            # идентификатор элемента карантина прячем в данных ячейки
-            date_item.setData(Qt.ItemDataRole.UserRole, m["id"])
+            date_item.setData(ID_ROLE, m["id"])
+            date_item.setData(STATUS_ROLE, status)
 
-            self.table.setItem(row, 0, date_item)
-            self.table.setItem(row, 1, QTableWidgetItem(m["original_path"]))
-            self.table.setItem(row, 2, size_item)
-            self.table.setItem(row, 3, QTableWidgetItem(m.get("sha256", "")))
-            self.table.setItem(row, 4, QTableWidgetItem(m["reason"]))
+            items = [
+                date_item,
+                QTableWidgetItem(m["original_path"]),
+                size_item,
+                QTableWidgetItem(m.get("sha256", "")),
+                QTableWidgetItem(STATUS_TEXT.get(status, status)),
+                QTableWidgetItem(m["reason"]),
+            ]
+            for col, item in enumerate(items):
+                if status != STATUS_QUARANTINED:  # записи истории выделяем серым
+                    item.setForeground(QBrush(QColor("gray")))
+                self.table.setItem(row, col, item)
 
     def _selected_id(self) -> str | None:
         row = self.table.currentRow()
         if row < 0:
             QMessageBox.information(self, "Карантин", "Сначала выберите элемент в списке")
             return None
-        return self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        cell = self.table.item(row, 0)
+        if cell.data(STATUS_ROLE) != STATUS_QUARANTINED:
+            QMessageBox.information(
+                self, "Карантин", "Это запись из истории: файл уже восстановлен или удалён")
+            return None
+        return cell.data(ID_ROLE)
 
     def restore_selected(self):
         item_id = self._selected_id()
         if not item_id:
             return
-        answer = QMessageBox.question(self, "Восстановление",
-                                      "Вернуть файл на исходное место?")
+        answer = QMessageBox.question(
+            self, "Восстановление",
+            "Вернуть файл на исходное место?\n\n"
+            "Его SHA-256 будет добавлен в белый список, и сканер не будет "
+            "считать этот файл угрозой, пока его содержимое не изменится.")
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
             dest = restore_file(item_id)
-            self.statusBar().showMessage(f"Восстановлен: {dest}")
+            self.statusBar().showMessage(f"Восстановлен: {dest} (добавлен в белый список)")
         except (FileExistsError, ValueError, OSError) as e:
             QMessageBox.critical(self, "Ошибка восстановления", str(e))
         self.refresh_quarantine()
+        self.refresh_whitelist()
 
     def delete_selected(self):
         item_id = self._selected_id()
         if not item_id:
             return
-        answer = QMessageBox.question(self, "Удаление", "Удалить файл безвозвратно?")
-        if answer == QMessageBox.StandardButton.Yes:
-            delete_file(item_id)
-            self.refresh_quarantine()
+        answer = QMessageBox.question(
+            self, "Удаление",
+            "Файл будет удалён безвозвратно, а его SHA-256 добавлен в "
+            "базу сигнатур (signatures/hashes.txt). Продолжить?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            added = delete_file(item_id)
+            self.statusBar().showMessage(
+                "Файл удалён, хэш добавлен в базу сигнатур" if added
+                else "Файл удалён, хэш уже был в базе сигнатур")
+        except (ValueError, OSError) as e:
+            QMessageBox.critical(self, "Ошибка удаления", str(e))
+        self.refresh_quarantine()
 
     # ---------- закрытие окна ----------
     def closeEvent(self, event):

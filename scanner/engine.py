@@ -5,9 +5,11 @@ from scanner.yara_engine import match_file
 
 
 def scan_tree(root: Path, signatures: set[str], rules=None,
-              exclude: list[Path] | None = None, on_file=None, stop=None):
+              exclude: list[Path] | None = None, on_file=None, stop=None,
+              whitelist: set[str] | None = None):
     """Обходит папку и выдаёт пары (путь, причина) для подозрительных файлов."""
     excluded = [e.resolve() for e in (exclude or [])]
+    whitelist = whitelist or set()
 
     for p in root.rglob("*"):
         if stop is not None and stop.is_set():
@@ -21,9 +23,13 @@ def scan_tree(root: Path, signatures: set[str], rules=None,
             if on_file:
                 on_file(p)
 
-            if sha256_of(p) in signatures:
+            digest = sha256_of(p)
+            if digest in whitelist:
+                continue  # пользователь сам восстановил этот файл
+
+            if digest in signatures:
                 yield p, "hash match"
-                continue  # уже нашли, YARA не нужна
+                continue
 
             if rules is not None:
                 names = match_file(rules, p)
