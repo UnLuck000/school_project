@@ -4,5 +4,5 @@ psutil~=7.2.2
 yara-python~=4.5.4
 watchdog~=6.0.0
 scapy~=2.7.0
-pefile
-pytest
+pefile~=2024.8.26
+pytest~=9.1.1

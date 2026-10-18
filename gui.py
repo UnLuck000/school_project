@@ -643,7 +643,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            added = delete_file(item_id)a
+            added = delete_file(item_id)
             self.statusBar().showMessage(
                 "Файл удалён, хэш добавлен в базу сигнатур" if added
                 else "Файл удалён, хэш уже был в базе сигнатур")
