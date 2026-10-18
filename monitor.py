@@ -98,13 +98,11 @@ class RealtimeMonitor:
         self._emit("status", "Загружаю базы сигнатур и правила...")
         try:
             self._signatures = load_all_signatures(self.sig_dir)
-            self._rules, rule_errors = load_rules(self.rules_dir)
+            self._rules, _ = load_rules(self.rules_dir)
         except Exception as e:
             self._emit("error", f"Не удалось загрузить базы: {e}")
             self._emit("stopped")
             return
-        if rule_errors:
-            self._emit("error", f"Правил пропущено из-за ошибок: {len(rule_errors)}")
 
         observer = Observer()
         handler = _Handler(self._enqueue)

@@ -8,6 +8,7 @@ from scanner.engine import check_file
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
 from scanner.yara_engine import load_rules
+from scanner.signature import describe, inspect_signature
 
 
 class NetworkMonitor:
@@ -31,6 +32,7 @@ class NetworkMonitor:
         self._rules = None
         self._reported: set[tuple] = set()
         self._verdicts: dict[tuple, str] = {}
+        self._sigs: dict[tuple, str] = {}
 
     def start(self):
         self._stop.clear()
@@ -63,6 +65,21 @@ class NetworkMonitor:
             return ""
         self._verdicts[key] = reason
         return reason
+
+    def _signature_text(self, exe: str) -> str:
+        if not exe:
+            return ""
+        path = Path(exe)
+        try:
+            key = (exe, path.stat().st_mtime)
+        except OSError:
+            return ""
+        if key not in self._sigs:
+            try:
+                self._sigs[key] = describe(inspect_signature(path))
+            except Exception:
+                self._sigs[key] = ""
+        return self._sigs[key]
 
     def _run(self):
         self._emit("status", "Загружаю базы...")
@@ -98,6 +115,11 @@ class NetworkMonitor:
                         if verdict:
                             level = "critical"
                             detail += f"; файл программы распознан: {verdict}"
+
+                        sig_text = self._signature_text(c.exe)
+                        if sig_text:
+                            detail += f"; подпись: {sig_text}"
+
                         self._emit("alert", Alert(
                             time=time.strftime("%H:%M:%S"), level=level, rule=rule,
                             pid=c.pid, name=c.name, exe=c.exe,

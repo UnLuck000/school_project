@@ -88,9 +88,7 @@ class ScanWorker(QThread):
             self.error.emit(f"Не удалось загрузить базу сигнатур: {e}")
             return
 
-        rules, rule_errors = load_rules(RULES_DIR)
-        for err in rule_errors:
-            self.threat_found.emit(f"[YARA] правило пропущено: {err}")
+        rules, _ = load_rules(RULES_DIR)
 
         last_emit = 0.0
 
@@ -128,6 +126,9 @@ class MainWindow(QMainWindow):
         ("Размер, КБ", 90),
         ("SHA-256", 220),
         ("Статус", 110),
+        ("Причина", 160),
+        ("Статус", 110),
+        ("Подпись", 240),
         ("Причина", 160),
     ]
 
@@ -577,6 +578,7 @@ class MainWindow(QMainWindow):
                 size_item,
                 QTableWidgetItem(m.get("sha256", "")),
                 QTableWidgetItem(STATUS_TEXT.get(status, status)),
+                QTableWidgetItem(m.get("signature") or "—"),
                 QTableWidgetItem(m["reason"]),
             ]
             for col, item in enumerate(items):

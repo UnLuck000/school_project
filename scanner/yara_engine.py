@@ -4,7 +4,24 @@ from pathlib import Path
 
 import yara
 
+from datetime import datetime
+
+
+LOG_FILE = Path(__file__).resolve().parent.parent / "logs" / "yara_errors.log"
 MAX_FILE_SIZE = 100 * 1024 * 1024  # файлы больше 100 МБ пропускаем
+
+
+def _dump_errors(errors: list[str]) -> None:
+    """Пишет ошибки компиляции правил в лог-файл (перезаписывает при каждой загрузке)."""
+    if not errors:
+        return
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        header = f"# {datetime.now():%Y-%m-%d %H:%M:%S}, правил пропущено: {len(errors)}\n"
+        LOG_FILE.write_text(header + "\n".join(errors) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # лог не критичен
+
 
 def _externals(path: Path | None = None) -> dict:
     return {
@@ -33,6 +50,7 @@ def load_rules(rules_dir: Path):
             continue
         namespace = f"{i}_{re.sub(r'\W', '_', path.stem)}"
         sources[namespace] = str(path)
+    _dump_errors(errors)
 
     if not sources:
         return None, errors

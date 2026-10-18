@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scanner.hashing import sha256_of, load_signatures
 from scanner.whitelist import add_to_whitelist
+from scanner.signature import describe, inspect_signature
 
 QUARANTINE_DIR = Path("quarantine_data").resolve()
 SIGNATURES_FILE = Path("signatures/hashes.txt")
@@ -76,12 +77,15 @@ def quarantine_file(path: Path, reason: str) -> str:
         "size": path.stat().st_size,
         "reason": reason,
         "quarantined_at": _now(),
+        "signature": signature_text,
     }
 
     _write_meta(meta)
     try:
+        signature_text = describe(inspect_signature(path))
         shutil.move(str(path), _stored_path(item_id))
     except Exception:
+        signature_text = ""
         _meta_path(item_id).unlink(missing_ok=True)
         raise
     return item_id
