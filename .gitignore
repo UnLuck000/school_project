@@ -12,3 +12,6 @@ signatures/.abusech_key
 .abusech_key
 signatures/netfeeds/
 signatures/netfeeds/feodo.txt
+*.pyd
+build/
+*.egg-info/

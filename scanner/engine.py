@@ -1,15 +1,35 @@
 from pathlib import Path
 
 from scanner.hashing import sha256_of
+from scanner.heuristics import HEURISTIC_THRESHOLD, analyze_pe
 from scanner.yara_engine import match_file
+
+
+def check_file(p: Path, signatures: set[str], rules=None,
+               whitelist: set[str] | None = None, heuristics: bool = True) -> str | None:
+    """Возвращает причину обнаружения или None, если файл чистый.
+    Может бросить OSError, если файл нельзя прочитать."""
+    digest = sha256_of(p)
+    if whitelist and digest in whitelist:
+        return None
+    if digest in signatures:
+        return "hash match"
+    if rules is not None:
+        names = match_file(rules, p)
+        if names:
+            return "YARA: " + ", ".join(names)
+    if heuristics:
+        report = analyze_pe(p)
+        if report.score >= HEURISTIC_THRESHOLD:
+            return "Heuristic: " + report.summary()
+    return None
 
 
 def scan_tree(root: Path, signatures: set[str], rules=None,
               exclude: list[Path] | None = None, on_file=None, stop=None,
-              whitelist: set[str] | None = None):
+              whitelist: set[str] | None = None, heuristics: bool = True):
     """Обходит папку и выдаёт пары (путь, причина) для подозрительных файлов."""
     excluded = [e.resolve() for e in (exclude or [])]
-    whitelist = whitelist or set()
 
     for p in root.rglob("*"):
         if stop is not None and stop.is_set():
@@ -22,34 +42,8 @@ def scan_tree(root: Path, signatures: set[str], rules=None,
                 continue
             if on_file:
                 on_file(p)
-
-            digest = sha256_of(p)
-            if digest in whitelist:
-                continue  # пользователь сам восстановил этот файл
-
-            if digest in signatures:
-                yield p, "hash match"
-                continue
-
-            if rules is not None:
-                names = match_file(rules, p)
-                if names:
-                    yield p, "YARA: " + ", ".join(names)
+            reason = check_file(p, signatures, rules, whitelist, heuristics)
+            if reason:
+                yield p, reason
         except (PermissionError, OSError):
             continue
-
-
-def check_file(p: Path, signatures: set[str], rules=None,
-               whitelist: set[str] | None = None) -> str | None:
-    """Возвращает причину обнаружения или None, если файл чистый.
-    Может бросить OSError, если файл нельзя прочитать."""
-    digest = sha256_of(p)
-    if whitelist and digest in whitelist:
-        return None
-    if digest in signatures:
-        return "hash match"
-    if rules is not None:
-        names = match_file(rules, p)
-        if names:
-            return "YARA: " + ", ".join(names)
-    return None
