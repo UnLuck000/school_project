@@ -26,6 +26,7 @@ from networkmonitor.connections import LEVEL_TEXT, terminate_process
 from networkmonitor.netmon import NetworkMonitor
 
 from processmanager.window import ProcessWindow
+from processmanager.system import is_admin, relaunch_as_admin
 
 
 SIGNATURES = Path("signatures/hashes.txt")
@@ -153,6 +154,12 @@ class MainWindow(QMainWindow):
         pm_action = QAction("Диспетчер процессов...", self)
         pm_action.triggered.connect(self.open_process_manager)
         tools_menu.addAction(pm_action)
+
+        ask_action = QAction("Запрашивать права администратора при запуске", self)
+        ask_action.setCheckable(True)
+        ask_action.setChecked(not self.settings.value("admin/dont_ask", False, type=bool))
+        ask_action.toggled.connect(lambda on: self.settings.setValue("admin/dont_ask", not on))
+        tools_menu.addAction(ask_action)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_scan_tab(), "Сканирование")
@@ -666,8 +673,36 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def ask_for_admin() -> bool:
+    """Предлагает перезапуститься с правами администратора.
+    True, если новый процесс уже запущен и текущий нужно закрыть."""
+    if is_admin():
+        return False
+    settings = QSettings("StudyAV", "myav")
+    if settings.value("admin/dont_ask", False, type=bool):
+        return False
+
+    box = QMessageBox(
+        QMessageBox.Icon.Question, "Права администратора",
+        "Для проверки памяти системных процессов, управления чужими процессами и "
+        "полной работы диспетчера нужны права администратора.\n\n"
+        "Запустить программу от имени администратора?")
+    run_btn = box.addButton("Запустить от администратора", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("Продолжить без прав", QMessageBox.ButtonRole.RejectRole)
+    dont_ask = QCheckBox("Больше не спрашивать")
+    box.setCheckBox(dont_ask)
+    box.exec()
+
+    if dont_ask.isChecked():
+        settings.setValue("admin/dont_ask", True)
+    if box.clickedButton() is run_btn:
+        return relaunch_as_admin()  # False, если пользователь отклонил запрос UAC
+    return False
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    if ask_for_admin():
+        sys.exit(0)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

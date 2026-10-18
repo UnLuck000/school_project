@@ -1,15 +1,18 @@
 import os
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDialog, QHeaderView, QLabel,
-    QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QTextEdit,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QAbstractItemView, QApplication, QCheckBox, QDialog, QDockWidget, QHeaderView,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
+from processmanager.colors import BY_ID, CATEGORIES, classify, text_color
 from processmanager.memscan import MemResult, get_rules, scan_process
 from processmanager.system import (
     ProcInfo, enable_debug_privilege, is_admin, open_in_explorer,
@@ -17,14 +20,17 @@ from processmanager.system import (
 )
 from scanner.engine import check_file
 from scanner.hashing import load_all_signatures
+from scanner.heuristics import analyze_pe
 from scanner.signature import describe, inspect_signature
 from scanner.whitelist import load_whitelist
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
+SCAN_WORKERS = 4  # сколько процессов проверять одновременно (1 = последовательно)
 COLUMNS = ["Процесс", "PID", "CPU, %", "Память, МБ", "Пользователь",
            "Подпись", "Память (YARA)", "Путь"]
 KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 SORT_ROLE = Qt.ItemDataRole.UserRole + 2
+LOCKED_TIP = "Системный процесс: изменение запрещено"
 
 
 class Bridge(QObject):
@@ -64,7 +70,7 @@ class ProcessWindow(QMainWindow):
     def __init__(self):
         super().__init__()  # без родителя: отдельное окно
         self.setWindowTitle("Диспетчер процессов")
-        self.resize(1280, 680)
+        self.resize(1480, 700)
 
         self.bridge = Bridge()
         self.bridge.snapshot.connect(self.on_snapshot)
@@ -77,7 +83,9 @@ class ProcessWindow(QMainWindow):
         self.procs: dict[str, ProcInfo] = {}
         self.mem_results: dict[str, MemResult] = {}
         self._scan_matches: list[str] = []
-        self._sig_cache: dict[str, str] = {}
+        self._scan_started = 0.0
+        self._sig_cache: dict[str, tuple[str, str]] = {}
+        self._pe_cache: dict[str, tuple[bool, bool]] = {}
         self._stop_snapshots = threading.Event()
         self._snap_thread: threading.Thread | None = None
         self._scan_cancel = threading.Event()
@@ -93,28 +101,30 @@ class ProcessWindow(QMainWindow):
         toolbar = self.addToolBar("Действия")
         toolbar.setMovable(False)
         self.menu_actions: list[QAction | None] = []
+        self.actions: dict[str, QAction] = {}
         definitions = [
-            ("Завершить", lambda: self.do_action("terminate")),
-            ("Приостановить", lambda: self.do_action("suspend")),
-            ("Возобновить", lambda: self.do_action("resume")),
-            ("Папка файла", self.open_folder),
-            ("Свойства", self.show_properties),
+            ("terminate", "Завершить", lambda: self.do_action("terminate")),
+            ("suspend", "Приостановить", lambda: self.do_action("suspend")),
+            ("resume", "Возобновить", lambda: self.do_action("resume")),
+            ("folder", "Папка файла", self.open_folder),
+            ("props", "Свойства", self.show_properties),
             None,
-            ("Проверить файл", self.check_selected_file),
-            ("Сканировать память", self.scan_selected_memory),
-            ("Сканировать все процессы", self.scan_all_memory),
-            ("Остановить скан", self.cancel_scan),
+            ("check", "Проверить файл", self.check_selected_file),
+            ("scan", "Сканировать память", self.scan_selected_memory),
+            ("scan_all", "Сканировать все процессы", self.scan_all_memory),
+            ("cancel", "Остановить скан", self.cancel_scan),
         ]
         for d in definitions:
             if d is None:
                 toolbar.addSeparator()
                 self.menu_actions.append(None)
                 continue
-            text, handler = d
+            action_id, text, handler = d
             action = QAction(text, self)
             action.triggered.connect(lambda checked=False, h=handler: h())
             toolbar.addAction(action)
             self.menu_actions.append(action)
+            self.actions[action_id] = action
 
         self.community_cb = QCheckBox("Все правила (медленнее)")
         self.community_cb.setToolTip("Кроме правил для памяти использовать и правила для файлов")
@@ -122,7 +132,7 @@ class ProcessWindow(QMainWindow):
 
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Фильтр: имя, PID, путь...")
-        self.filter_edit.setMaximumWidth(240)
+        self.filter_edit.setMaximumWidth(220)
         self.filter_edit.textChanged.connect(lambda _: self._apply_filter())
         toolbar.addWidget(self.filter_edit)
 
@@ -144,7 +154,11 @@ class ProcessWindow(QMainWindow):
         self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_menu)
+        self.tree.itemSelectionChanged.connect(self._update_actions)
         self.setCentralWidget(self.tree)
+
+        self._build_legend(toolbar)
+        self._update_actions()
 
         if self.admin:
             state = "включена" if self.debug_priv else "не удалось включить"
@@ -153,28 +167,82 @@ class ProcessWindow(QMainWindow):
             text = "Без прав администратора: часть процессов недоступна"
         self.statusBar().addPermanentWidget(QLabel(text))
 
+    def _build_legend(self, toolbar):
+        """Панель справа: что означает каждый цвет."""
+        dock = QDockWidget("Легенда цветов", self)
+        dock.setMinimumWidth(320)
+        legend = QListWidget()
+        legend.setWordWrap(True)
+        legend.setSpacing(2)
+        legend.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        legend.addItem(QListWidgetItem(
+            "Цвет получает первое совпадение сверху вниз. "
+            "Строка, на которой стоит выделение, подсвечивается системным цветом."))
+        for category in CATEGORIES:
+            item = QListWidgetItem(f"{category.title}\n{category.description}")
+            item.setBackground(QBrush(QColor(*category.rgb)))
+            item.setForeground(QBrush(text_color(category.rgb)))
+            legend.addItem(item)
+        legend.addItem(QListWidgetItem(
+            "Защищённые процессы (System, System Idle Process, их потомки, ключевые процессы "
+            "Windows из System32 и процессы, помеченные Windows как критические): кнопки "
+            "«Завершить», «Приостановить» и «Возобновить» для них отключены."))
+        dock.setWidget(legend)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        toolbar.addSeparator()
+        toolbar.addAction(dock.toggleViewAction())  # кнопка показа и скрытия легенды
+
     def _show_menu(self, pos):
         menu = QMenu(self)
         for action in self.menu_actions:
             menu.addSeparator() if action is None else menu.addAction(action)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
+    def _current(self) -> ProcInfo | None:
+        selected = self.tree.selectedItems()
+        return self.procs.get(selected[0].data(0, KEY_ROLE)) if selected else None
+
+    def _update_actions(self):
+        """Кнопки, меняющие процесс, неактивны для защищённых процессов."""
+        p = self._current()
+        locked = p is not None and p.protected
+        for action_id, normal_tip in (("terminate", "Завершить процесс"),
+                                      ("suspend", "Приостановить процесс"),
+                                      ("resume", "Возобновить процесс")):
+            action = self.actions[action_id]
+            action.setEnabled(p is not None and not locked)
+            action.setToolTip(LOCKED_TIP if locked else normal_tip)
+        if locked:
+            self.statusBar().showMessage(
+                f"{p.name}: {LOCKED_TIP.lower()} (завершение и приостановка отключены)", 6000)
+
     # ---------- поток обновления списка ----------
     def _snapshot_loop(self):
         while not self._stop_snapshots.is_set():
             try:
                 procs = take_snapshot()
-                budget = 6  # подписи считаем постепенно, не больше 6 новых за цикл
+                sig_budget, pe_budget = 6, 3  # тяжёлые проверки распределяем по циклам
                 for p in procs:
                     if not p.exe:
                         continue
-                    if p.exe not in self._sig_cache and budget > 0:
-                        budget -= 1
+                    if p.exe not in self._sig_cache and sig_budget > 0:
+                        sig_budget -= 1
                         try:
-                            self._sig_cache[p.exe] = describe(inspect_signature(Path(p.exe))) or "—"
+                            info = inspect_signature(Path(p.exe))
+                            self._sig_cache[p.exe] = (describe(info) or "—", info.status)
                         except Exception:
-                            self._sig_cache[p.exe] = "—"
-                    p.sig = self._sig_cache.get(p.exe, "")
+                            self._sig_cache[p.exe] = ("—", "")
+                    if p.exe not in self._pe_cache and pe_budget > 0:
+                        pe_budget -= 1
+                        try:
+                            report = analyze_pe(Path(p.exe))
+                            packed = sum(f.points for f in report.findings
+                                         if f.category == "pack") >= 4
+                            self._pe_cache[p.exe] = (packed, report.dotnet)
+                        except Exception:
+                            self._pe_cache[p.exe] = (False, False)
+                    p.sig, p.sig_status = self._sig_cache.get(p.exe, ("", ""))
+                    p.packed, p.dotnet = self._pe_cache.get(p.exe, (False, False))
                 self.bridge.snapshot.emit(procs)
             except Exception:
                 pass
@@ -220,7 +288,7 @@ class ProcessWindow(QMainWindow):
                 p, item = current[key], self.items[key]
                 parent_key = by_pid.get(p.ppid)
                 parent = None
-                # родитель должен быть старше потомка: исключает циклы и повторное использование PID
+                # родитель должен быть старше потомка: исключает циклы и повтор PID
                 if parent_key and parent_key != key and current[parent_key].created < p.created:
                     parent = self.items.get(parent_key)
                 if parent is not None:
@@ -228,21 +296,21 @@ class ProcessWindow(QMainWindow):
                 else:
                     self.tree.addTopLevelItem(item)
             for key in new_keys:
-                item = self.items[key]
-                if item.childCount():
-                    item.setExpanded(True)
+                if self.items[key].childCount():
+                    self.items[key].setExpanded(True)
 
             for key, p in current.items():
                 self._fill(self.items[key], p)
             self._apply_filter()
         finally:
             self.tree.setSortingEnabled(True)
+        self._update_actions()
 
     def _remove_item(self, key: str):
         item = self.items.pop(key)
         self.mem_results.pop(key, None)
         for i in reversed(range(item.childCount())):
-            self.tree.addTopLevelItem(item.takeChild(i))  # потомки поднимаются на верхний уровень
+            self.tree.addTopLevelItem(item.takeChild(i))  # потомки поднимаются наверх
         parent = item.parent()
         if parent is not None:
             parent.removeChild(item)
@@ -264,13 +332,15 @@ class ProcessWindow(QMainWindow):
         for col in (4, 5, 6, 7):
             item.setToolTip(col, values[col])
 
-        color = None
-        if res and res.status == "match":
-            color = Qt.GlobalColor.red
-        elif "Недействительна" in p.sig:
-            color = Qt.GlobalColor.darkYellow
+        category = BY_ID.get(classify(p, bool(res and res.status == "match")))
+        item.setToolTip(0, category.title if category else "")
         for col in range(len(COLUMNS)):
-            item.setData(col, Qt.ItemDataRole.ForegroundRole, color)
+            if category:
+                item.setBackground(col, QBrush(QColor(*category.rgb)))
+                item.setForeground(col, QBrush(text_color(category.rgb)))
+            else:
+                item.setData(col, Qt.ItemDataRole.BackgroundRole, None)
+                item.setData(col, Qt.ItemDataRole.ForegroundRole, None)
 
     def _apply_filter(self):
         text = self.filter_edit.text().strip().lower()
@@ -291,15 +361,17 @@ class ProcessWindow(QMainWindow):
 
     # ---------- действия над процессом ----------
     def _selected(self) -> ProcInfo | None:
-        selected = self.tree.selectedItems()
-        if not selected:
+        p = self._current()
+        if p is None:
             QMessageBox.information(self, "Диспетчер процессов", "Сначала выберите процесс")
-            return None
-        return self.procs.get(selected[0].data(0, KEY_ROLE))
+        return p
 
     def do_action(self, action: str):
         p = self._selected()
         if not p:
+            return
+        if p.protected:  # кнопки уже отключены, это вторая линия защиты
+            self.statusBar().showMessage(LOCKED_TIP, 6000)
             return
         if action == "terminate":
             answer = QMessageBox.question(
@@ -308,7 +380,7 @@ class ProcessWindow(QMainWindow):
                 "Несохранённые данные программы будут потеряны.")
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self.statusBar().showMessage(run_action(action, p.pid, p.created), 8000)
+        self.statusBar().showMessage(run_action(action, p), 8000)
 
     def open_folder(self):
         p = self._selected()
@@ -377,7 +449,7 @@ class ProcessWindow(QMainWindow):
 
     def cancel_scan(self):
         self._scan_cancel.set()
-        self.statusBar().showMessage("Останавливаю после текущего процесса...")
+        self.statusBar().showMessage("Останавливаю после текущих процессов...")
 
     def _start_mem_scan(self, procs: list[ProcInfo]):
         if self._scan_thread is not None and self._scan_thread.is_alive():
@@ -385,6 +457,7 @@ class ProcessWindow(QMainWindow):
             return
         self._scan_cancel.clear()
         self._scan_matches = []
+        self._scan_started = time.monotonic()
         kind = "all" if self.community_cb.isChecked() else "memory"
         self._scan_thread = threading.Thread(
             target=self._mem_scan_loop, args=(list(procs), kind), daemon=True)
@@ -404,14 +477,23 @@ class ProcessWindow(QMainWindow):
                 "Нет ни одного рабочего правила. Проверьте signatures/rules/memory/")
             self.bridge.mem_done.emit(True)
             return
-        cancelled = False
-        for i, p in enumerate(procs, 1):
+
+        def work(p: ProcInfo):
             if self._scan_cancel.is_set():
-                cancelled = True
-                break
-            self.bridge.mem_progress.emit(f"Память: {i}/{len(procs)}  {p.name} (PID {p.pid})")
-            self.bridge.mem_result.emit(p.key, scan_process(rules, p.pid))
-        self.bridge.mem_done.emit(cancelled)
+                return p, None
+            return p, scan_process(rules, p.pid)
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+            futures = [pool.submit(work, p) for p in procs]
+            for future in as_completed(futures):
+                p, res = future.result()
+                if res is None:
+                    continue
+                done += 1
+                self.bridge.mem_progress.emit(f"Память: {done}/{len(procs)}  {p.name} (PID {p.pid})")
+                self.bridge.mem_result.emit(p.key, res)
+        self.bridge.mem_done.emit(self._scan_cancel.is_set())
 
     def on_mem_result(self, key: str, res: MemResult):
         self.mem_results[key] = res
@@ -422,8 +504,11 @@ class ProcessWindow(QMainWindow):
                 self._scan_matches.append(f"{p.name} (PID {p.pid}): {', '.join(res.matches)}")
 
     def on_mem_done(self, cancelled: bool):
+        elapsed = time.monotonic() - self._scan_started
         prefix = "Остановлено. " if cancelled else "Готово. "
-        self.statusBar().showMessage(f"{prefix}Совпадений в памяти: {len(self._scan_matches)}")
+        self.statusBar().showMessage(
+            f"{prefix}Совпадений в памяти: {len(self._scan_matches)}. "
+            f"Время: {elapsed:.1f} с (потоков: {SCAN_WORKERS})")
         if self._scan_matches:
             QMessageBox.warning(
                 self, "Сканирование памяти",

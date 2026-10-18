@@ -57,6 +57,7 @@ def combine(findings: list[Finding]) -> int:
 class PEReport:
     is_pe: bool = False
     findings: list[Finding] = field(default_factory=list)
+    dotnet: bool = False
 
     @property
     def score(self) -> int:
@@ -155,7 +156,8 @@ def analyze_pe(path: Path) -> PEReport:
                     findings += _entry_findings(pe)
                     findings += _import_findings(names, total)
                 findings += api_findings(names)
-                return PEReport(is_pe=True, findings=findings)
+                dotnet = "_corexemain" in names or "_cordllmain" in names
+                return PEReport(is_pe=True, findings=findings, dotnet=dotnet)
             finally:
                 pe.close()
     except Exception:  # битый или необычный файл не должен ронять сканирование
