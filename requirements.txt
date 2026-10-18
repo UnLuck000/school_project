@@ -5,3 +5,4 @@ yara-python~=4.5.4
 watchdog~=6.0.0
 scapy~=2.7.0
 pefile
+pytest

@@ -3,6 +3,7 @@ from pathlib import Path
 from scanner.hashing import sha256_of
 from scanner.heuristics import HEURISTIC_THRESHOLD, analyze_pe
 from scanner.yara_engine import match_file
+from scanner.signature import UNSIGNED, VALID, verify_signature
 
 
 def check_file(p: Path, signatures: set[str], rules=None,
@@ -21,7 +22,11 @@ def check_file(p: Path, signatures: set[str], rules=None,
     if heuristics:
         report = analyze_pe(p)
         if report.score >= HEURISTIC_THRESHOLD:
-            return "Heuristic: " + report.summary()
+            sig = verify_signature(p)
+            if sig == VALID:
+                return None  # подписан доверенным издателем: эвристику не применяем
+            note = {UNSIGNED: " [нет подписи]", "invalid": " [подпись недействительна]"}
+            return "Heuristic: " + report.summary() + note.get(sig, "")
     return None
 
 
