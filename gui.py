@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 
 from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings
-from PySide6.QtGui import QFontMetrics, QBrush, QColor
+from PySide6.QtGui import QFontMetrics, QBrush, QColor, QAction
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
@@ -24,6 +24,8 @@ from quarantine import (
 from monitor import RealtimeMonitor
 from networkmonitor.connections import LEVEL_TEXT, terminate_process
 from networkmonitor.netmon import NetworkMonitor
+
+from processmanager.window import ProcessWindow
 
 
 SIGNATURES = Path("signatures/hashes.txt")
@@ -145,6 +147,12 @@ class MainWindow(QMainWindow):
         self.net_alerts: list = []  # порядок совпадает со строками таблицы
         self.net_bridge = NetBridge()
         self.net_bridge.event.connect(self.on_net_event)
+        self.proc_window: ProcessWindow | None = None
+
+        tools_menu = self.menuBar().addMenu("Инструменты")
+        pm_action = QAction("Диспетчер процессов...", self)
+        pm_action.triggered.connect(self.open_process_manager)
+        tools_menu.addAction(pm_action)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_scan_tab(), "Сканирование")
@@ -157,6 +165,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
+
+    def open_process_manager(self):
+        if self.proc_window is None:
+            self.proc_window = ProcessWindow()
+        self.proc_window.show()
+        self.proc_window.raise_()
+        self.proc_window.activateWindow()
 
     # ---------- вкладка «Сеть» ----------
     NET_COLUMNS = [("Время", 70), ("Уровень", 100), ("Процесс", 130), ("PID", 60),
@@ -628,7 +643,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            added = delete_file(item_id)
+            added = delete_file(item_id)a
             self.statusBar().showMessage(
                 "Файл удалён, хэш добавлен в базу сигнатур" if added
                 else "Файл удалён, хэш уже был в базе сигнатур")
@@ -638,6 +653,9 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def closeEvent(self, event):
+        if self.proc_window is not None:
+            self.proc_window.shutdown()
+            self.proc_window.close()
         if self.net_monitor is not None:
             self.net_monitor.stop()
         if self.monitor is not None:
