@@ -11,6 +11,7 @@ import psutil
 
 from scanner.hashing import sha256_of
 from scanner.signature import describe, inspect_signature
+from processmanager.origin import assign_origins, load_autostart
 
 SYSTEM_ROOT = Path(os.environ.get("SystemRoot", r"C:\Windows"))
 ALLOWED_DIRS = {os.path.normcase(str(SYSTEM_ROOT / "System32")),
@@ -26,6 +27,8 @@ WATCHED_NAMES = CORE_NAMES | {"svchost.exe", "dllhost.exe", "conhost.exe", "task
 NO_EXE_SYSTEM = {"system", "system idle process", "registry",
                  "memory compression", "secure system"}
 SYSTEM_ACCOUNTS = ("NT AUTHORITY", "NT SERVICE", "WINDOW MANAGER", "FONT DRIVER HOST")
+LOLBINS = {"cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe",
+           "mshta.exe", "regsvr32.exe", "rundll32.exe", "certutil.exe", "bitsadmin.exe"}
 
 
 @dataclass
@@ -46,15 +49,22 @@ class ProcInfo:
     service: bool = False
     elevated: bool | None = None
     wow64: bool = False
-    critical: bool = False     # Windows пометила процесс критическим (его завершение = синий экран)
-    core: bool = False         # System, Idle, их потомки, ключевые процессы из System32
+    critical: bool = False     # Windows пометила процесс критическим (завершение = синий экран)
+    core: bool = False         # защищённый системный процесс
     masq: bool = False         # имя системного процесса, но файл не из System32
     sys_account: bool = False
     own: bool = False
+    protect_reason: str = ""
+    origin: str = "unknown"    # способ запуска (идентификатор из origin.ORIGINS)
 
     @property
     def key(self) -> str:
         return f"{self.pid}:{self.created:.3f}"  # один PID может повторяться
+
+    @property
+    def has_file(self) -> bool:
+        """Есть ли у процесса настоящий файл (у Registry и Memory Compression его нет)."""
+        return bool(self.exe) and os.path.isabs(self.exe)
 
     @property
     def protected(self) -> bool:
@@ -119,63 +129,83 @@ def query_flags(pid: int) -> tuple[bool | None, bool, bool]:
 
 
 _flags_cache: dict[str, tuple] = {}
-_svc_cache: tuple[float, set[int]] = (0.0, set())
+_svc_cache: tuple[float, set[int], int] = (-1e9, set(), 0)
+_auto_cache: tuple[float, tuple] = (-1e9, (set(), set()))
 
 
-def service_pids() -> set[int]:
-    """PID процессов, в которых работают службы Windows (обновляется раз в 15 секунд)."""
+def service_info() -> tuple[set[int], int]:
+    """(PID процессов со службами, PID службы «Планировщик заданий»); раз в 15 секунд."""
     global _svc_cache
     now = time.monotonic()
     if now - _svc_cache[0] < 15:
-        return _svc_cache[1]
+        return _svc_cache[1], _svc_cache[2]
     pids: set[int] = set()
+    schedule_pid = 0
     try:
         for service in psutil.win_service_iter():
             try:
                 pid = service.pid()
+                name = service.name()
             except psutil.Error:
                 continue
             if pid:
                 pids.add(pid)
+                if name == "Schedule":
+                    schedule_pid = pid
     except (AttributeError, psutil.Error, OSError):
         pass
-    _svc_cache = (now, pids)
-    return pids
+    _svc_cache = (now, pids, schedule_pid)
+    return pids, schedule_pid
+
+
+def autostart_info() -> tuple[set[str], set[str]]:
+    """Записи автозапуска из реестра и папок автозагрузки; раз в минуту."""
+    global _auto_cache
+    now = time.monotonic()
+    if now - _auto_cache[0] > 60:
+        _auto_cache = (now, load_autostart())
+    return _auto_cache[1]
 
 
 def mark_system(procs: list[ProcInfo]) -> None:
-    """Определяет защищённые процессы и маскировку под системные."""
+    """Определяет защищённые процессы (с причиной) и маскировку под системные."""
     by_pid = {p.pid: p for p in procs}
     for p in procs:
         name = p.name.lower()
-        if p.pid in (0, 4) or (not p.exe and name in NO_EXE_SYSTEM):
-            p.core = True
-        elif p.exe and name in WATCHED_NAMES:
-            folder = os.path.normcase(os.path.dirname(p.exe))
-            if folder in ALLOWED_DIRS:
-                if name in CORE_NAMES and folder == SYSTEM32:
-                    p.core = True
-            else:
-                p.masq = True  # имя системного, путь чужой
+        folder = os.path.normcase(os.path.dirname(p.exe)) if p.has_file else ""
+        if p.pid in (0, 4):
+            p.core, p.protect_reason = True, "System / System Idle Process"
+        elif name in NO_EXE_SYSTEM and not p.has_file:
+            p.core, p.protect_reason = True, "ядро Windows (процесс без файла)"
+        elif name in CORE_NAMES and folder == SYSTEM32:
+            p.core, p.protect_reason = True, "ключевой процесс Windows"
+        elif name in WATCHED_NAMES and p.has_file and folder not in ALLOWED_DIRS:
+            p.masq = True  # имя системного, путь чужой
+        elif name in WATCHED_NAMES and not p.has_file:
+            p.core, p.protect_reason = True, "имя системного процесса, путь недоступен"
+        elif p.sys_account and folder in ALLOWED_DIRS and name not in LOLBINS:
+            p.core, p.protect_reason = True, "компонент Windows от системной учётной записи"
+        if p.critical and not p.protect_reason:
+            p.protect_reason = "критический процесс Windows"
 
-    # потомки System (и Idle) по цепочке родителей; родитель должен быть старше потомка
+    # потомки System и Idle по цепочке родителей
     for p in procs:
-        if p.core:
+        if p.core or p.masq:
             continue
         node, hops = p, 0
         while hops < 50 and node.ppid in by_pid and node.ppid != node.pid:
             parent = by_pid[node.ppid]
+            if parent.pid in (0, 4):  # у System время создания условное: его не сравниваем
+                p.core, p.protect_reason = True, "потомок System"
+                break
             if parent.created > node.created:
                 break  # PID родителя уже занят другой программой
-            if parent.pid in (0, 4):
-                p.core = True
-                break
             node, hops = parent, hops + 1
 
 
 def take_snapshot() -> list[ProcInfo]:
     ncpu = psutil.cpu_count() or 1
-    services = service_pids()
+    services, schedule_pid = service_info()
     attrs = ["pid", "ppid", "name", "exe", "username", "memory_info",
              "cpu_percent", "create_time", "status"]
     procs: list[ProcInfo] = []
@@ -200,6 +230,7 @@ def take_snapshot() -> list[ProcInfo]:
     for key in [k for k in _flags_cache if k not in alive]:
         del _flags_cache[key]
     mark_system(procs)
+    assign_origins(procs, OWN_USER, autostart_info(), schedule_pid)
     return procs
 
 

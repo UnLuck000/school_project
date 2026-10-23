@@ -7,13 +7,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDialog, QDockWidget, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDockWidget,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
 from processmanager.colors import BY_ID, CATEGORIES, classify, text_color
 from processmanager.memscan import MemResult, get_rules, scan_process
+from processmanager.origin import FILTERS, HELP, ORIGINS
 from processmanager.system import (
     ProcInfo, enable_debug_privilege, is_admin, open_in_explorer,
     process_details, relaunch_as_admin, run_action, take_snapshot,
@@ -26,11 +27,14 @@ from scanner.whitelist import load_whitelist
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 SCAN_WORKERS = 4  # сколько процессов проверять одновременно (1 = последовательно)
-COLUMNS = ["Процесс", "PID", "CPU, %", "Память, МБ", "Пользователь",
+COLUMNS = ["Процесс", "PID", "CPU, %", "Память, МБ", "Пользователь", "Запуск",
            "Подпись", "Память (YARA)", "Путь"]
+DESC_FIRST = {2, 3}  # числовые колонки при первом клике сортируются по убыванию
 KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 SORT_ROLE = Qt.ItemDataRole.UserRole + 2
 LOCKED_TIP = "Системный процесс: изменение запрещено"
+ASC = Qt.SortOrder.AscendingOrder
+DESC = Qt.SortOrder.DescendingOrder
 
 
 class Bridge(QObject):
@@ -70,7 +74,7 @@ class ProcessWindow(QMainWindow):
     def __init__(self):
         super().__init__()  # без родителя: отдельное окно
         self.setWindowTitle("Диспетчер процессов")
-        self.resize(1480, 700)
+        self.resize(1500, 700)
 
         self.bridge = Bridge()
         self.bridge.snapshot.connect(self.on_snapshot)
@@ -82,6 +86,8 @@ class ProcessWindow(QMainWindow):
         self.items: dict[str, ProcItem] = {}
         self.procs: dict[str, ProcInfo] = {}
         self.mem_results: dict[str, MemResult] = {}
+        self._flat = False                  # плоский список (сортировка или фильтр запуска)
+        self._sort: tuple[int, Qt.SortOrder] | None = None  # None = дерево
         self._scan_matches: list[str] = []
         self._scan_started = 0.0
         self._sig_cache: dict[str, tuple[str, str]] = {}
@@ -130,9 +136,17 @@ class ProcessWindow(QMainWindow):
         self.community_cb.setToolTip("Кроме правил для памяти использовать и правила для файлов")
         toolbar.addWidget(self.community_cb)
 
+        self.origin_combo = QComboBox()
+        for title, _ in FILTERS:
+            self.origin_combo.addItem(title)
+        self.origin_combo.setToolTip(
+            "Показать процессы по способу запуска (список становится плоским)")
+        self.origin_combo.currentIndexChanged.connect(lambda _: self._on_origin_filter())
+        toolbar.addWidget(self.origin_combo)
+
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Фильтр: имя, PID, путь...")
-        self.filter_edit.setMaximumWidth(220)
+        self.filter_edit.setMaximumWidth(200)
         self.filter_edit.textChanged.connect(lambda _: self._apply_filter())
         toolbar.addWidget(self.filter_edit)
 
@@ -145,16 +159,18 @@ class ProcessWindow(QMainWindow):
         self.tree.setHeaderLabels(COLUMNS)
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setSortingEnabled(False)  # сортировкой управляем сами (дерево / плоский список)
         header = self.tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
-        for i, width in enumerate((260, 70, 70, 100, 170, 260, 200, 400)):
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(False)
+        header.sectionClicked.connect(self._on_header_clicked)
+        for i, width in enumerate((260, 70, 70, 100, 170, 210, 260, 200, 400)):
             self.tree.setColumnWidth(i, width)
-        self.tree.setSortingEnabled(True)
-        self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_menu)
-        self.tree.itemSelectionChanged.connect(self._update_actions)
+        self.tree.itemSelectionChanged.connect(lambda: self._update_actions(announce=True))
         self.setCentralWidget(self.tree)
 
         self._build_legend(toolbar)
@@ -168,25 +184,30 @@ class ProcessWindow(QMainWindow):
         self.statusBar().addPermanentWidget(QLabel(text))
 
     def _build_legend(self, toolbar):
-        """Панель справа: что означает каждый цвет."""
+        """Панель справа: цвета, способы запуска, защита."""
         dock = QDockWidget("Легенда цветов", self)
-        dock.setMinimumWidth(320)
+        dock.setMinimumWidth(340)
         legend = QListWidget()
         legend.setWordWrap(True)
         legend.setSpacing(2)
         legend.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         legend.addItem(QListWidgetItem(
-            "Цвет получает первое совпадение сверху вниз. "
-            "Строка, на которой стоит выделение, подсвечивается системным цветом."))
+            "ЦВЕТА. Цвет получает первое совпадение сверху вниз."))
         for category in CATEGORIES:
             item = QListWidgetItem(f"{category.title}\n{category.description}")
             item.setBackground(QBrush(QColor(*category.rgb)))
             item.setForeground(QBrush(text_color(category.rgb)))
             legend.addItem(item)
         legend.addItem(QListWidgetItem(
-            "Защищённые процессы (System, System Idle Process, их потомки, ключевые процессы "
-            "Windows из System32 и процессы, помеченные Windows как критические): кнопки "
-            "«Завершить», «Приостановить» и «Возобновить» для них отключены."))
+            "ЗАПУСК (колонка «Запуск»). Windows не хранит, как запущен процесс, поэтому "
+            "способ определяется по признакам; «вероятно» означает догадку."))
+        for origin_id, description in HELP:
+            legend.addItem(QListWidgetItem(f"{ORIGINS[origin_id]}\n{description}"))
+        legend.addItem(QListWidgetItem(
+            "ЗАЩИТА. Для защищённых процессов (System, System Idle Process, их потомки, "
+            "ядро и ключевые процессы Windows, компоненты Windows от системных учётных "
+            "записей, критические процессы) кнопки «Завершить», «Приостановить» и "
+            "«Возобновить» отключены. Причина указана в подсказке над именем процесса."))
         dock.setWidget(legend)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         toolbar.addSeparator()
@@ -202,19 +223,85 @@ class ProcessWindow(QMainWindow):
         selected = self.tree.selectedItems()
         return self.procs.get(selected[0].data(0, KEY_ROLE)) if selected else None
 
-    def _update_actions(self):
+    def _update_actions(self, announce: bool = False):
         """Кнопки, меняющие процесс, неактивны для защищённых процессов."""
         p = self._current()
         locked = p is not None and p.protected
+        reason = (p.protect_reason or "критический процесс Windows") if locked else ""
         for action_id, normal_tip in (("terminate", "Завершить процесс"),
                                       ("suspend", "Приостановить процесс"),
                                       ("resume", "Возобновить процесс")):
             action = self.actions[action_id]
             action.setEnabled(p is not None and not locked)
-            action.setToolTip(LOCKED_TIP if locked else normal_tip)
-        if locked:
+            action.setToolTip(f"{LOCKED_TIP} ({reason})" if locked else normal_tip)
+        if locked and announce:
             self.statusBar().showMessage(
-                f"{p.name}: {LOCKED_TIP.lower()} (завершение и приостановка отключены)", 6000)
+                f"{p.name}: защищён ({reason}). Завершение, приостановка и "
+                "возобновление отключены", 8000)
+
+    # ---------- сортировка и режим списка ----------
+    def _on_header_clicked(self, col: int):
+        """Первый клик: сортировка, второй: обратный порядок, третий: снова дерево."""
+        first = DESC if col in DESC_FIRST else ASC
+        second = ASC if first == DESC else DESC
+        if self._sort is None or self._sort[0] != col:
+            self._sort = (col, first)
+        elif self._sort[1] == first:
+            self._sort = (col, second)
+        else:
+            self._sort = None
+        self._update_layout()
+        if self._sort is None:
+            self.statusBar().showMessage("Сортировка выключена: показано дерево процессов", 5000)
+        else:
+            self.statusBar().showMessage(
+                "Плоский список. Повторный клик меняет направление, третий возвращает дерево",
+                7000)
+
+    def _on_origin_filter(self):
+        self._update_layout()
+        self._apply_filter()
+
+    def _origin_ids(self):
+        return FILTERS[self.origin_combo.currentIndex()][1]
+
+    def _update_layout(self):
+        want_flat = self._sort is not None or self._origin_ids() is not None
+        self._set_flat(want_flat)
+        self._resort()
+        self._apply_filter()
+
+    def _resort(self):
+        col, order = self._sort if self._sort else (0, ASC)  # дерево: по имени среди соседей
+        self.tree.sortItems(col, order)
+        self.tree.header().setSortIndicatorShown(self._sort is not None)
+
+    def _set_flat(self, flat: bool):
+        """Переключает между деревом и плоским списком, сохраняя выделение."""
+        if flat == self._flat:
+            return
+        selected = self._current()
+        self._flat = flat
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for item in self.items.values():  # отсоединяем все строки
+                parent = item.parent()
+                if parent is not None:
+                    parent.removeChild(item)
+                else:
+                    index = self.tree.indexOfTopLevelItem(item)
+                    if index >= 0:
+                        self.tree.takeTopLevelItem(index)
+            self.tree.setRootIsDecorated(not flat)
+            self._attach(list(self.items))
+            if not flat:
+                self.tree.expandAll()
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        if selected is not None and selected.key in self.items:
+            item = self.items[selected.key]
+            item.setSelected(True)
+            self.tree.scrollToItem(item)
 
     # ---------- поток обновления списка ----------
     def _snapshot_loop(self):
@@ -223,7 +310,8 @@ class ProcessWindow(QMainWindow):
                 procs = take_snapshot()
                 sig_budget, pe_budget = 6, 3  # тяжёлые проверки распределяем по циклам
                 for p in procs:
-                    if not p.exe:
+                    if not p.has_file:  # у Registry, Memory Compression и т.п. файла нет
+                        p.sig = "Без файла (ядро Windows)" if p.core else ""
                         continue
                     if p.exe not in self._sig_cache and sig_budget > 0:
                         sig_budget -= 1
@@ -268,43 +356,51 @@ class ProcessWindow(QMainWindow):
         self._stop_snapshots.set()
         self._scan_cancel.set()
 
-    # ---------- обновление дерева ----------
+    # ---------- обновление списка ----------
     def on_snapshot(self, procs: list[ProcInfo]):
-        self.tree.setSortingEnabled(False)  # без перестановок во время обновления
-        try:
-            current = {p.key: p for p in procs}
-            self.procs = current
+        current = {p.key: p for p in procs}
+        self.procs = current
 
-            for key in [k for k in self.items if k not in current]:
-                self._remove_item(key)
+        for key in [k for k in self.items if k not in current]:
+            self._remove_item(key)
 
-            by_pid = {p.pid: p.key for p in procs}
-            new_keys = [k for k in current if k not in self.items]
-            for key in new_keys:
-                item = ProcItem()
-                item.setData(0, KEY_ROLE, key)
-                self.items[key] = item
-            for key in new_keys:
-                p, item = current[key], self.items[key]
-                parent_key = by_pid.get(p.ppid)
-                parent = None
-                # родитель должен быть старше потомка: исключает циклы и повтор PID
-                if parent_key and parent_key != key and current[parent_key].created < p.created:
-                    parent = self.items.get(parent_key)
-                if parent is not None:
-                    parent.addChild(item)
-                else:
-                    self.tree.addTopLevelItem(item)
-            for key in new_keys:
+        new_keys = [k for k in current if k not in self.items]
+        for key in new_keys:
+            item = ProcItem()
+            item.setData(0, KEY_ROLE, key)
+            self.items[key] = item
+        self._attach(new_keys)
+
+        for key, p in current.items():
+            self._fill(self.items[key], p)
+        self._resort()
+        self._apply_filter()
+        self._update_actions()
+
+    def _parent_item(self, p: ProcInfo, by_pid: dict[int, str]) -> ProcItem | None:
+        parent_key = by_pid.get(p.ppid)
+        if not parent_key or parent_key == p.key:
+            return None
+        parent = self.procs[parent_key]
+        # у System и Idle время создания условное, остальные родители должны быть старше
+        if parent.pid not in (0, 4) and parent.created >= p.created:
+            return None
+        return self.items.get(parent_key)
+
+    def _attach(self, keys: list[str]):
+        """Добавляет строки в дерево (или в плоский список, если включён такой режим)."""
+        by_pid = {p.pid: p.key for p in self.procs.values()}
+        for key in keys:
+            item = self.items[key]
+            parent = None if self._flat else self._parent_item(self.procs[key], by_pid)
+            if parent is not None:
+                parent.addChild(item)
+            else:
+                self.tree.addTopLevelItem(item)
+        if not self._flat:
+            for key in keys:
                 if self.items[key].childCount():
                     self.items[key].setExpanded(True)
-
-            for key, p in current.items():
-                self._fill(self.items[key], p)
-            self._apply_filter()
-        finally:
-            self.tree.setSortingEnabled(True)
-        self._update_actions()
 
     def _remove_item(self, key: str):
         item = self.items.pop(key)
@@ -321,19 +417,27 @@ class ProcessWindow(QMainWindow):
 
     def _fill(self, item: ProcItem, p: ProcInfo):
         res = self.mem_results.get(p.key)
-        values = [p.name, str(p.pid), f"{p.cpu:.1f}", f"{p.rss / 1048576:.1f}",
-                  p.user, p.sig, res.text() if res else "", p.exe]
+        values = [p.name, str(p.pid), f"{p.cpu:.1f}", f"{p.rss / 1048576:.1f}", p.user,
+                  ORIGINS.get(p.origin, ""), p.sig, res.text() if res else "", p.exe]
         for col, text in enumerate(values):
             if item.text(col) != text:
                 item.setText(col, text)
         item.setData(1, SORT_ROLE, p.pid)
         item.setData(2, SORT_ROLE, p.cpu)
         item.setData(3, SORT_ROLE, p.rss)
-        for col in (4, 5, 6, 7):
+        for col in range(4, len(COLUMNS)):
             item.setToolTip(col, values[col])
 
         category = BY_ID.get(classify(p, bool(res and res.status == "match")))
-        item.setToolTip(0, category.title if category else "")
+        tip = category.title if category else ""
+        if p.protected:
+            tip += ("\n" if tip else "") + f"Защищён: {p.protect_reason or 'критический процесс Windows'}"
+        elif p.sys_account:
+            tip += ("\n" if tip else "") + (
+                "Системная учётная запись, но процесс не в списке защищённых "
+                f"(файл: {p.exe or 'путь недоступен'})")
+        item.setToolTip(0, tip)
+
         for col in range(len(COLUMNS)):
             if category:
                 item.setBackground(col, QBrush(QColor(*category.rgb)))
@@ -344,14 +448,27 @@ class ProcessWindow(QMainWindow):
 
     def _apply_filter(self):
         text = self.filter_edit.text().strip().lower()
+        origin_ids = self._origin_ids()
+
+        def text_ok(item: ProcItem) -> bool:
+            if not text:
+                return True
+            return text in " ".join(item.text(c) for c in range(len(COLUMNS))).lower()
+
+        if self._flat:
+            for key, item in self.items.items():
+                p = self.procs.get(key)
+                origin_ok = origin_ids is None or (p is not None and p.origin in origin_ids)
+                item.setHidden(not (origin_ok and text_ok(item)))
+            return
+
         if not text:
             for item in self.items.values():
                 item.setHidden(False)
             return
         visible = set()
         for item in self.items.values():
-            haystack = " ".join(item.text(c) for c in range(len(COLUMNS))).lower()
-            if text in haystack:
+            if text_ok(item):
                 node = item
                 while node is not None:  # родители совпавших строк остаются видимыми
                     visible.add(node.data(0, KEY_ROLE))
@@ -371,7 +488,8 @@ class ProcessWindow(QMainWindow):
         if not p:
             return
         if p.protected:  # кнопки уже отключены, это вторая линия защиты
-            self.statusBar().showMessage(LOCKED_TIP, 6000)
+            self.statusBar().showMessage(
+                f"{LOCKED_TIP} ({p.protect_reason or 'критический процесс Windows'})", 6000)
             return
         if action == "terminate":
             answer = QMessageBox.question(
@@ -386,7 +504,7 @@ class ProcessWindow(QMainWindow):
         p = self._selected()
         if not p:
             return
-        if p.exe and Path(p.exe).exists():
+        if p.has_file and Path(p.exe).exists():
             open_in_explorer(p.exe)
         else:
             self.statusBar().showMessage("Путь к файлу недоступен", 5000)
@@ -405,8 +523,8 @@ class ProcessWindow(QMainWindow):
         p = self._selected()
         if not p:
             return
-        if not p.exe:
-            QMessageBox.information(self, "Проверка файла", "Путь к файлу процесса недоступен")
+        if not p.has_file:
+            QMessageBox.information(self, "Проверка файла", "У процесса нет доступного файла")
             return
         self.statusBar().showMessage("Проверяю файл (при первом запуске компилируются правила)...")
 
