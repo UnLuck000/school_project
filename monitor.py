@@ -15,6 +15,7 @@ from scanner.yara_engine import load_rules
 # временные файлы браузеров и загрузчиков: проверяем уже после переименования
 TEMP_SUFFIXES = {".crdownload", ".part", ".partial", ".tmp", ".download", ".opdownload"}
 MAX_TRIES = 6  # сколько раз повторять, если файл занят другой программой
+SCAN_EXISTING = True
 
 
 class _Handler(FileSystemEventHandler):
@@ -119,6 +120,12 @@ class RealtimeMonitor:
             return
 
         observer.start()
+        if SCAN_EXISTING:
+            for folder in self.folders:
+                if folder.is_dir():
+                    for existing in folder.rglob("*"):
+                        if existing.is_file():
+                            self._enqueue(existing)
         self._emit("status", f"Защита включена. Папок под наблюдением: {watching}, "
                              f"хэшей: {len(self._signatures)}")
         try:

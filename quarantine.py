@@ -68,6 +68,12 @@ def quarantine_file(path: Path, reason: str) -> str:
     QUARANTINE_DIR.mkdir(exist_ok=True)
     path = Path(path).resolve()
 
+    # сначала подпись, потом словарь: переменная должна существовать до его создания
+    try:
+        signature_text = describe(inspect_signature(path))
+    except Exception:  # подпись не должна мешать изоляции файла
+        signature_text = ""
+
     item_id = uuid.uuid4().hex
     meta = {
         "id": item_id,
@@ -76,20 +82,17 @@ def quarantine_file(path: Path, reason: str) -> str:
         "sha256": sha256_of(path),
         "size": path.stat().st_size,
         "reason": reason,
-        "quarantined_at": _now(),
         "signature": signature_text,
+        "quarantined_at": _now(),
     }
 
     _write_meta(meta)
     try:
-        signature_text = describe(inspect_signature(path))
         shutil.move(str(path), _stored_path(item_id))
     except Exception:
-        signature_text = ""
         _meta_path(item_id).unlink(missing_ok=True)
         raise
     return item_id
-
 
 def list_quarantine(include_history: bool = False) -> list[dict]:
     """По умолчанию возвращает только файлы, которые сейчас в карантине.
