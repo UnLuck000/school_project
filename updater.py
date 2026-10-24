@@ -35,7 +35,7 @@ def update_ips() -> None:
         if not line or line.startswith("#"):
             continue
         try:
-            ips.add(str(ipaddress.ip_address(line)))
+            ips.add(ipaddress.ip_address(line).compressed)
         except ValueError:
             continue
 

@@ -24,9 +24,9 @@ from scanner.hashing import load_all_signatures
 from scanner.heuristics import analyze_pe
 from scanner.signature import describe, inspect_signature
 from scanner.whitelist import load_whitelist
+from ui import settings as cfg
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
-SCAN_WORKERS = 4  # сколько процессов проверять одновременно (1 = последовательно)
 COLUMNS = ["Процесс", "PID", "CPU, %", "Память, МБ", "Пользователь", "Запуск",
            "Подпись", "Память (YARA)", "Путь"]
 DESC_FIRST = {2, 3}  # числовые колонки при первом клике сортируются по убыванию
@@ -62,6 +62,7 @@ class TextDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(780, 540)
+        self._scan_workers = 4
         layout = QVBoxLayout(self)
         edit = QTextEdit()
         edit.setReadOnly(True)
@@ -75,7 +76,6 @@ class ProcessWindow(QMainWindow):
         super().__init__()  # без родителя: отдельное окно
         self.setWindowTitle("Диспетчер процессов")
         self.resize(1500, 700)
-
         self.bridge = Bridge()
         self.bridge.snapshot.connect(self.on_snapshot)
         self.bridge.mem_result.connect(self.on_mem_result)
@@ -96,6 +96,7 @@ class ProcessWindow(QMainWindow):
         self._snap_thread: threading.Thread | None = None
         self._scan_cancel = threading.Event()
         self._scan_thread: threading.Thread | None = None
+        self._scan_workers = 4
 
         self.admin = is_admin()
         self.debug_priv = enable_debug_privilege() if self.admin else False
@@ -334,7 +335,7 @@ class ProcessWindow(QMainWindow):
                 self.bridge.snapshot.emit(procs)
             except Exception:
                 pass
-            self._stop_snapshots.wait(2.0)
+            self._stop_snapshots.wait(float(cfg.get("process/interval")))
 
     def _start_snapshots(self):
         self._stop_snapshots.clear()
@@ -602,7 +603,9 @@ class ProcessWindow(QMainWindow):
             return p, scan_process(rules, p.pid)
 
         done = 0
-        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        workers = int(cfg.get("scan/workers"))
+        self._scan_workers = workers
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(work, p) for p in procs]
             for future in as_completed(futures):
                 p, res = future.result()
@@ -626,7 +629,7 @@ class ProcessWindow(QMainWindow):
         prefix = "Остановлено. " if cancelled else "Готово. "
         self.statusBar().showMessage(
             f"{prefix}Совпадений в памяти: {len(self._scan_matches)}. "
-            f"Время: {elapsed:.1f} с (потоков: {SCAN_WORKERS})")
+            f"Время: {elapsed:.1f} с (потоков: {self._scan_workers})")
         if self._scan_matches:
             QMessageBox.warning(
                 self, "Сканирование памяти",

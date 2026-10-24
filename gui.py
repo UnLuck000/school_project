@@ -1,11 +1,15 @@
+import os
 import sys
 import threading
 import time
 from pathlib import Path
 import json
 
+os.chdir(Path(sys.executable).parent if getattr(sys, "frozen", False)
+         else Path(__file__).resolve().parent)
+
 from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings
-from PySide6.QtGui import QFontMetrics, QBrush, QColor, QAction
+from PySide6.QtGui import QFontMetrics, QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
@@ -14,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem
 )
 
+from scanner import heuristics
 from scanner.whitelist import load_whitelist, remove_from_whitelist
 from scanner.hashing import load_all_signatures
 from scanner.engine import scan_tree
@@ -28,6 +33,12 @@ from networkmonitor.netmon import NetworkMonitor
 from processmanager.window import ProcessWindow
 from processmanager.system import is_admin, relaunch_as_admin
 
+from ui import settings as cfg
+from ui.pages import AboutPage, DashboardPage, SettingsPage, ToolsPage
+from ui.shell import Shell
+from ui.theme import apply_theme
+
+import appinfo
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
@@ -122,6 +133,7 @@ class ScanWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    update_finished = Signal(str)
     # заголовки и начальная ширина столбцов таблицы карантина
     QUAR_COLUMNS = [
         ("Дата", 140),
@@ -130,14 +142,12 @@ class MainWindow(QMainWindow):
         ("SHA-256", 220),
         ("Статус", 110),
         ("Причина", 160),
-        ("Статус", 110),
         ("Подпись", 240),
-        ("Причина", 160),
     ]
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Учебный антивирус")
+        self.setWindowTitle(f"{appinfo.APP_NAME} {appinfo.VERSION}")
         self.resize(1000, 560)
         self.worker: ScanWorker | None = None
         self.settings = QSettings("StudyAV", "myav")
@@ -150,35 +160,110 @@ class MainWindow(QMainWindow):
         self.net_bridge.event.connect(self.on_net_event)
         self.proc_window: ProcessWindow | None = None
 
-        tools_menu = self.menuBar().addMenu("Инструменты")
-        pm_action = QAction("Диспетчер процессов...", self)
-        pm_action.triggered.connect(self.open_process_manager)
-        tools_menu.addAction(pm_action)
+        self.shell = Shell()
+        self.dashboard = DashboardPage()
+        self.tools_page = ToolsPage(self)
+        self.settings_page = SettingsPage()
+        self.about_page = AboutPage()
 
-        ask_action = QAction("Запрашивать права администратора при запуске", self)
-        ask_action.setCheckable(True)
-        ask_action.setChecked(not self.settings.value("admin/dont_ask", False, type=bool))
-        ask_action.toggled.connect(lambda on: self.settings.setValue("admin/dont_ask", not on))
-        tools_menu.addAction(ask_action)
+        quarantine_tabs = QTabWidget()
+        quarantine_tabs.addTab(self._build_quarantine_tab(), "Файлы в карантине")
+        quarantine_tabs.addTab(self._build_whitelist_tab(), "Белый список")
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_scan_tab(), "Сканирование")
-        tabs.addTab(self._build_protection_tab(), "Защита")
-        tabs.addTab(self._build_network_tab(), "Сеть")
-        tabs.addTab(self._build_quarantine_tab(), "Карантин")
-        tabs.addTab(self._build_whitelist_tab(), "Белый список")
-        self.setCentralWidget(tabs)
+        self.shell.add_page("Главная", self.dashboard)
+        self.shell.add_page("Сканирование", self._build_scan_tab())
+        self.shell.add_page("Защита", self._build_protection_tab())
+        self.shell.add_page("Сеть", self._build_network_tab())
+        self.shell.add_page("Карантин", quarantine_tabs)
+        self.shell.add_page("Инструменты", self.tools_page)
+        self.shell.add_page("Настройки", self.settings_page)
+        self.shell.add_page("О программе", self.about_page)
+        self.setCentralWidget(self.shell)
+
+        self.dashboard.quick_scan.connect(self.quick_scan)
+        self.dashboard.toggle_protection.connect(self.toggle_protection)
+        self.dashboard.update_databases.connect(self.update_databases)
+        self.dashboard.open_processes.connect(self.open_process_manager)
+        self.settings_page.changed.connect(self.on_setting_changed)
+        self.update_finished.connect(self._on_update_finished)
+        self.shell.page_changed.connect(
+            lambda title: self.refresh_dashboard() if title == "Главная" else None)
 
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
+        self.refresh_dashboard()
 
     def open_process_manager(self):
         if self.proc_window is None:
             self.proc_window = ProcessWindow()
+            self.apply_on_top(cfg.get("general/on_top"))
         self.proc_window.show()
         self.proc_window.raise_()
         self.proc_window.activateWindow()
+
+    # ---------- главная страница и настройки ----------
+    def refresh_dashboard(self):
+        rules_dir = Path("signatures/rules")
+        self.dashboard.refresh({
+            "protection": self.monitor is not None,
+            "network": self.net_monitor is not None,
+            "hashes": len(load_all_signatures(SIGNATURES.parent)),
+            "rules": sum(1 for _ in rules_dir.rglob("*.yar")) if rules_dir.exists() else 0,
+            "quarantine": len(list_quarantine()),
+            "whitelist": len(load_whitelist()),
+            "last_scan": cfg.get("stats/last_scan"),
+        })
+
+    def quick_scan(self):
+        downloads = Path.home() / "Downloads"
+        if not downloads.is_dir():
+            QMessageBox.information(self, "Быстрая проверка", "Папка «Загрузки» не найдена")
+            return
+        self.path_edit.setText(str(downloads))
+        self.shell.show_page("Сканирование")
+        if self.scan_btn.isEnabled():
+            self.start_scan()
+
+    def update_databases(self):
+        self.statusBar().showMessage("Обновляю базы (хэши, правила YARA, адреса C2)...")
+        threading.Thread(target=self._update_job, daemon=True).start()
+
+    def _update_job(self):
+        import contextlib
+        import io
+
+        import updater
+        from processmanager.memscan import reset_cache
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            updater.update_ips()
+            updater.update_rules()
+            updater.update_hashes()
+        reset_cache()  # правила для памяти перекомпилируются при следующем сканировании
+        self.update_finished.emit(buffer.getvalue())
+
+    def _on_update_finished(self, text: str):
+        self.statusBar().showMessage("Обновление баз завершено", 8000)
+        self.refresh_dashboard()
+        QMessageBox.information(self, "Обновление баз", text.strip() or "Готово")
+
+    def on_setting_changed(self, key: str, value):
+        if key == "general/on_top":
+            self.apply_on_top(bool(value))
+        elif key == "general/theme":
+            apply_theme(QApplication.instance(), value)
+        elif key == "scan/threshold":
+            heuristics.set_threshold(int(value))
+
+    def apply_on_top(self, on: bool):
+        for window in (self, self.proc_window):
+            if window is not None:
+                visible = window.isVisible()
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+                if visible:
+                    window.show()  # смена флага скрывает окно, показываем заново
 
     # ---------- вкладка «Сеть» ----------
     NET_COLUMNS = [("Время", 70), ("Уровень", 100), ("Процесс", 130), ("PID", 60),
@@ -374,6 +459,7 @@ class MainWindow(QMainWindow):
         for w in (self.watch_list, self.watch_add_btn, self.watch_remove_btn):
             w.setEnabled(not running)
         self.protect_status.setText("Запускаю..." if running else "Защита выключена")
+        self.refresh_dashboard()
 
     def _protection_stopped(self):
         self.monitor = None
@@ -530,6 +616,7 @@ class MainWindow(QMainWindow):
         self._reset_scan_ui()
         self.statusBar().showMessage(
             f"{'Остановлено' if stopped else 'Готово'}. Найдено угроз: {found}")
+        cfg.set_("stats/last_scan", time.strftime("%Y-%m-%d %H:%M"))
         self.refresh_quarantine()
 
     def _reset_scan_ui(self):
@@ -676,10 +763,7 @@ class MainWindow(QMainWindow):
 def ask_for_admin() -> bool:
     """Предлагает перезапуститься с правами администратора.
     True, если новый процесс уже запущен и текущий нужно закрыть."""
-    if is_admin():
-        return False
-    settings = QSettings("StudyAV", "myav")
-    if settings.value("admin/dont_ask", False, type=bool):
+    if is_admin() or not cfg.get("startup/ask_admin"):
         return False
 
     box = QMessageBox(
@@ -694,15 +778,21 @@ def ask_for_admin() -> bool:
     box.exec()
 
     if dont_ask.isChecked():
-        settings.setValue("admin/dont_ask", True)
+        cfg.set_("startup/ask_admin", False)
     if box.clickedButton() is run_btn:
         return relaunch_as_admin()  # False, если пользователь отклонил запрос UAC
     return False
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    if ask_for_admin():
+    apply_theme(app, cfg.get("general/theme"))
+    heuristics.set_threshold(cfg.get("scan/threshold"))
+    # при запуске из автозапуска окно UAC не показываем
+    if "--autostart" not in sys.argv and ask_for_admin():
         sys.exit(0)
     window = MainWindow()
+    window.apply_on_top(cfg.get("general/on_top"))
     window.show()
+    if cfg.get("startup/auto_protect"):
+        window.toggle_protection()
     sys.exit(app.exec())

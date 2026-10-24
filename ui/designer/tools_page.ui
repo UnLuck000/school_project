@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>ToolsPage</class>
+ <widget class="QWidget" name="ToolsPage">
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QLabel" name="lblTitle">
+     <property name="styleSheet"><string notr="true">font-size: 20pt; font-weight: 600;</string></property>
+     <property name="text"><string>Инструменты</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="lblHint">
+     <property name="text"><string>Кнопки с пометкой «скоро» — заготовки будущих функций. Нажмите на такую кнопку или наведите на неё курсор, чтобы увидеть, что она будет делать.</string></property>
+     <property name="wordWrap"><bool>true</bool></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QGridLayout" name="gridGroups">
+     <item row="0" column="0">
+      <widget class="QGroupBox" name="groupDetect">
+       <property name="title"><string>Обнаружение</string></property>
+       <layout class="QVBoxLayout" name="layoutDetect">
+        <item><widget class="QPushButton" name="btnAutoruns"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сканер автозапуска</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnMemoryDeep"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Память: RWX-регионы и модули</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnNetBeacon"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сеть: поиск «пульса» бота</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QGroupBox" name="groupAnalysis">
+       <property name="title"><string>Анализ</string></property>
+       <layout class="QVBoxLayout" name="layoutAnalysis">
+        <item><widget class="QPushButton" name="btnFileAnalyzer"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Анализатор файла</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnProcessManager"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QGroupBox" name="groupRecovery">
+       <property name="title"><string>Восстановление</string></property>
+       <layout class="QVBoxLayout" name="layoutRecovery">
+        <item><widget class="QPushButton" name="btnRestorePoint"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Создать точку восстановления</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnSfcDism"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка целостности (SFC/DISM)</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnSystemChecks"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка hosts, прокси и исключений Defender</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnUndoJournal"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Журнал действий и откат</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QGroupBox" name="groupResearch">
+       <property name="title"><string>Исследование</string></property>
+       <layout class="QVBoxLayout" name="layoutResearch">
+        <item><widget class="QPushButton" name="btnResearch"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Исследовательский стенд</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnReport"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Отчёт и графики</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

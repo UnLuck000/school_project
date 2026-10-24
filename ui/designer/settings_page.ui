@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>SettingsPage</class>
+ <widget class="QWidget" name="SettingsPage">
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QLabel" name="lblTitle">
+     <property name="styleSheet"><string notr="true">font-size: 20pt; font-weight: 600;</string></property>
+     <property name="text"><string>Настройки</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupStartup">
+     <property name="title"><string>Запуск</string></property>
+     <layout class="QVBoxLayout" name="layoutStartup">
+      <item><widget class="QCheckBox" name="chkAutostart"><property name="text"><string>Запускать вместе с Windows</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkAskAdmin"><property name="text"><string>Предлагать запуск от имени администратора при старте</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkAutoProtect"><property name="text"><string>Включать защиту файлов в реальном времени при запуске</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkTray"><property name="enabled"><bool>false</bool></property><property name="text"><string>Сворачивать в системный трей (скоро)</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupWindow">
+     <property name="title"><string>Окно</string></property>
+     <layout class="QFormLayout" name="formWindow">
+      <item row="0" column="0" colspan="2"><widget class="QCheckBox" name="chkOnTop"><property name="text"><string>Поверх всех окон</string></property></widget></item>
+      <item row="1" column="0"><widget class="QLabel" name="captionTheme"><property name="text"><string>Тема оформления:</string></property></widget></item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="cmbTheme">
+        <item><property name="text"><string>Системная</string></property></item>
+        <item><property name="text"><string>Светлая</string></property></item>
+        <item><property name="text"><string>Тёмная</string></property></item>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupScan">
+     <property name="title"><string>Проверка</string></property>
+     <layout class="QFormLayout" name="formScan">
+      <item row="0" column="0"><widget class="QLabel" name="captionThreshold"><property name="text"><string>Порог эвристики PE (баллы):</string></property></widget></item>
+      <item row="0" column="1"><widget class="QSpinBox" name="spnThreshold"><property name="minimum"><number>1</number></property><property name="maximum"><number>20</number></property><property name="value"><number>7</number></property></widget></item>
+      <item row="1" column="0"><widget class="QLabel" name="captionWorkers"><property name="text"><string>Потоков при сканировании памяти:</string></property></widget></item>
+      <item row="1" column="1"><widget class="QSpinBox" name="spnWorkers"><property name="minimum"><number>1</number></property><property name="maximum"><number>8</number></property><property name="value"><number>4</number></property></widget></item>
+      <item row="2" column="0"><widget class="QLabel" name="captionInterval"><property name="text"><string>Обновление диспетчера процессов (сек):</string></property></widget></item>
+      <item row="2" column="1"><widget class="QSpinBox" name="spnInterval"><property name="minimum"><number>1</number></property><property name="maximum"><number>10</number></property><property name="value"><number>2</number></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QPushButton" name="btnReset">
+     <property name="text"><string>Сбросить настройки</string></property>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

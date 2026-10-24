@@ -40,6 +40,17 @@ API_GROUPS = [
       {"shellexecute", "shellexecuteex", "winexec", "createprocess"}], 2),
 ]
 
+_threshold = HEURISTIC_THRESHOLD
+
+
+def set_threshold(value: int) -> None:
+    global _threshold
+    _threshold = int(value)
+
+
+def get_threshold() -> int:
+    return _threshold
+
 
 class Finding(NamedTuple):
     category: str   # "pack" | "api"

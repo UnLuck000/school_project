@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>AboutPage</class>
+ <widget class="QWidget" name="AboutPage">
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QLabel" name="lblAppName">
+     <property name="styleSheet"><string notr="true">font-size: 24pt; font-weight: 700;</string></property>
+     <property name="text"><string>Название программы</string></property>
+    </widget>
+   </item>
+   <item><widget class="QLabel" name="lblVersion"><property name="text"><string>Версия</string></property></widget></item>
+   <item><widget class="QLabel" name="lblDescription"><property name="text"><string>Описание</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+   <item><widget class="QLabel" name="lblThesis"><property name="text"><string>Тема</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+   <item><widget class="QLabel" name="lblAuthor"><property name="text"><string>Автор</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+   <item><widget class="QLabel" name="lblComponents"><property name="text"><string>Компоненты</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+   <item><widget class="QLabel" name="lblLicenses"><property name="text"><string>Лицензии</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+   <item><widget class="QLabel" name="lblDisclaimer"><property name="text"><string>Предупреждение</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+   <item>
+    <widget class="QPushButton" name="btnRepo">
+     <property name="minimumSize"><size><width>0</width><height>36</height></size></property>
+     <property name="text"><string>Открыть репозиторий на GitHub</string></property>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

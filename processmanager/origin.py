@@ -5,7 +5,7 @@ try:
 except ImportError:  # не Windows
     winreg = None
 
-LOGON_WINDOW = 30.0  # секунд после запуска Проводника, когда стартует автозапуск
+LOGON_WINDOW = 35.0  # секунд после запуска Проводника, когда стартует автозапуск
 CONSOLE_PARENTS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe",
                    "wt.exe", "conhost.exe", "bash.exe", "wsl.exe"}
 TASK_PARENTS = {"taskhostw.exe", "taskeng.exe"}
