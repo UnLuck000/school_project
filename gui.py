@@ -8,6 +8,12 @@ import json
 os.chdir(Path(sys.executable).parent if getattr(sys, "frozen", False)
          else Path(__file__).resolve().parent)
 
+if sys.stdout is None or sys.stderr is None:  # pythonw или exe без консоли
+    Path("logs").mkdir(exist_ok=True)
+    _log = open(Path("logs") / "gui.log", "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stdout or _log
+    sys.stderr = sys.stderr or _log
+
 from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings
 from PySide6.QtGui import QFontMetrics, QBrush, QColor
 from PySide6.QtWidgets import (
@@ -15,7 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
     QTabWidget, QToolTip, QVBoxLayout, QWidget, QCheckBox, QLabel,
-    QListWidgetItem
+    QListWidgetItem, QSystemTrayIcon
 )
 
 from scanner import heuristics
@@ -37,8 +43,12 @@ from ui import settings as cfg
 from ui.pages import AboutPage, DashboardPage, SettingsPage, ToolsPage
 from ui.shell import Shell
 from ui.theme import apply_theme
+from ui.registry import FEATURES, HANDLERS
+from ui.tray import TrayIcon, load_app_icon
 
 import appinfo
+
+from autoruns.window import AutorunsWindow
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
@@ -159,6 +169,10 @@ class MainWindow(QMainWindow):
         self.net_bridge = NetBridge()
         self.net_bridge.event.connect(self.on_net_event)
         self.proc_window: ProcessWindow | None = None
+        self.tray: TrayIcon | None = None
+        self._quitting = False
+        self._tray_hint_shown = False
+        self.autoruns_window: AutorunsWindow | None = None
 
         self.shell = Shell()
         self.dashboard = DashboardPage()
@@ -193,6 +207,51 @@ class MainWindow(QMainWindow):
         self.refresh_quarantine()
         self.refresh_whitelist()
         self.refresh_dashboard()
+
+    # ---------- системный трей ----------
+    def setup_tray(self, icon):
+        self.tray = TrayIcon(self, icon)
+        self.tray.show()
+
+    def show_main(self, page: str | None = None):
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if page:
+            self.shell.show_page(page)
+
+    def quit_app(self):
+        self._quitting = True
+        self.close()
+
+    def run_feature(self, button_id: str):
+        """Запуск функции с кнопки «Инструменты» (из трея или со страницы)."""
+        feature = FEATURES[button_id]
+        parent = self if self.isVisible() else None
+        handler = HANDLERS.get(button_id)
+        if handler is None:
+            QMessageBox.information(
+                parent, feature.title, f"Функция в разработке.\n\nПлан:\n{feature.plan}")
+            return
+        try:
+            handler(self)
+        except Exception as e:
+            QMessageBox.critical(parent, feature.title, f"Ошибка: {e}")
+
+    def open_autoruns(self, journal: bool = False):
+        if self.autoruns_window is None:
+            self.autoruns_window = AutorunsWindow()
+            self.autoruns_window.quarantine_changed.connect(self.refresh_quarantine)
+            self.autoruns_window.quarantine_changed.connect(self.refresh_dashboard)
+            self.apply_on_top(cfg.get("general/on_top"))
+        self.autoruns_window.show()
+        self.autoruns_window.raise_()
+        self.autoruns_window.activateWindow()
+        if journal:
+            self.autoruns_window.show_journal()
 
     def open_process_manager(self):
         if self.proc_window is None:
@@ -258,7 +317,7 @@ class MainWindow(QMainWindow):
             heuristics.set_threshold(int(value))
 
     def apply_on_top(self, on: bool):
-        for window in (self, self.proc_window):
+        for window in (self, self.proc_window, self.autoruns_window):
             if window is not None:
                 visible = window.isVisible()
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
@@ -746,7 +805,10 @@ class MainWindow(QMainWindow):
         self.refresh_quarantine()
 
     # ---------- закрытие окна ----------
-    def closeEvent(self, event):
+    def _shutdown_all(self):
+        if self.autoruns_window is not None:
+            self.autoruns_window.shutdown()
+            self.autoruns_window.close()
         if self.proc_window is not None:
             self.proc_window.shutdown()
             self.proc_window.close()
@@ -757,7 +819,26 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(5000)
+
+    def closeEvent(self, event):
+        to_tray = (not self._quitting and self.tray is not None
+                   and cfg.get("general/close_to_tray"))
+        if to_tray:
+            event.ignore()
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray.showMessage(
+                    appinfo.SHORT_NAME,
+                    "Программа продолжает работать в системном трее. "
+                    "Выход: правый клик по значку, «Выход».",
+                    QSystemTrayIcon.MessageIcon.Information, 4000)
+            return
+        self._shutdown_all()
+        if self.tray is not None:
+            self.tray.hide()  # иначе значок остаётся в трее до наведения мыши
         event.accept()
+        QApplication.quit()
 
 
 def ask_for_admin() -> bool:
@@ -787,12 +868,26 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     apply_theme(app, cfg.get("general/theme"))
     heuristics.set_threshold(cfg.get("scan/threshold"))
+
+    icon = load_app_icon()
+    app.setWindowIcon(icon)
+    tray_ok = QSystemTrayIcon.isSystemTrayAvailable()
+    # с треем программа живёт и после закрытия последнего окна
+    app.setQuitOnLastWindowClosed(not tray_ok)
+
     # при запуске из автозапуска окно UAC не показываем
     if "--autostart" not in sys.argv and ask_for_admin():
         sys.exit(0)
+
     window = MainWindow()
+    if tray_ok:
+        window.setup_tray(icon)
     window.apply_on_top(cfg.get("general/on_top"))
-    window.show()
+
+    start_hidden = ("--autostart" in sys.argv and tray_ok
+                    and cfg.get("general/close_to_tray"))
+    if not start_hidden:
+        window.show()
     if cfg.get("startup/auto_protect"):
         window.toggle_protection()
     sys.exit(app.exec())

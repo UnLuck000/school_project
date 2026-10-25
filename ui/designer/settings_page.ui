@@ -16,7 +16,7 @@
       <item><widget class="QCheckBox" name="chkAutostart"><property name="text"><string>Запускать вместе с Windows</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkAskAdmin"><property name="text"><string>Предлагать запуск от имени администратора при старте</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkAutoProtect"><property name="text"><string>Включать защиту файлов в реальном времени при запуске</string></property></widget></item>
-      <item><widget class="QCheckBox" name="chkTray"><property name="enabled"><bool>false</bool></property><property name="text"><string>Сворачивать в системный трей (скоро)</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkTray"><property name="text"><string>При закрытии окна сворачивать в системный трей</string></property></widget></item>
      </layout>
     </widget>
    </item>

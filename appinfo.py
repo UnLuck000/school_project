@@ -1,4 +1,5 @@
-APP_NAME = "StudyAV Multitool"
+APP_NAME = "MyAntiviruS"
+SHORT_NAME = "myAV"
 VERSION = "0.1.0"
 YEAR = 2026
 AUTHOR = "Владимир"                         # TODO: впишите автора

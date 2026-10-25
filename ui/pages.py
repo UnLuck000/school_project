@@ -109,15 +109,17 @@ class SettingsPage(_UiPage):
         self.spn_threshold = child(ui, QSpinBox, "spnThreshold")
         self.spn_workers = child(ui, QSpinBox, "spnWorkers")
         self.spn_interval = child(ui, QSpinBox, "spnInterval")
+        self.chk_tray = child(ui, QCheckBox, "chkTray")
         self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_auto_protect,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
-                     self.spn_workers, self.spn_interval)
+                     self.spn_workers, self.spn_interval, self.chk_tray)
         self.load_values()
 
         self.chk_autostart.toggled.connect(self._on_autostart)
         self.chk_ask_admin.toggled.connect(lambda v: self._save("startup/ask_admin", v))
         self.chk_auto_protect.toggled.connect(lambda v: self._save("startup/auto_protect", v))
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
+        self.chk_tray.toggled.connect(lambda v: self._save("general/close_to_tray", v))
         self.cmb_theme.currentIndexChanged.connect(
             lambda i: self._save("general/theme", THEMES[i]))
         self.spn_threshold.valueChanged.connect(lambda v: self._save("scan/threshold", v))
@@ -132,6 +134,7 @@ class SettingsPage(_UiPage):
         self.chk_ask_admin.setChecked(cfg.get("startup/ask_admin"))
         self.chk_auto_protect.setChecked(cfg.get("startup/auto_protect"))
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
+        self.chk_tray.setChecked(cfg.get("general/close_to_tray"))
         theme = cfg.get("general/theme")
         self.cmb_theme.setCurrentIndex(THEMES.index(theme) if theme in THEMES else 0)
         self.spn_threshold.setValue(cfg.get("scan/threshold"))

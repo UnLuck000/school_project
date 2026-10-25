@@ -245,14 +245,17 @@ def is_admin() -> bool:
 def relaunch_as_admin() -> bool:
     """Запускает программу заново с запросом UAC. True, если запрос принят."""
     if getattr(sys, "frozen", False):  # собранный exe
+        interpreter = sys.executable
         params = " ".join(f'"{a}"' for a in sys.argv[1:])
     else:
+        pythonw = Path(sys.executable).with_name("pythonw.exe")  # без окна консоли
+        interpreter = str(pythonw) if pythonw.exists() else sys.executable
         args = [os.path.abspath(sys.argv[0])] + sys.argv[1:]
         params = " ".join(f'"{a}"' for a in args)
     try:
         # рабочая папка сохраняется: в проекте много относительных путей
         return ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, params, os.getcwd(), 1) > 32
+            None, "runas", interpreter, params, os.getcwd(), 1) > 32
     except (AttributeError, OSError):
         return False
 

@@ -22,6 +22,7 @@ DEFAULTS = {
     "scan/workers": 4,              # потоков при сканировании памяти
     "process/interval": 2,          # обновление диспетчера процессов, сек
     "stats/last_scan": "",
+    "general/close_to_tray": True,
 }
 
 

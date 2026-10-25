@@ -16,3 +16,4 @@ signatures/netfeeds/feodo.txt
 build/
 *.egg-info/
 logs/
+journal/
