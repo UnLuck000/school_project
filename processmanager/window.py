@@ -19,11 +19,11 @@ from processmanager.system import (
     ProcInfo, enable_debug_privilege, is_admin, open_in_explorer,
     process_details, relaunch_as_admin, run_action, take_snapshot,
 )
-from scanner.engine import check_file
-from scanner.hashing import load_all_signatures
+# from scanner.engine import check_file
+# from scanner.hashing import load_all_signatures
 from scanner.heuristics import analyze_pe
 from scanner.signature import describe, inspect_signature
-from scanner.whitelist import load_whitelist
+# from scanner.whitelist import load_whitelist
 from ui import settings as cfg
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
@@ -72,6 +72,8 @@ class TextDialog(QDialog):
 
 
 class ProcessWindow(QMainWindow):
+    analyze_requested = Signal(str)
+
     def __init__(self):
         super().__init__()  # без родителя: отдельное окно
         self.setWindowTitle("Диспетчер процессов")
@@ -527,18 +529,7 @@ class ProcessWindow(QMainWindow):
         if not p.has_file:
             QMessageBox.information(self, "Проверка файла", "У процесса нет доступного файла")
             return
-        self.statusBar().showMessage("Проверяю файл (при первом запуске компилируются правила)...")
-
-        def job():
-            try:
-                reason = check_file(Path(p.exe), load_all_signatures(SIG_DIR),
-                                    get_rules("all"), set(load_whitelist()))
-                text = f"Файл: {p.exe}\n\nРезультат: {reason or 'угроз не найдено'}"
-            except OSError as e:
-                text = f"Не удалось прочитать файл: {e}"
-            self.bridge.task_done.emit(f"Проверка файла: {p.name}", text)
-
-        threading.Thread(target=job, daemon=True).start()
+        self.analyze_requested.emit(p.exe)
 
     def on_task_done(self, title: str, text: str):
         self.statusBar().clearMessage()

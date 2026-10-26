@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from collections.abc import Callable
 
 
 @dataclass(frozen=True)
@@ -52,12 +53,12 @@ FEATURES: dict[str, Feature] = {
         "Сохранение результатов эксперимента в CSV и построение графиков для текста работы."),
 }
 
-HANDLERS: dict[str, object] = {}
+HANDLERS: dict[str, Callable[[object], None]] = {}
 
 
 def implements(button_id: str):
     """Декоратор: привязывает функцию handler(window) к кнопке из FEATURES."""
-    def decorator(func):
+    def decorator(func: Callable[[object], None]):
         HANDLERS[button_id] = func
         return func
     return decorator

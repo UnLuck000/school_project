@@ -68,6 +68,7 @@ def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
 
 class AutorunsWindow(QMainWindow):
     quarantine_changed = Signal()
+    analyze_requested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -112,10 +113,12 @@ class AutorunsWindow(QMainWindow):
         self.btn_quarantine.clicked.connect(self.quarantine_selected)
         self.btn_folder = QPushButton("Папка файла")
         self.btn_folder.clicked.connect(self.open_folder)
+        self.btn_analyze = QPushButton("Открыть в анализаторе")
+        self.btn_analyze.clicked.connect(self.analyze_selected)
         self.hide_normal = QCheckBox("Скрывать проверенные (норма)")
         self.hide_normal.setChecked(True)
         self.hide_normal.toggled.connect(lambda _: self._apply_hide())
-        for w in (self.btn_scan, self.btn_fix, self.btn_quarantine, self.btn_folder):
+        for w in (self.btn_scan, self.btn_fix, self.btn_quarantine, self.btn_folder, self.btn_analyze):
             row.addWidget(w)
         row.addWidget(self.hide_normal)
         row.addStretch()
@@ -148,11 +151,12 @@ class AutorunsWindow(QMainWindow):
         self.btn_fix.setToolTip(reason)
         self.btn_quarantine.setEnabled(q_allowed)
         self.btn_quarantine.setToolTip(q_reason)
+        self.btn_analyze.setEnabled(e is not None and bool(e.exe) and os.path.isfile(e.exe))
         self.btn_folder.setEnabled(e is not None and bool(e.exe) and os.path.exists(e.exe))
 
     def _show_menu(self, pos):
         menu = QMenu(self)
-        for button in (self.btn_fix, self.btn_quarantine, self.btn_folder):
+        for button in (self.btn_fix, self.btn_quarantine, self.btn_folder, self.btn_analyze):
             action = menu.addAction(button.text())
             action.setEnabled(button.isEnabled())
             action.triggered.connect(lambda checked=False, b=button: b.click())
@@ -167,6 +171,11 @@ class AutorunsWindow(QMainWindow):
         self.statusBar().showMessage("Собираю записи автозапуска...")
         self._thread = threading.Thread(target=self._scan_job, daemon=True)
         self._thread.start()
+
+    def analyze_selected(self):
+        e = self.selected_entry()
+        if e is not None and e.exe and os.path.isfile(e.exe):
+            self.analyze_requested.emit(e.exe)
 
     def _scan_job(self):
         entries, notes = collect_all()

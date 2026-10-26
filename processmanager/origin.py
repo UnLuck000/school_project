@@ -101,6 +101,7 @@ def _command_exe(command: str) -> str:
     return parts[0] if parts else ""
 
 
+
 def load_autostart() -> tuple[set[str], set[str]]:
     """(нормализованные пути exe из реестра, имена ярлыков из папок автозагрузки)."""
     exes: set[str] = set()

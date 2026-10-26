@@ -1,7 +1,8 @@
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QLabel, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QLabel, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QGroupBox, QWidget,
 )
 
 import appinfo
@@ -82,6 +83,11 @@ class ToolsPage(_UiPage):
             button.setToolTip(feature.plan)
             button.clicked.connect(
                 lambda checked=False, f=feature, h=handler: self._run(f, h))
+        self.group_research = child(self.ui, QGroupBox, "groupResearch")
+        self.group_research.setVisible(False)
+
+    def set_debug(self, on: bool) -> None:
+        self.group_research.setVisible(on)
 
     def _run(self, feature, handler) -> None:
         if handler is None:

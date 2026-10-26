@@ -15,6 +15,15 @@ def open_autoruns(window):
 def open_journal(window):
     window.open_autoruns(journal=True)
 
+
+@implements("btnFileAnalyzer")
+def open_analyzer(window):
+    window.open_analyzer()
+
+
+
+
+
 # Чтобы оживить кнопку-заглушку, добавьте функцию с её именем из ui/registry.py.
 # Кнопка сама потеряет пометку «скоро». Пример:
 #

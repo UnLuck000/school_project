@@ -45,10 +45,14 @@ from ui.shell import Shell
 from ui.theme import apply_theme
 from ui.registry import FEATURES, HANDLERS
 from ui.tray import TrayIcon, load_app_icon
+from ui.debug_mode import DebugKeyWatcher, load_gate
+from ui.single_instance import SingleInstance
 
 import appinfo
 
 from autoruns.window import AutorunsWindow
+
+from analyzer.window import AnalyzerWindow
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
@@ -169,6 +173,7 @@ class MainWindow(QMainWindow):
         self.net_bridge = NetBridge()
         self.net_bridge.event.connect(self.on_net_event)
         self.proc_window: ProcessWindow | None = None
+        self.analyzer_window: AnalyzerWindow | None = None
         self.tray: TrayIcon | None = None
         self._quitting = False
         self._tray_hint_shown = False
@@ -194,6 +199,11 @@ class MainWindow(QMainWindow):
         self.shell.add_page("О программе", self.about_page)
         self.setCentralWidget(self.shell)
 
+        self.debug_mode = False
+        self.debug_watcher = DebugKeyWatcher(load_gate(), self)
+        QApplication.instance().installEventFilter(self.debug_watcher)
+        self.debug_watcher.triggered.connect(self.toggle_debug_mode)
+
         self.dashboard.quick_scan.connect(self.quick_scan)
         self.dashboard.toggle_protection.connect(self.toggle_protection)
         self.dashboard.update_databases.connect(self.update_databases)
@@ -207,6 +217,31 @@ class MainWindow(QMainWindow):
         self.refresh_quarantine()
         self.refresh_whitelist()
         self.refresh_dashboard()
+
+    # ---------- анализатор файлов ----------
+
+    def open_analyzer(self, path: str | None = None):
+        if self.analyzer_window is None:
+            self.analyzer_window = AnalyzerWindow()
+            self.analyzer_window.quarantine_changed.connect(self.refresh_quarantine)
+            self.analyzer_window.quarantine_changed.connect(self.refresh_dashboard)
+            self.apply_on_top(cfg.get("general/on_top"))
+        self.analyzer_window.show()
+        self.analyzer_window.raise_()
+        self.analyzer_window.activateWindow()
+        if path:
+            self.analyzer_window.load_file(path)
+
+    # ---------- дебаг мод ----------
+
+    def toggle_debug_mode(self):
+        self.debug_mode = not self.debug_mode
+        self.tools_page.set_debug(self.debug_mode)
+        title = f"{appinfo.APP_NAME} {appinfo.VERSION}"
+        self.setWindowTitle(title + ("  [режим отладки]" if self.debug_mode else ""))
+        self.statusBar().showMessage(
+            "Режим отладки включён: на странице «Инструменты» появилась группа «Исследование»"
+            if self.debug_mode else "Режим отладки выключен", 8000)
 
     # ---------- системный трей ----------
     def setup_tray(self, icon):
@@ -244,6 +279,7 @@ class MainWindow(QMainWindow):
     def open_autoruns(self, journal: bool = False):
         if self.autoruns_window is None:
             self.autoruns_window = AutorunsWindow()
+            self.autoruns_window.analyze_requested.connect(lambda path: self.open_analyzer(path))
             self.autoruns_window.quarantine_changed.connect(self.refresh_quarantine)
             self.autoruns_window.quarantine_changed.connect(self.refresh_dashboard)
             self.apply_on_top(cfg.get("general/on_top"))
@@ -256,6 +292,7 @@ class MainWindow(QMainWindow):
     def open_process_manager(self):
         if self.proc_window is None:
             self.proc_window = ProcessWindow()
+            self.proc_window.analyze_requested.connect(lambda path: self.open_analyzer(path))
             self.apply_on_top(cfg.get("general/on_top"))
         self.proc_window.show()
         self.proc_window.raise_()
@@ -317,7 +354,7 @@ class MainWindow(QMainWindow):
             heuristics.set_threshold(int(value))
 
     def apply_on_top(self, on: bool):
-        for window in (self, self.proc_window, self.autoruns_window):
+        for window in (self, self.proc_window, self.autoruns_window, self.analyzer_window):
             if window is not None:
                 visible = window.isVisible()
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
@@ -806,6 +843,8 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def _shutdown_all(self):
+        if self.analyzer_window is not None:
+            self.analyzer_window.close()
         if self.autoruns_window is not None:
             self.autoruns_window.shutdown()
             self.autoruns_window.close()
@@ -875,17 +914,26 @@ if __name__ == "__main__":
     # с треем программа живёт и после закрытия последнего окна
     app.setQuitOnLastWindowClosed(not tray_ok)
 
+    autostart = "--autostart" in sys.argv
+    guard = SingleInstance("StudyAV-myav")
+    # уже запущена (например, в трее): показываем её окно и выходим
+    wait = 3.0 if "--relaunched" in sys.argv else 0.0  # ждём закрытия прежнего экземпляра
+    if guard.already_running(notify=not autostart, wait=wait):
+        sys.exit(0)
+
     # при запуске из автозапуска окно UAC не показываем
-    if "--autostart" not in sys.argv and ask_for_admin():
+    if not autostart and ask_for_admin():
+        sys.exit(0)
+    if not guard.listen():  # другой экземпляр успел занять имя
         sys.exit(0)
 
     window = MainWindow()
+    guard.activated.connect(lambda: window.show_main())
     if tray_ok:
         window.setup_tray(icon)
     window.apply_on_top(cfg.get("general/on_top"))
 
-    start_hidden = ("--autostart" in sys.argv and tray_ok
-                    and cfg.get("general/close_to_tray"))
+    start_hidden = autostart and tray_ok and cfg.get("general/close_to_tray")
     if not start_hidden:
         window.show()
     if cfg.get("startup/auto_protect"):

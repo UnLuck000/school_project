@@ -22,7 +22,7 @@ except ImportError:  # не Windows
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SYSTEM_ROOT = os.environ.get("SystemRoot", r"C:\Windows")
 TASKS_DIR = Path(SYSTEM_ROOT) / "System32" / "Tasks"
-TASK_NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+TASK_NS = {"t": "https://schemas.microsoft.com/windows/2004/02/mit/task"}
 HIVES = ({"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE}
          if winreg else {})
 
