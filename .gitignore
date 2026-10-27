@@ -17,6 +17,4 @@ build/
 *.egg-info/
 logs/
 journal/
-debug_mode/
 debug_mode/passwords.txt
-debug_mode/gate.py
