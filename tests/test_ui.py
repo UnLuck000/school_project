@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from ui.pages import AboutPage, DashboardPage, SettingsPage, ToolsPage
+from ui.pages import AboutPage, DashboardPage, DebugPage, SettingsPage, ToolsPage
 from ui.registry import FEATURES
 
 
@@ -18,9 +18,11 @@ def test_pages_load(app):
     DashboardPage()
     SettingsPage()
     AboutPage()
+    DebugPage(window=None)
 
 
 def test_every_feature_has_a_button(app):
-    page = ToolsPage(window=None)
+    pages = (ToolsPage(window=None), DebugPage(window=None))
     for button_id in FEATURES:
-        assert page.ui.findChild(QPushButton, button_id), f"нет кнопки {button_id}"
+        found = any(p.ui.findChild(QPushButton, button_id) is not None for p in pages)
+        assert found, f"нет кнопки {button_id}"

@@ -9,7 +9,19 @@ from datetime import datetime
 
 LOG_FILE = Path(__file__).resolve().parent.parent / "logs" / "yara_errors.log"
 MAX_FILE_SIZE = 100 * 1024 * 1024  # файлы больше 100 МБ пропускаем
+RULE_RE = re.compile(r"^\s*(?:(?:private|global)\s+)*rule\s+[A-Za-z_]\w*", re.MULTILINE)
 
+
+def count_rules(rules_dir: Path) -> tuple[int, int]:
+    """(файлов правил, правил). Приблизительный подсчёт по тексту, без компиляции."""
+    files = list(chain(rules_dir.rglob("*.yar"), rules_dir.rglob("*.yara")))
+    total = 0
+    for f in files:
+        try:
+            total += len(RULE_RE.findall(f.read_text(encoding="utf-8", errors="ignore")))
+        except OSError:
+            continue
+    return len(files), total
 
 def _dump_errors(errors: list[str]) -> None:
     """Пишет ошибки компиляции правил в лог-файл (перезаписывает при каждой загрузке)."""

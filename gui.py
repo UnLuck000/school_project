@@ -14,8 +14,8 @@ if sys.stdout is None or sys.stderr is None:  # pythonw или exe без кон
     sys.stdout = sys.stdout or _log
     sys.stderr = sys.stderr or _log
 
-from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings
-from PySide6.QtGui import QFontMetrics, QBrush, QColor
+from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings, QUrl
+from PySide6.QtGui import QFontMetrics, QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
@@ -28,7 +28,7 @@ from scanner import heuristics
 from scanner.whitelist import load_whitelist, remove_from_whitelist
 from scanner.hashing import load_all_signatures
 from scanner.engine import scan_tree
-from scanner.yara_engine import load_rules
+from scanner.yara_engine import load_rules, count_rules
 from quarantine import (
     QUARANTINE_DIR, STATUS_QUARANTINED, quarantine_file, list_quarantine, restore_file, delete_file,
 )
@@ -40,7 +40,7 @@ from processmanager.window import ProcessWindow
 from processmanager.system import is_admin, relaunch_as_admin
 
 from ui import settings as cfg
-from ui.pages import AboutPage, DashboardPage, SettingsPage, ToolsPage
+from ui.pages import AboutPage, DashboardPage, SettingsPage, ToolsPage, DebugPage
 from ui.shell import Shell
 from ui.theme import apply_theme
 from ui.registry import FEATURES, HANDLERS
@@ -53,6 +53,8 @@ import appinfo
 from autoruns.window import AutorunsWindow
 
 from analyzer.window import AnalyzerWindow
+
+from recovery.window import RecoveryWindow
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
@@ -173,15 +175,18 @@ class MainWindow(QMainWindow):
         self.net_bridge = NetBridge()
         self.net_bridge.event.connect(self.on_net_event)
         self.proc_window: ProcessWindow | None = None
+        self.guard = None  # SingleInstance, задаётся при запуске
         self.analyzer_window: AnalyzerWindow | None = None
         self.tray: TrayIcon | None = None
         self._quitting = False
         self._tray_hint_shown = False
         self.autoruns_window: AutorunsWindow | None = None
+        self.recovery_window: RecoveryWindow | None = None
 
         self.shell = Shell()
         self.dashboard = DashboardPage()
         self.tools_page = ToolsPage(self)
+        self.debug_page = DebugPage(self)
         self.settings_page = SettingsPage()
         self.about_page = AboutPage()
 
@@ -197,6 +202,7 @@ class MainWindow(QMainWindow):
         self.shell.add_page("Инструменты", self.tools_page)
         self.shell.add_page("Настройки", self.settings_page)
         self.shell.add_page("О программе", self.about_page)
+        self.shell.add_page("Отладка", self.debug_page, hidden=True)
         self.setCentralWidget(self.shell)
 
         self.debug_mode = False
@@ -206,17 +212,52 @@ class MainWindow(QMainWindow):
 
         self.dashboard.quick_scan.connect(self.quick_scan)
         self.dashboard.toggle_protection.connect(self.toggle_protection)
-        self.dashboard.update_databases.connect(self.update_databases)
+        self.dashboard.check_updates.connect(self.check_updates)
+        self.debug_page.update_databases.connect(self.update_databases)
         self.dashboard.open_processes.connect(self.open_process_manager)
         self.settings_page.changed.connect(self.on_setting_changed)
         self.update_finished.connect(self._on_update_finished)
         self.shell.page_changed.connect(
-            lambda title: self.refresh_dashboard() if title == "Главная" else None)
+            lambda title: self.refresh_dashboard() if title in ("Главная", "Отладка") else None)
 
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
         self.refresh_dashboard()
+
+    # ---------- центр восстановления ----------
+
+    def open_recovery(self, tab: int = 0, action: str | None = None):
+        if self.recovery_window is None:
+            self.recovery_window = RecoveryWindow()
+            self.recovery_window.restart_requested.connect(self.restart_as_admin)
+            self.apply_on_top(cfg.get("general/on_top"))
+        self.recovery_window.show()
+        self.recovery_window.raise_()
+        self.recovery_window.activateWindow()
+        self.recovery_window.show_tab(tab)
+        if action == "create":
+            self.recovery_window.create_restore_point()  # сначала запрос подтверждения
+        elif action == "check":
+            self.recovery_window.run_system_check()
+
+    # ---------- админ-права ----------
+
+    def restart_as_admin(self):
+        parent = self if self.isVisible() else None
+        answer = QMessageBox.question(
+            parent, "Права администратора",
+            "Программа будет перезапущена с правами администратора. "
+            "Защита и сканирование на время перезапуска остановятся. Продолжить?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if relaunch_as_admin():
+            if self.guard is not None:
+                self.guard.release()  # новый экземпляр сразу сможет занять имя
+            self.quit_app()
+        else:
+            QMessageBox.warning(parent, "Права администратора",
+                                "Не удалось перезапустить (запрос UAC отклонён?)")
 
     # ---------- анализатор файлов ----------
 
@@ -236,11 +277,13 @@ class MainWindow(QMainWindow):
 
     def toggle_debug_mode(self):
         self.debug_mode = not self.debug_mode
-        self.tools_page.set_debug(self.debug_mode)
+        self.shell.set_page_visible("Отладка", self.debug_mode)
+        if self.debug_mode:
+            self.refresh_dashboard()
         title = f"{appinfo.APP_NAME} {appinfo.VERSION}"
         self.setWindowTitle(title + ("  [режим отладки]" if self.debug_mode else ""))
         self.statusBar().showMessage(
-            "Режим отладки включён: на странице «Инструменты» появилась группа «Исследование»"
+            "Режим отладки включён: в меню слева появилась вкладка «Отладка»"
             if self.debug_mode else "Режим отладки выключен", 8000)
 
     # ---------- системный трей ----------
@@ -293,6 +336,7 @@ class MainWindow(QMainWindow):
         if self.proc_window is None:
             self.proc_window = ProcessWindow()
             self.proc_window.analyze_requested.connect(lambda path: self.open_analyzer(path))
+            self.proc_window.restart_requested.connect(self.restart_as_admin)
             self.apply_on_top(cfg.get("general/on_top"))
         self.proc_window.show()
         self.proc_window.raise_()
@@ -300,16 +344,20 @@ class MainWindow(QMainWindow):
 
     # ---------- главная страница и настройки ----------
     def refresh_dashboard(self):
-        rules_dir = Path("signatures/rules")
         self.dashboard.refresh({
             "protection": self.monitor is not None,
             "network": self.net_monitor is not None,
-            "hashes": len(load_all_signatures(SIGNATURES.parent)),
-            "rules": sum(1 for _ in rules_dir.rglob("*.yar")) if rules_dir.exists() else 0,
             "quarantine": len(list_quarantine()),
             "whitelist": len(load_whitelist()),
             "last_scan": cfg.get("stats/last_scan"),
         })
+        if self.debug_mode:  # счётчики баз нужны только на вкладке отладки
+            rule_files, rules = count_rules(Path("signatures/rules"))
+            self.debug_page.refresh(
+                len(load_all_signatures(SIGNATURES.parent)), rules, rule_files)
+
+    def check_updates(self):
+        QDesktopServices.openUrl(QUrl(appinfo.RELEASES_URL))
 
     def quick_scan(self):
         downloads = Path.home() / "Downloads"
@@ -354,7 +402,7 @@ class MainWindow(QMainWindow):
             heuristics.set_threshold(int(value))
 
     def apply_on_top(self, on: bool):
-        for window in (self, self.proc_window, self.autoruns_window, self.analyzer_window):
+        for window in (self, self.proc_window, self.autoruns_window, self.analyzer_window, self.recovery_window):
             if window is not None:
                 visible = window.isVisible()
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
@@ -843,6 +891,9 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def _shutdown_all(self):
+        if self.recovery_window is not None:
+            self.recovery_window.shutdown()
+            self.recovery_window.close()
         if self.analyzer_window is not None:
             self.analyzer_window.close()
         if self.autoruns_window is not None:
@@ -917,7 +968,7 @@ if __name__ == "__main__":
     autostart = "--autostart" in sys.argv
     guard = SingleInstance("StudyAV-myav")
     # уже запущена (например, в трее): показываем её окно и выходим
-    wait = 3.0 if "--relaunched" in sys.argv else 0.0  # ждём закрытия прежнего экземпляра
+    wait = 8.0 if "--relaunched" in sys.argv else 0.0  # ждём закрытия прежнего экземпляра
     if guard.already_running(notify=not autostart, wait=wait):
         sys.exit(0)
 
@@ -928,6 +979,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     window = MainWindow()
+    window.guard = guard
     guard.activated.connect(lambda: window.show_main())
     if tray_ok:
         window.setup_tray(icon)

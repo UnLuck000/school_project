@@ -6,6 +6,7 @@ AUTHOR = "Владимир"                         # TODO: впишите ав�
 ORGANIZATION = ""                           # TODO: школа или университет
 SUPERVISOR = ""                             # TODO: руководитель (можно оставить пустым)
 REPO_URL = "https://github.com/UnLuck000/school_project"  # проверьте адрес
+RELEASES_URL = REPO_URL + "/releases"
 
 THESIS = ("Разработка и исследование системы обнаружения вредоносного программного "
           "обеспечения для обеспечения кибербезопасности")

@@ -47,16 +47,14 @@
        </layout>
       </widget>
      </item>
-     <item row="1" column="1">
-      <widget class="QGroupBox" name="groupResearch">
-       <property name="title"><string>Исследование</string></property>
-       <layout class="QVBoxLayout" name="layoutResearch">
-        <item><widget class="QPushButton" name="btnResearch"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Исследовательский стенд</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnReport"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Отчёт и графики</string></property></widget></item>
-       </layout>
-      </widget>
-     </item>
     </layout>
+   </item>
+   <item>
+    <widget class="QPushButton" name="btnRelaunchAdmin">
+     <property name="minimumSize"><size><width>0</width><height>40</height></size></property>
+     <property name="toolTip"><string>Программа будет перезапущена с правами администратора (запрос UAC). Кнопка видна только без прав администратора.</string></property>
+     <property name="text"><string>Перезапустить от имени администратора</string></property>
+    </widget>
    </item>
    <item>
     <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>

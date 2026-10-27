@@ -17,16 +17,12 @@
       <item row="0" column="1"><widget class="QLabel" name="lblProtection"><property name="text"><string>—</string></property></widget></item>
       <item row="1" column="0"><widget class="QLabel" name="captionNetwork"><property name="text"><string>Мониторинг сети:</string></property></widget></item>
       <item row="1" column="1"><widget class="QLabel" name="lblNetwork"><property name="text"><string>—</string></property></widget></item>
-      <item row="2" column="0"><widget class="QLabel" name="captionHashes"><property name="text"><string>Хэшей в базе сигнатур:</string></property></widget></item>
-      <item row="2" column="1"><widget class="QLabel" name="lblHashes"><property name="text"><string>—</string></property></widget></item>
-      <item row="3" column="0"><widget class="QLabel" name="captionRules"><property name="text"><string>Файлов правил YARA:</string></property></widget></item>
-      <item row="3" column="1"><widget class="QLabel" name="lblRules"><property name="text"><string>—</string></property></widget></item>
-      <item row="4" column="0"><widget class="QLabel" name="captionQuarantine"><property name="text"><string>Файлов в карантине:</string></property></widget></item>
-      <item row="4" column="1"><widget class="QLabel" name="lblQuarantine"><property name="text"><string>—</string></property></widget></item>
-      <item row="5" column="0"><widget class="QLabel" name="captionWhitelist"><property name="text"><string>Записей в белом списке:</string></property></widget></item>
-      <item row="5" column="1"><widget class="QLabel" name="lblWhitelist"><property name="text"><string>—</string></property></widget></item>
-      <item row="6" column="0"><widget class="QLabel" name="captionLastScan"><property name="text"><string>Последняя проверка:</string></property></widget></item>
-      <item row="6" column="1"><widget class="QLabel" name="lblLastScan"><property name="text"><string>—</string></property></widget></item>
+      <item row="2" column="0"><widget class="QLabel" name="captionQuarantine"><property name="text"><string>Файлов в карантине:</string></property></widget></item>
+      <item row="2" column="1"><widget class="QLabel" name="lblQuarantine"><property name="text"><string>—</string></property></widget></item>
+      <item row="3" column="0"><widget class="QLabel" name="captionWhitelist"><property name="text"><string>Записей в белом списке:</string></property></widget></item>
+      <item row="3" column="1"><widget class="QLabel" name="lblWhitelist"><property name="text"><string>—</string></property></widget></item>
+      <item row="4" column="0"><widget class="QLabel" name="captionLastScan"><property name="text"><string>Последняя проверка:</string></property></widget></item>
+      <item row="4" column="1"><widget class="QLabel" name="lblLastScan"><property name="text"><string>—</string></property></widget></item>
      </layout>
     </widget>
    </item>
@@ -36,7 +32,7 @@
      <layout class="QGridLayout" name="gridQuick">
       <item row="0" column="0"><widget class="QPushButton" name="btnQuickScan"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Быстрая проверка папки «Загрузки»</string></property></widget></item>
       <item row="0" column="1"><widget class="QPushButton" name="btnStartProtection"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Включить защиту</string></property></widget></item>
-      <item row="1" column="0"><widget class="QPushButton" name="btnUpdateDatabases"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Обновить базы</string></property></widget></item>
+      <item row="1" column="0"><widget class="QPushButton" name="btnCheckUpdates"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="toolTip"><string>Откроет страницу релизов программы на GitHub</string></property><property name="text"><string>Проверить на наличие обновлений</string></property></widget></item>
       <item row="1" column="1"><widget class="QPushButton" name="btnOpenProcesses"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
      </layout>
     </widget>

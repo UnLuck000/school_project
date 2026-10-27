@@ -73,6 +73,7 @@ class TextDialog(QDialog):
 
 class ProcessWindow(QMainWindow):
     analyze_requested = Signal(str)
+    restart_requested = Signal()
 
     def __init__(self):
         super().__init__()  # без родителя: отдельное окно
@@ -536,11 +537,7 @@ class ProcessWindow(QMainWindow):
         TextDialog(title, text, self).exec()
 
     def relaunch(self):
-        if relaunch_as_admin():
-            QApplication.quit()
-        else:
-            QMessageBox.warning(self, "Права администратора",
-                                "Не удалось перезапустить (запрос UAC отклонён?)")
+        self.restart_requested.emit()
 
     # ---------- сканирование памяти ----------
     def scan_selected_memory(self):

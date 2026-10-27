@@ -21,6 +21,21 @@ def open_analyzer(window):
     window.open_analyzer()
 
 
+@implements("btnRestorePoint")
+def restore_point(window):
+    window.open_recovery(0, "create")
+
+
+@implements("btnSfcDism")
+def integrity_check(window):
+    window.open_recovery(1)
+
+
+@implements("btnSystemChecks")
+def system_checks(window):
+    window.open_recovery(2, "check")
+
+
 
 
 

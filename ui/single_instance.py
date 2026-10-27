@@ -13,6 +13,12 @@ class SingleInstance(QObject):
         self.name = name
         self._server: QLocalServer | None = None
 
+    def release(self) -> None:
+        """Освобождает имя сразу, не дожидаясь завершения процесса."""
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+
     def already_running(self, notify: bool = True, wait: float = 0.0) -> bool:
         """True, если другой экземпляр уже работает.
         wait: сколько секунд ждать, пока он завершится (нужно при перезапуске с повышением)."""

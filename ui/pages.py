@@ -2,7 +2,7 @@ from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QLabel, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
-    QGroupBox, QWidget,
+    QWidget,
 )
 
 import appinfo
@@ -11,7 +11,34 @@ from ui import settings as cfg
 from ui.loader import child, load_ui
 from ui.registry import FEATURES, HANDLERS
 
+from processmanager.system import is_admin
+
 THEMES = ["system", "light", "dark"]  # порядок совпадает с пунктами списка в Designer
+
+
+def _run_feature(widget, window, feature, handler) -> None:
+    if handler is None:
+        QMessageBox.information(
+            widget, feature.title, f"Функция в разработке.\n\nПлан:\n{feature.plan}")
+        return
+    try:
+        handler(window)
+    except Exception as e:  # ошибка в функции не должна ронять программу
+        QMessageBox.critical(widget, feature.title, f"Ошибка: {e}")
+
+
+def bind_features(widget, ui_root, window) -> None:
+    """Привязывает кнопки из ui/registry.py, найденные на странице, к их обработчикам."""
+    for button_id, feature in FEATURES.items():
+        button = ui_root.findChild(QPushButton, button_id)
+        if button is None:  # этой кнопки нет на данной странице
+            continue
+        handler = HANDLERS.get(button_id)
+        if handler is None:
+            button.setText(f"{button.text()}   (скоро)")
+        button.setToolTip(feature.plan)
+        button.clicked.connect(
+            lambda checked=False, f=feature, h=handler: _run_feature(widget, window, f, h))
 
 
 class _UiPage(QWidget):
@@ -30,23 +57,23 @@ class DashboardPage(_UiPage):
     UI_NAME = "dashboard_page"
     quick_scan = Signal()
     toggle_protection = Signal()
-    update_databases = Signal()
+    check_updates = Signal()
     open_processes = Signal()
 
     def __init__(self):
         super().__init__()
         ui = self.ui
-        names = {"protection": "lblProtection", "network": "lblNetwork", "hashes": "lblHashes",
-                 "rules": "lblRules", "quarantine": "lblQuarantine",
-                 "whitelist": "lblWhitelist", "last_scan": "lblLastScan"}
+        names = {"protection": "lblProtection", "network": "lblNetwork",
+                 "quarantine": "lblQuarantine", "whitelist": "lblWhitelist",
+                 "last_scan": "lblLastScan"}
         self.labels = {key: child(ui, QLabel, name) for key, name in names.items()}
         self.btn_protection = child(ui, QPushButton, "btnStartProtection")
 
         child(ui, QPushButton, "btnQuickScan").clicked.connect(
             lambda checked=False: self.quick_scan.emit())
         self.btn_protection.clicked.connect(lambda checked=False: self.toggle_protection.emit())
-        child(ui, QPushButton, "btnUpdateDatabases").clicked.connect(
-            lambda checked=False: self.update_databases.emit())
+        child(ui, QPushButton, "btnCheckUpdates").clicked.connect(
+            lambda checked=False: self.check_updates.emit())
         child(ui, QPushButton, "btnOpenProcesses").clicked.connect(
             lambda checked=False: self.open_processes.emit())
 
@@ -58,8 +85,6 @@ class DashboardPage(_UiPage):
 
         state(self.labels["protection"], info["protection"])
         state(self.labels["network"], info["network"])
-        self.labels["hashes"].setText(f"{info['hashes']:,}".replace(",", " "))
-        self.labels["rules"].setText(str(info["rules"]))
         self.labels["quarantine"].setText(str(info["quarantine"]))
         self.labels["whitelist"].setText(str(info["whitelist"]))
         self.labels["last_scan"].setText(info["last_scan"] or "ещё не выполнялась")
@@ -73,21 +98,21 @@ class ToolsPage(_UiPage):
     def __init__(self, window):
         super().__init__()
         self.window_ref = window
+        bind_features(self, self.ui, window)
+        self.btn_admin = child(self.ui, QPushButton, "btnRelaunchAdmin")
+        self.btn_admin.setVisible(not is_admin())  # с правами администратора кнопка не нужна
+        if window is not None:
+            self.btn_admin.clicked.connect(lambda checked=False: window.restart_as_admin())
         for button_id, feature in FEATURES.items():
             button = self.ui.findChild(QPushButton, button_id)
             if button is None:  # кнопку убрали в Designer
                 continue
             handler = HANDLERS.get(button_id)
-            if handler is None:
-                button.setText(f"{button.text()}   (скоро)")
+            # if handler is None:
+            #     button.setText(f"{button.text()}   (скоро)")
             button.setToolTip(feature.plan)
             button.clicked.connect(
                 lambda checked=False, f=feature, h=handler: self._run(f, h))
-        self.group_research = child(self.ui, QGroupBox, "groupResearch")
-        self.group_research.setVisible(False)
-
-    def set_debug(self, on: bool) -> None:
-        self.group_research.setVisible(on)
 
     def _run(self, feature, handler) -> None:
         if handler is None:
@@ -200,3 +225,21 @@ class AboutPage(_UiPage):
         child(ui, QLabel, "lblDisclaimer").setText(appinfo.DISCLAIMER)
         child(ui, QPushButton, "btnRepo").clicked.connect(
             lambda checked=False: QDesktopServices.openUrl(QUrl(appinfo.REPO_URL)))
+
+
+class DebugPage(_UiPage):
+    """Служебная страница: видна только в режиме отладки."""
+    UI_NAME = "debug_page"
+    update_databases = Signal()
+
+    def __init__(self, window):
+        super().__init__()
+        self.lbl_hashes = child(self.ui, QLabel, "lblHashes")
+        self.lbl_rules = child(self.ui, QLabel, "lblRules")
+        child(self.ui, QPushButton, "btnUpdateDatabases").clicked.connect(
+            lambda checked=False: self.update_databases.emit())
+        bind_features(self, self.ui, window)
+
+    def refresh(self, hashes: int, rules: int, rule_files: int) -> None:
+        self.lbl_hashes.setText(f"{hashes:,}".replace(",", " "))
+        self.lbl_rules.setText(f"{rules:,} (в {rule_files} файлах)".replace(",", " "))

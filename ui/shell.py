@@ -30,12 +30,20 @@ class Shell(QWidget):
         self._titles: list[str] = []
         self.nav.currentRowChanged.connect(self._on_row)
 
-    def add_page(self, title: str, widget: QWidget) -> None:
+    def add_page(self, title: str, widget: QWidget, hidden: bool = False) -> None:
         self.stack.addWidget(widget)
-        self.nav.addItem(QListWidgetItem(title))
+        item = QListWidgetItem(title)
+        self.nav.addItem(item)
+        item.setHidden(hidden)  # только после addItem: у элемента вне списка флаг игнорируется
         self._titles.append(title)
         if self.nav.currentRow() < 0:
             self.nav.setCurrentRow(0)
+
+    def set_page_visible(self, title: str, visible: bool) -> None:
+        index = self._titles.index(title)
+        self.nav.item(index).setHidden(not visible)
+        if not visible and self.nav.currentRow() == index:
+            self.nav.setCurrentRow(0)  # скрытая страница была открыта: возвращаемся на главную
 
     def show_page(self, title: str) -> None:
         self.nav.setCurrentRow(self._titles.index(title))
