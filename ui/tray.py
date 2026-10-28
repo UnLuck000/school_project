@@ -59,7 +59,7 @@ class TrayIcon(QSystemTrayIcon):
             ("Сканер автозапуска", window.open_autoruns),
             ("Диспетчер процессов", window.open_process_manager),
             ("Анализатор файла", lambda: window.run_feature("btnFileAnalyzer")),
-            ("Создать точку восстановления", lambda: window.run_feature("btnRestorePoint")),
+            ("Проверка системы", lambda: window.run_feature("btnSystemChecks")),
         )
         for text, handler in items:
             tools.addAction(text).triggered.connect(
