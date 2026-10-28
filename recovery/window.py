@@ -3,7 +3,7 @@ import threading
 from datetime import datetime
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QTextCursor
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem,
@@ -11,10 +11,13 @@ from PySide6.QtWidgets import (
 )
 
 import appinfo
-from processmanager.colors import text_color
+# from processmanager.colors import text_color
 from processmanager.system import is_admin
 from recovery import actions
 from recovery import system as rsys
+from recovery import checks
+from recovery.panels import FindingsPanel, PolicyPanel
+
 
 COMMANDS = {
     "sfc_verify": ("Проверка файлов (sfc /verifyonly)", ["sfc.exe", "/verifyonly"], False),
@@ -75,7 +78,6 @@ class RecoveryWindow(QMainWindow):
         self._proc = None
         self._partial = ""
         self._last_progress = False
-        self._findings: list[rsys.Finding] = []
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -89,6 +91,7 @@ class RecoveryWindow(QMainWindow):
         self.statusBar().showMessage("Готово")
 
     # ---------- общие элементы ----------
+
     def _build_admin_banner(self) -> QWidget:
         banner = QWidget()
         row = QHBoxLayout(banner)
@@ -110,11 +113,10 @@ class RecoveryWindow(QMainWindow):
             button.setEnabled(not busy)
         if message:
             self.statusBar().showMessage(message)
-        if not busy:
-            self._update_fix_button()
 
     def _async(self, kind: str, fn, message: str) -> None:
         if self._busy:
+            self.statusBar().showMessage("Дождитесь окончания текущей операции", 5000)
             return
         self._set_busy(True, message)
 
@@ -150,13 +152,14 @@ class RecoveryWindow(QMainWindow):
             self.statusBar().showMessage(payload, 10000)
             QMessageBox.information(self, "Защита системы", payload)
         elif kind == "checks":
-            self._fill_findings(payload)
-        elif kind == "fix":
-            self.statusBar().showMessage(payload, 10000)
+            self._apply_results(payload)
+        elif kind in ("fix", "unlock"):
+            self.statusBar().showMessage(payload.splitlines()[0], 10000)
             QMessageBox.information(self, "Исправление", payload)
             self.run_system_check()
 
     # ---------- вкладка «Точки восстановления» ----------
+
     def _build_points_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -219,6 +222,7 @@ class RecoveryWindow(QMainWindow):
             QMessageBox.critical(self, "Восстановление системы", f"Не удалось открыть: {e}")
 
     # ---------- вкладка «Целостность Windows» ----------
+
     def _build_integrity_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -329,75 +333,101 @@ class RecoveryWindow(QMainWindow):
         self.statusBar().showMessage(f"Команда {meaning}", 10000)
 
     # ---------- вкладка «Проверка системы» ----------
+
+    PANELS = [
+        ("hosts", "hosts",
+         "Файл hosts подменяет адреса сайтов. Показаны записи, перенаправляющие домены на "
+         "внешние адреса, и записи, блокирующие домены защиты и обновлений. Обычные блокировки "
+         "рекламы свёрнуты в одну строку."),
+        ("proxy", "Прокси",
+         "Прокси браузеров и системы (WinINET). Вредоносные программы включают прокси или PAC-скрипт, "
+         "чтобы перехватывать трафик. Проверяются текущий пользователь и другие учётные записи."),
+        ("winhttp", "WinHTTP-прокси",
+         "WinHTTP-прокси используют службы Windows и многие программы в обход настроек браузера."),
+        ("updates", "Обновления",
+         "Политики, службы и задачи расписания Центра обновления Windows. Их отключают, чтобы "
+         "система не получала исправления безопасности."),
+        ("firewall", "Брандмауэр",
+         "Состояние профилей брандмауэра и подозрительные правила: входящий доступ для программ из "
+         "временных папок и блокировка программ защиты. Удаление правила применяется после "
+         "перезапуска службы брандмауэра или перезагрузки."),
+        ("bcd", "BCD",
+         "Параметры загрузки Windows: тестовый режим драйверов, отключение проверок целостности и "
+         "среды восстановления, безопасный режим. Нужны права администратора."),
+    ]
+
     def _build_checks_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.addWidget(QLabel(
-            "Поиск следов вредоносного ПО: подмена hosts, прокси, отключённая защита, "
-            "исключения Defender, политики. Каждое исправление выполняется отдельно, "
-            "после подтверждения, и попадает в журнал действий."))
         row = QHBoxLayout()
-        check = QPushButton("Проверить систему")
+        check = QPushButton("Проверить всё")
         check.clicked.connect(self.run_system_check)
-        self.btn_fix = QPushButton("Исправить выбранное")
-        self.btn_fix.setEnabled(False)
-        self.btn_fix.clicked.connect(self.fix_selected)
         row.addWidget(check)
-        row.addWidget(self.btn_fix)
         row.addStretch()
         layout.addLayout(row)
         self._busy_buttons.append(check)
 
-        self.findings_tree = _make_tree(["Раздел", "Проверка", "Состояние", "Подробности"],
-                                        [150, 330, 260, 400])
-        self.findings_tree.itemSelectionChanged.connect(self._update_fix_button)
-        layout.addWidget(self.findings_tree)
+        self.check_tabs = QTabWidget()
+        layout.addWidget(self.check_tabs, 1)
+        self.panels: dict[str, FindingsPanel] = {}
+        for category, title, hint in self.PANELS:
+            panel = FindingsPanel(hint)
+            panel.fix_requested.connect(self.fix_finding)
+            self.panels[category] = panel
+            self.check_tabs.addTab(panel, title)
+        self.policy_panel = PolicyPanel()
+        self.policy_panel.scan_requested.connect(self.run_system_check)
+        self.policy_panel.unlock_hits_requested.connect(self.unlock_hits)
+        self.policy_panel.unlock_names_requested.connect(self.unlock_names)
+        self.check_tabs.addTab(self.policy_panel, "Политики и блокировки")
         return tab
 
     def run_system_check(self) -> None:
-        self._async("checks", rsys.run_all_checks, "Проверяю систему...")
+        self._async("checks", checks.run_all, "Проверяю систему...")
 
-    def _fill_findings(self, findings) -> None:
-        self._findings = findings
-        tree = self.findings_tree
-        tree.clear()
-        for index, f in enumerate(findings):
-            item = QTreeWidgetItem([CATEGORY_TEXT.get(f.category, f.category), f.title,
-                                    f.status, f.detail])
-            item.setData(0, INDEX_ROLE, index)
-            rgb = LEVEL_COLORS[f.level]
-            for col in range(4):
-                item.setBackground(col, QBrush(QColor(*rgb)))
-                item.setForeground(col, QBrush(text_color(rgb)))
-                item.setToolTip(col, f.detail or f.status)
-            tree.addTopLevelItem(item)
-        problems = sum(1 for f in findings if f.level in ("warning", "bad"))
-        self.statusBar().showMessage(
-            f"Проверка завершена. Требуют внимания: {problems}", 10000)
-        self._update_fix_button()
+    def _apply_results(self, results) -> None:
+        problems = 0
+        for category, panel in self.panels.items():
+            findings = results.findings.get(category, [])
+            panel.set_findings(findings)
+            problems += sum(1 for f in findings if f.level in ("warning", "bad"))
+        self.policy_panel.set_hits(results.hits)
+        problems += len(results.hits)
+        message = f"Проверка завершена. Требуют внимания: {problems}"
+        if results.policy_error:
+            message += f". Сканирование политик не удалось: {results.policy_error}"
+        self.statusBar().showMessage(message, 12000)
 
-    def _selected_finding(self):
-        items = self.findings_tree.selectedItems()
-        return self._findings[items[0].data(0, INDEX_ROLE)] if items else None
-
-    def _update_fix_button(self) -> None:
-        f = self._selected_finding()
-        has_fix = f is not None and f.fix is not None and not self._busy
-        self.btn_fix.setEnabled(has_fix)
-        self.btn_fix.setText(f.fix_title if has_fix else "Исправить выбранное")
-
-    def fix_selected(self) -> None:
-        f = self._selected_finding()
-        if f is None or f.fix is None:
-            return
+    def fix_finding(self, finding) -> None:
         answer = QMessageBox.question(
-            self, f.fix_title,
-            f"{f.title}\n{f.status}\n{f.detail}\n\nВыполнить: {f.fix_title}?\n\n"
+            self, finding.fix_title,
+            f"{finding.title}\n{finding.status}\n{finding.detail}\n\n"
+            f"Выполнить: {finding.fix_title}?\n\n"
             "Изменение попадёт в журнал действий, и его можно будет отменить.")
         if answer == QMessageBox.StandardButton.Yes:
-            self._async("fix", lambda: actions.apply_fix(f), "Выполняю исправление...")
+            self._async("fix", lambda: actions.apply_fix(finding), "Выполняю исправление...")
+
+    def unlock_hits(self, hits) -> None:
+        lines = "\n".join(f"• {h.title}" for h in hits[:8])
+        more = f"\n...и ещё {len(hits) - 8}" if len(hits) > 8 else ""
+        answer = QMessageBox.question(
+            self, "Разблокировка",
+            f"Снять ограничений: {len(hits)}?\n\n{lines}{more}\n\n"
+            "Изменения попадут в журнал действий и отменяются одним действием.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self._async("unlock", lambda: actions.unlock_hits(hits), "Снимаю ограничения...")
+
+    def unlock_names(self, names) -> None:
+        answer = QMessageBox.question(
+            self, "Разблокировка",
+            f"Найти и снять выбранные ограничения ({len(names)})?\n\n"
+            "Изменения попадут в журнал действий и отменяются одним действием.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self._async("unlock", lambda: actions.unlock_by_names(names),
+                        "Снимаю ограничения...")
 
     # ---------- завершение ----------
+
     def shutdown(self) -> None:
         """Вызывается при закрытии главного окна."""
         if self._proc is not None:

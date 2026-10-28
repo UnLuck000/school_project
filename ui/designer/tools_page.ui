@@ -42,7 +42,7 @@
        <layout class="QVBoxLayout" name="layoutRecovery">
         <item><widget class="QPushButton" name="btnRestorePoint"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Создать точку восстановления</string></property></widget></item>
         <item><widget class="QPushButton" name="btnSfcDism"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка целостности (SFC/DISM)</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnSystemChecks"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка hosts, прокси и исключений Defender</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnSystemChecks"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка системы (hosts, прокси, политики...)</string></property></widget></item>
         <item><widget class="QPushButton" name="btnUndoJournal"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Журнал действий и откат</string></property></widget></item>
        </layout>
       </widget>
