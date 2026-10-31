@@ -107,12 +107,12 @@ class ToolsPage(_UiPage):
             button = self.ui.findChild(QPushButton, button_id)
             if button is None:  # кнопку убрали в Designer
                 continue
-            handler = HANDLERS.get(button_id)
+            # handler = HANDLERS.get(button_id)
             # if handler is None:
             #     button.setText(f"{button.text()}   (скоро)")
-            button.setToolTip(feature.plan)
-            button.clicked.connect(
-                lambda checked=False, f=feature, h=handler: self._run(f, h))
+            # button.setToolTip(feature.plan)
+            # button.clicked.connect(
+            #     lambda checked=False, f=feature, h=handler: self._run(f, h))
 
     def _run(self, feature, handler) -> None:
         if handler is None:
@@ -141,9 +141,11 @@ class SettingsPage(_UiPage):
         self.spn_workers = child(ui, QSpinBox, "spnWorkers")
         self.spn_interval = child(ui, QSpinBox, "spnInterval")
         self.chk_tray = child(ui, QCheckBox, "chkTray")
+        self.chk_explorer = child(ui, QCheckBox, "chkExplorerMenu")
         self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_auto_protect,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
-                     self.spn_workers, self.spn_interval, self.chk_tray)
+                     self.spn_workers, self.spn_interval, self.chk_tray,
+                     self.chk_explorer,)
         self.load_values()
 
         self.chk_autostart.toggled.connect(self._on_autostart)
@@ -151,6 +153,7 @@ class SettingsPage(_UiPage):
         self.chk_auto_protect.toggled.connect(lambda v: self._save("startup/auto_protect", v))
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
         self.chk_tray.toggled.connect(lambda v: self._save("general/close_to_tray", v))
+        self.chk_explorer.toggled.connect(self._on_explorer_menu)
         self.cmb_theme.currentIndexChanged.connect(
             lambda i: self._save("general/theme", THEMES[i]))
         self.spn_threshold.valueChanged.connect(lambda v: self._save("scan/threshold", v))
@@ -166,6 +169,7 @@ class SettingsPage(_UiPage):
         self.chk_auto_protect.setChecked(cfg.get("startup/auto_protect"))
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
         self.chk_tray.setChecked(cfg.get("general/close_to_tray"))
+        self.chk_explorer.setChecked(cfg.explorer_menu_enabled())
         theme = cfg.get("general/theme")
         self.cmb_theme.setCurrentIndex(THEMES.index(theme) if theme in THEMES else 0)
         self.spn_threshold.setValue(cfg.get("scan/threshold"))
@@ -199,6 +203,15 @@ class SettingsPage(_UiPage):
         self.load_values()
         for key in ("general/on_top", "general/theme", "scan/threshold"):
             self.changed.emit(key, cfg.get(key))
+
+    def _on_explorer_menu(self, checked: bool) -> None:
+        try:
+            cfg.set_explorer_menu(checked)
+        except OSError as e:
+            QMessageBox.warning(self, "Проводник", f"Не удалось изменить меню: {e}")
+            self.chk_explorer.blockSignals(True)
+            self.chk_explorer.setChecked(not checked)
+            self.chk_explorer.blockSignals(False)
 
 
 class AboutPage(_UiPage):

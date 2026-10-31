@@ -5,23 +5,20 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 class SingleInstance(QObject):
-    """Один экземпляр программы: второй запуск просит первый показать окно."""
+    """Один экземпляр программы: второй запуск просит первый показать окно или открыть файл."""
     activated = Signal()
+    file_received = Signal(str)
 
     def __init__(self, name: str):
         super().__init__()
         self.name = name
         self._server: QLocalServer | None = None
 
-    def release(self) -> None:
-        """Освобождает имя сразу, не дожидаясь завершения процесса."""
-        if self._server is not None:
-            self._server.close()
-            self._server = None
-
-    def already_running(self, notify: bool = True, wait: float = 0.0) -> bool:
+    def already_running(self, notify: bool = True, wait: float = 0.0,
+                        message: bytes = b"show") -> bool:
         """True, если другой экземпляр уже работает.
-        wait: сколько секунд ждать, пока он завершится (нужно при перезапуске с повышением)."""
+        wait: сколько секунд ждать, пока он завершится (нужно при перезапуске с повышением).
+        message: b"show" или b"open\\n<путь к файлу>"."""
         deadline = time.monotonic() + wait
         while True:
             socket = QLocalSocket()
@@ -33,7 +30,7 @@ class SingleInstance(QObject):
             socket.abort()
             time.sleep(0.15)
         if notify:
-            socket.write(b"show")
+            socket.write(message)
             socket.flush()
             socket.waitForBytesWritten(500)
         socket.disconnectFromServer()
@@ -52,12 +49,23 @@ class SingleInstance(QObject):
         self._server = server
         return True
 
+    def release(self) -> None:
+        """Освобождает имя сразу, не дожидаясь завершения процесса."""
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+
     def _on_connection(self):
-        while self._server.hasPendingConnections():
+        while self._server is not None and self._server.hasPendingConnections():
             conn = self._server.nextPendingConnection()
             conn.readyRead.connect(lambda c=conn: self._read(c))
             conn.disconnected.connect(conn.deleteLater)
 
     def _read(self, conn: QLocalSocket):
-        if bytes(conn.readAll()).strip() == b"show":
+        data = bytes(conn.readAll())
+        if data.startswith(b"open\n"):
+            path = data[5:].decode("utf-8", "replace").strip()
+            if path:
+                self.file_received.emit(path)
+        elif data.strip() == b"show":
             self.activated.emit()

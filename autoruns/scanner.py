@@ -136,12 +136,10 @@ def collect_winlogon() -> list[Entry]:
             except OSError:
                 continue
             parts = [p.strip().lower() for p in str(data).split(",") if p.strip()]
-            if parts == [default]:
-                continue
+            flags = [] if parts == [default] else ["значение отличается от стандартного"]
             entries.append(Entry(
                 kind="winlogon", name=value, location=f"HKLM\\{path}", command=str(data),
-                exe=_resolve_exe(_command_exe(str(data).split(",")[0])),
-                flags=["значение отличается от стандартного"]))
+                exe=_resolve_exe(_command_exe(str(data).split(",")[0])), flags=flags))
     return entries
 
 
@@ -309,7 +307,7 @@ def assess(e: Entry, ctx: Context) -> None:
     if e.kind == "wmi":
         level = raise_level(level, "suspicious")
         flags.append("подписка WMI: редкий способ закрепления")
-    if e.kind == "winlogon":
+    if e.kind == "winlogon" and flags:  # значение отличается от стандартного
         level = raise_level(level, "suspicious")
 
     exe = e.exe

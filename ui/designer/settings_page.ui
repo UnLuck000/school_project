@@ -55,6 +55,14 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="groupExplorer">
+     <property name="title"><string>Интеграция с Проводником</string></property>
+     <layout class="QVBoxLayout" name="layoutExplorer">
+      <item><widget class="QCheckBox" name="chkExplorerMenu"><property name="toolTip"><string>Пункт «Проверить в myAV» появится в меню правой кнопки мыши для файлов. В Windows 11 он находится в «Показать дополнительные параметры» (или Shift+правая кнопка).</string></property><property name="text"><string>Добавить пункт «Проверить в myAV» в контекстное меню файлов</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
    </item>
   </layout>

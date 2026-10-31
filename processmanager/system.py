@@ -242,6 +242,22 @@ def is_admin() -> bool:
         return False
 
 
+def allow_drops_from_lower_integrity(hwnd: int) -> bool:
+    """Разрешает окну с повышенными правами получать файлы, перетаскиваемые из обычного
+    Проводника (по умолчанию Windows это блокирует). Помогает не на всех системах."""
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.ChangeWindowMessageFilterEx.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.DWORD, ctypes.c_void_p]
+        user32.ChangeWindowMessageFilterEx.restype = wintypes.BOOL
+        # WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA; 1 = MSGFLT_ALLOW
+        return all(bool(user32.ChangeWindowMessageFilterEx(hwnd, msg, 1, None))
+                   for msg in (0x233, 0x4A, 0x49))
+    except (AttributeError, OSError):
+        return False
+
+
 def relaunch_as_admin() -> bool:
     """Запускает программу заново с запросом UAC. True, если запрос принят."""
     extra = [] if "--relaunched" in sys.argv else ["--relaunched"]

@@ -1,7 +1,7 @@
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView,
@@ -15,11 +15,13 @@ from analyzer.report import (
 )
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
-from processmanager.system import open_in_explorer
+from processmanager.system import allow_drops_from_lower_integrity, is_admin, open_in_explorer
 from quarantine import quarantine_file
 from recovery import journal
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
+
+from analyzer.codeview import CodeTab
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 LEVEL_COLORS = {"threat": (255, 128, 128), "suspicious": (255, 190, 110),
@@ -80,6 +82,7 @@ class AnalyzerWindow(QMainWindow):
         self.bridge.done.connect(self.on_done)
         self.bridge.failed.connect(self.on_failed)
         self.report: FileReport | None = None
+        self._banner_before = None
         self._busy = False
         self._strings: list[tuple[int, str, str]] = []
         self._build_ui()
@@ -91,6 +94,7 @@ class AnalyzerWindow(QMainWindow):
 
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
+        self.path_edit.setAcceptDrops(False)  # иначе поле само перехватывает перетаскивание
         self.path_edit.setPlaceholderText("Путь к файлу или перетащите файл в это окно")
         self.path_edit.returnPressed.connect(self.analyze_clicked)
         browse = QPushButton("Обзор...")
@@ -113,10 +117,12 @@ class AnalyzerWindow(QMainWindow):
         self.checks_tree = _make_tree(["Слой проверки", "Результат", "Подробности"], [260, 260, 600])
         self.pe_tree = _make_tree(["Элемент", "Значение", "Размер на диске", "Энтропия", "Права"],
                                   [320, 260, 130, 90, 80])
+        self.code_tab = CodeTab()
         self.tabs.addTab(self.general_tree, "Общие")
         self.tabs.addTab(self.sig_tree, "Подпись")
         self.tabs.addTab(self.checks_tree, "Проверка")
         self.tabs.addTab(self.pe_tree, "PE")
+        self.tabs.addTab(self.code_tab, "Код")
         self.tabs.addTab(self._build_strings_tab(), "Строки")
         layout.addWidget(self.tabs, 1)
 
@@ -143,6 +149,7 @@ class AnalyzerWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         row = QHBoxLayout()
         self.str_filter = QLineEdit()
+        self.str_filter.setAcceptDrops(False)
         self.str_filter.setPlaceholderText("Фильтр по тексту строки...")
         self.str_filter.textChanged.connect(lambda _: self._refill_strings())
         self.str_interesting = QCheckBox("Только интересные (адреса, ключи реестра, API и т.п.)")
@@ -162,15 +169,39 @@ class AnalyzerWindow(QMainWindow):
             button.setEnabled(enabled)
 
     # ---------- загрузка файла ----------
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
+    @staticmethod
+    def _first_local_file(event) -> str | None:
         for url in event.mimeData().urls():
             if url.isLocalFile():
-                self.load_file(url.toLocalFile())
-                break
+                return url.toLocalFile()
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._first_local_file(event):
+            if self._banner_before is None:
+                self._banner_before = self.banner.text()
+            self.banner.setText("Отпустите кнопку мыши, чтобы проанализировать файл")
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._restore_banner()
+
+    def dropEvent(self, event):
+        path = self._first_local_file(event)
+        self._restore_banner()
+        if path:
+            event.acceptProposedAction()
+            self.load_file(path)
+
+    def _restore_banner(self):
+        if self._banner_before is not None:
+            self.banner.setText(self._banner_before)
+            self._banner_before = None
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if is_admin():  # окно с повышенными правами по умолчанию не принимает файлы из обычного Проводника
+            allow_drops_from_lower_integrity(int(self.winId()))
 
     def browse(self):
         path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для анализа")
@@ -232,6 +263,7 @@ class AnalyzerWindow(QMainWindow):
         self._fill_signature(report)
         self._fill_checks(report)
         self._fill_pe(report)
+        self.code_tab.set_view(report.code)
         self._strings = report.strings
         self._refill_strings()
         self.statusBar().showMessage(f"Готово: {report.name}", 8000)

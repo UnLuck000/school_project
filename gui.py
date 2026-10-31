@@ -37,7 +37,7 @@ from networkmonitor.connections import LEVEL_TEXT, terminate_process
 from networkmonitor.netmon import NetworkMonitor
 
 from processmanager.window import ProcessWindow
-from processmanager.system import is_admin, relaunch_as_admin
+from processmanager.system import is_admin, relaunch_as_admin, allow_drops_from_lower_integrity
 
 from ui import settings as cfg
 from ui.pages import AboutPage, DashboardPage, SettingsPage, ToolsPage, DebugPage
@@ -182,6 +182,8 @@ class MainWindow(QMainWindow):
         self._tray_hint_shown = False
         self.autoruns_window: AutorunsWindow | None = None
         self.recovery_window: RecoveryWindow | None = None
+
+        self.setAcceptDrops(True)
 
         self.shell = Shell()
         self.dashboard = DashboardPage()
@@ -910,6 +912,22 @@ class MainWindow(QMainWindow):
             self.worker.stop()
             self.worker.wait(5000)
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and Path(url.toLocalFile()).is_file():
+                event.acceptProposedAction()
+                self.open_analyzer(url.toLocalFile())  # файл откроется в анализаторе
+                break
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if is_admin():
+            allow_drops_from_lower_integrity(int(self.winId()))
+
     def closeEvent(self, event):
         to_tray = (not self._quitting and self.tray is not None
                    and cfg.get("general/close_to_tray"))
@@ -954,6 +972,16 @@ def ask_for_admin() -> bool:
         return relaunch_as_admin()  # False, если пользователь отклонил запрос UAC
     return False
 
+
+def _argument(name: str) -> str | None:
+    """Значение параметра командной строки вида: --name <значение>."""
+    if name in sys.argv:
+        index = sys.argv.index(name) + 1
+        if index < len(sys.argv):
+            return sys.argv[index]
+    return None
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     apply_theme(app, cfg.get("general/theme"))
@@ -962,18 +990,19 @@ if __name__ == "__main__":
     icon = load_app_icon()
     app.setWindowIcon(icon)
     tray_ok = QSystemTrayIcon.isSystemTrayAvailable()
-    # с треем программа живёт и после закрытия последнего окна
-    app.setQuitOnLastWindowClosed(not tray_ok)
+    app.setQuitOnLastWindowClosed(not tray_ok)  # с треем программа живёт и после закрытия окна
 
     autostart = "--autostart" in sys.argv
+    analyze_path = _argument("--analyze")  # файл из меню Проводника
     guard = SingleInstance("StudyAV-myav")
-    # уже запущена (например, в трее): показываем её окно и выходим
-    wait = 8.0 if "--relaunched" in sys.argv else 0.0  # ждём закрытия прежнего экземпляра
-    if guard.already_running(notify=not autostart, wait=wait):
+    wait = 10.0 if "--relaunched" in sys.argv else 0.0  # ждём закрытия прежнего экземпляра
+    message = (b"open\n" + analyze_path.encode("utf-8")) if analyze_path else b"show"
+    # уже запущена: передаём ей файл или просьбу показать окно и выходим
+    if guard.already_running(notify=not autostart, wait=wait, message=message):
         sys.exit(0)
 
-    # при запуске из автозапуска окно UAC не показываем
-    if not autostart and ask_for_admin():
+    # при запуске из автозапуска или из меню Проводника окно UAC не показываем
+    if not autostart and not analyze_path and ask_for_admin():
         sys.exit(0)
     if not guard.listen():  # другой экземпляр успел занять имя
         sys.exit(0)
@@ -981,13 +1010,17 @@ if __name__ == "__main__":
     window = MainWindow()
     window.guard = guard
     guard.activated.connect(lambda: window.show_main())
+    guard.file_received.connect(lambda path: window.open_analyzer(path))
     if tray_ok:
         window.setup_tray(icon)
     window.apply_on_top(cfg.get("general/on_top"))
 
-    start_hidden = autostart and tray_ok and cfg.get("general/close_to_tray")
-    if not start_hidden:
+    quiet_start = ((autostart or bool(analyze_path)) and tray_ok
+                   and cfg.get("general/close_to_tray"))
+    if not quiet_start:
         window.show()
+    if analyze_path:
+        window.open_analyzer(analyze_path)
     if cfg.get("startup/auto_protect"):
         window.toggle_protection()
     sys.exit(app.exec())

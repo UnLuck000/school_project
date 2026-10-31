@@ -13,6 +13,8 @@ from scanner.heuristics import API_GROUPS, PEReport, analyze_pe, get_threshold
 from scanner.signature import SignatureInfo, inspect_signature
 from scanner.yara_engine import MAX_FILE_SIZE, match_file
 
+from analyzer.code import CodeView, build_code_view
+
 HEAD_LIMIT = 16 * 1024 * 1024  # сколько начала файла держим в памяти (энтропия, строки)
 STRINGS_LIMIT = 8 * 1024 * 1024  # в какой части файла ищем строки
 MAX_STRINGS = 30000
@@ -279,6 +281,7 @@ class FileReport:
     strings: list[tuple[int, str, str]]
     verdict: str
     level: str  # threat | suspicious | clean | info
+    code: CodeView | None = None
 
 
 def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -> FileReport:
@@ -319,6 +322,8 @@ def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -
     if level == "clean" and masquerade:
         verdict, level = "Подозрительно: " + notes[0], "suspicious"
 
+    code = build_code_view(path, key, ext, pe)
+
     return FileReport(
         path=str(path), name=path.name, ext=ext, size=stat.st_size,
         created=_fmt_time(stat.st_ctime), modified=_fmt_time(stat.st_mtime),
@@ -327,4 +332,4 @@ def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -
         signature=signature, whitelisted=whitelisted, hash_match=hash_match,
         hash_db_size=len(signatures), rules_ok=rules is not None, yara_skipped=yara_skipped,
         yara=yara_names, heuristics=heuristics, threshold=threshold, pe=pe,
-        strings=extract_strings(head[:STRINGS_LIMIT]), verdict=verdict, level=level)
+        strings=extract_strings(head[:STRINGS_LIMIT]), verdict=verdict, level=level, code=code)
