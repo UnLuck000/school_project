@@ -239,12 +239,11 @@ def _pe_view(path: Path, pe) -> CodeView:
         image.close()
     if not data:
         return CodeView("Программа (PE)", "text", "", note + "У файла нет точки входа.", [])
-    try:
-        import capstone
-    except ImportError:
+    from analyzer.disasm import capstone_status  # поздний импорт: disasm импортирует этот модуль
+    capstone, error = capstone_status()
+    if capstone is None:
         return CodeView("Программа (PE): байты точки входа", "text", hexdump(data, base),
-                        note + "Для дизассемблирования установите библиотеку: pip install capstone. "
-                        "Сейчас показан дамп байтов в точке входа.", [])
+                        note + error + "\nСейчас показан дамп байтов в точке входа.", [])
     modes = {0x8664: capstone.CS_MODE_64, 0x14C: capstone.CS_MODE_32}
     if machine not in modes:
         return CodeView("Программа (PE): байты точки входа", "text", hexdump(data, base),

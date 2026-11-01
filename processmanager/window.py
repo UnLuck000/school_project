@@ -4,10 +4,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal, QEvent
 from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDockWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDockWidget,
     QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
@@ -17,24 +17,29 @@ from processmanager.memscan import MemResult, get_rules, scan_process
 from processmanager.origin import FILTERS, HELP, ORIGINS
 from processmanager.system import (
     ProcInfo, enable_debug_privilege, is_admin, open_in_explorer,
-    process_details, relaunch_as_admin, run_action, take_snapshot,
+    process_details, run_action, take_snapshot,
 )
-# from scanner.engine import check_file
-# from scanner.hashing import load_all_signatures
-from scanner.heuristics import analyze_pe
-from scanner.signature import describe, inspect_signature
-# from scanner.whitelist import load_whitelist
+from processmanager.enrich import Enricher
+
 from ui import settings as cfg
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 COLUMNS = ["Процесс", "PID", "CPU, %", "Память, МБ", "Пользователь", "Запуск",
            "Подпись", "Память (YARA)", "Путь"]
+
+
+def apply_enriched(p, result) -> None:
+    if result:
+        p.sig, p.sig_status, p.packed, p.dotnet = result
+
+
 DESC_FIRST = {2, 3}  # числовые колонки при первом клике сортируются по убыванию
 KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 SORT_ROLE = Qt.ItemDataRole.UserRole + 2
 LOCKED_TIP = "Системный процесс: изменение запрещено"
 ASC = Qt.SortOrder.AscendingOrder
 DESC = Qt.SortOrder.DescendingOrder
+DYNAMIC_COLUMNS = {2, 3}  # CPU и память меняются постоянно
 
 
 class Bridge(QObject):
@@ -93,8 +98,12 @@ class ProcessWindow(QMainWindow):
         self._sort: tuple[int, Qt.SortOrder] | None = None  # None = дерево
         self._scan_matches: list[str] = []
         self._scan_started = 0.0
-        self._sig_cache: dict[str, tuple[str, str]] = {}
-        self._pe_cache: dict[str, tuple[bool, bool]] = {}
+        self._row_state: dict[str, tuple] = {}  # что сейчас показано в строке
+        self._pending_snapshot = None           # снимок, полученный, пока окно было скрыто
+        self._last_resort = 0.0
+        self._brushes: dict = {}
+        self.enricher = Enricher()
+        self.enricher.changed.connect(self._on_enriched)
         self._stop_snapshots = threading.Event()
         self._snap_thread: threading.Thread | None = None
         self._scan_cancel = threading.Event()
@@ -312,29 +321,11 @@ class ProcessWindow(QMainWindow):
         while not self._stop_snapshots.is_set():
             try:
                 procs = take_snapshot()
-                sig_budget, pe_budget = 6, 3  # тяжёлые проверки распределяем по циклам
                 for p in procs:
-                    if not p.has_file:  # у Registry, Memory Compression и т.п. файла нет
+                    if p.has_file:
+                        apply_enriched(p, self.enricher.lookup(p.exe))  # None: проверка уже в очереди
+                    else:
                         p.sig = "Без файла (ядро Windows)" if p.core else ""
-                        continue
-                    if p.exe not in self._sig_cache and sig_budget > 0:
-                        sig_budget -= 1
-                        try:
-                            info = inspect_signature(Path(p.exe))
-                            self._sig_cache[p.exe] = (describe(info) or "—", info.status)
-                        except Exception:
-                            self._sig_cache[p.exe] = ("—", "")
-                    if p.exe not in self._pe_cache and pe_budget > 0:
-                        pe_budget -= 1
-                        try:
-                            report = analyze_pe(Path(p.exe))
-                            packed = sum(f.points for f in report.findings
-                                         if f.category == "pack") >= 4
-                            self._pe_cache[p.exe] = (packed, report.dotnet)
-                        except Exception:
-                            self._pe_cache[p.exe] = (False, False)
-                    p.sig, p.sig_status = self._sig_cache.get(p.exe, ("", ""))
-                    p.packed, p.dotnet = self._pe_cache.get(p.exe, (False, False))
                 self.bridge.snapshot.emit(procs)
             except Exception:
                 pass
@@ -349,36 +340,60 @@ class ProcessWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         self._start_snapshots()
+        if self._pending_snapshot is not None:
+            self.on_snapshot(self._pending_snapshot)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if (event.type() == QEvent.Type.WindowStateChange and not self.isMinimized()
+                and self._pending_snapshot is not None):
+            self.on_snapshot(self._pending_snapshot)
 
     def closeEvent(self, event):
         self._stop_snapshots.set()
         self._scan_cancel.set()
+        self.enricher.save()
         event.accept()
 
     def shutdown(self):
         """Вызывается при закрытии главного окна."""
         self._stop_snapshots.set()
         self._scan_cancel.set()
+        self.enricher.shutdown()
 
     # ---------- обновление списка ----------
     def on_snapshot(self, procs: list[ProcInfo]):
+        if self.isMinimized() or not self.isVisible():
+            self._pending_snapshot = procs  # окно скрыто: применим, когда его покажут
+            return
+        self._pending_snapshot = None
         current = {p.key: p for p in procs}
         self.procs = current
+        self.tree.setUpdatesEnabled(False)  # одна перерисовка вместо сотен
+        try:
+            removed = [k for k in self.items if k not in current]
+            for key in removed:
+                self._remove_item(key)
+            new_keys = [k for k in current if k not in self.items]
+            for key in new_keys:
+                item = ProcItem()
+                item.setData(0, KEY_ROLE, key)
+                self.items[key] = item
+            self._attach(new_keys)
+            for key, p in current.items():
+                self._fill(self.items[key], p)
 
-        for key in [k for k in self.items if k not in current]:
-            self._remove_item(key)
-
-        new_keys = [k for k in current if k not in self.items]
-        for key in new_keys:
-            item = ProcItem()
-            item.setData(0, KEY_ROLE, key)
-            self.items[key] = item
-        self._attach(new_keys)
-
-        for key, p in current.items():
-            self._fill(self.items[key], p)
-        self._resort()
-        self._apply_filter()
+            structure_changed = bool(removed or new_keys)
+            now = time.monotonic()
+            dynamic_sort = self._sort is not None and self._sort[0] in DYNAMIC_COLUMNS
+            if structure_changed or (dynamic_sort and now - self._last_resort > 4.0):
+                self._resort()
+                self._last_resort = now
+            if (structure_changed or self.filter_edit.text().strip()
+                    or self._origin_ids() is not None):
+                self._apply_filter()
+        finally:
+            self.tree.setUpdatesEnabled(True)
         self._update_actions()
 
     def _parent_item(self, p: ProcInfo, by_pid: dict[int, str]) -> ProcItem | None:
@@ -407,6 +422,7 @@ class ProcessWindow(QMainWindow):
                     self.items[key].setExpanded(True)
 
     def _remove_item(self, key: str):
+        self._row_state.pop(key, None)
         item = self.items.pop(key)
         self.mem_results.pop(key, None)
         for i in reversed(range(item.childCount())):
@@ -420,19 +436,12 @@ class ProcessWindow(QMainWindow):
                 self.tree.takeTopLevelItem(index)
 
     def _fill(self, item: ProcItem, p: ProcInfo):
+        """Обновляет только то, что изменилось с прошлого раза."""
         res = self.mem_results.get(p.key)
-        values = [p.name, str(p.pid), f"{p.cpu:.1f}", f"{p.rss / 1048576:.1f}", p.user,
-                  ORIGINS.get(p.origin, ""), p.sig, res.text() if res else "", p.exe]
-        for col, text in enumerate(values):
-            if item.text(col) != text:
-                item.setText(col, text)
-        item.setData(1, SORT_ROLE, p.pid)
-        item.setData(2, SORT_ROLE, p.cpu)
-        item.setData(3, SORT_ROLE, p.rss)
-        for col in range(4, len(COLUMNS)):
-            item.setToolTip(col, values[col])
-
-        category = BY_ID.get(classify(p, bool(res and res.status == "match")))
+        values = (p.name, str(p.pid), f"{p.cpu:.1f}", f"{p.rss / 1048576:.1f}", p.user,
+                  ORIGINS.get(p.origin, ""), p.sig, res.text() if res else "", p.exe)
+        category_id = classify(p, bool(res and res.status == "match"))
+        category = BY_ID.get(category_id)
         tip = category.title if category else ""
         if p.protected:
             tip += ("\n" if tip else "") + f"Защищён: {p.protect_reason or 'критический процесс Windows'}"
@@ -440,15 +449,57 @@ class ProcessWindow(QMainWindow):
             tip += ("\n" if tip else "") + (
                 "Системная учётная запись, но процесс не в списке защищённых "
                 f"(файл: {p.exe or 'путь недоступен'})")
-        item.setToolTip(0, tip)
 
-        for col in range(len(COLUMNS)):
-            if category:
-                item.setBackground(col, QBrush(QColor(*category.rgb)))
-                item.setForeground(col, QBrush(text_color(category.rgb)))
-            else:
+        state = self._row_state.get(p.key)
+        old = state[0] if state else None
+        for col, text in enumerate(values):
+            if old is None or old[col] != text:
+                item.setText(col, text)
+        if old is None or old[1] != values[1]:
+            item.setData(1, SORT_ROLE, p.pid)
+        if old is None or old[2] != values[2]:
+            item.setData(2, SORT_ROLE, p.cpu)
+        if old is None or old[3] != values[3]:
+            item.setData(3, SORT_ROLE, p.rss)
+        for col in range(4, len(COLUMNS)):
+            if old is None or old[col] != values[col]:
+                item.setToolTip(col, values[col])
+        if state is None or state[2] != tip:
+            item.setToolTip(0, tip)
+        if state is None or state[1] != category_id:
+            self._apply_colors(item, category_id)
+        self._row_state[p.key] = (values, category_id, tip)
+
+    def _apply_colors(self, item: ProcItem, category_id):
+        category = BY_ID.get(category_id)
+        if category is None:
+            for col in range(len(COLUMNS)):
                 item.setData(col, Qt.ItemDataRole.BackgroundRole, None)
                 item.setData(col, Qt.ItemDataRole.ForegroundRole, None)
+            return
+        if category_id not in self._brushes:  # кисти создаются один раз на категорию
+            self._brushes[category_id] = (QBrush(QColor(*category.rgb)),
+                                          QBrush(text_color(category.rgb)))
+        background, foreground = self._brushes[category_id]
+        for col in range(len(COLUMNS)):
+            item.setBackground(col, background)
+            item.setForeground(col, foreground)
+
+    def _on_enriched(self):
+        """Появились результаты проверки подписей: обновляем строки, не дожидаясь снимка."""
+        if not self.isVisible() or self.isMinimized():
+            return
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for key, p in self.procs.items():
+                if p.has_file:
+                    result = self.enricher.peek(p.exe)
+                    item = self.items.get(key)
+                    if result and item is not None:
+                        apply_enriched(p, result)
+                        self._fill(item, p)
+        finally:
+            self.tree.setUpdatesEnabled(True)
 
     def _apply_filter(self):
         text = self.filter_edit.text().strip().lower()

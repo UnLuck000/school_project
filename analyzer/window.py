@@ -4,14 +4,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 import autoruns.actions  # noqa: F401  (регистрирует откат карантина в журнале)
 from analyzer.report import (
-    INTERESTING, FileReport, build_report, human_size, is_suspicious_api, is_windows_path,
+    FileReport, build_report, human_size, is_suspicious_api, is_windows_path,
 )
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
@@ -22,6 +22,7 @@ from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
 
 from analyzer.codeview import CodeTab
+from analyzer.stringsview import StringsTab
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 LEVEL_COLORS = {"threat": (255, 128, 128), "suspicious": (255, 190, 110),
@@ -33,7 +34,6 @@ MARK = (255, 255, 170)
 STATUS_TEXT = {"valid": "Действительна", "unsigned": "Нет подписи",
                "invalid": "Недействительна", "unavailable": "Проверка недоступна"}
 SOURCE_TEXT = {"embedded": "встроена в файл", "catalog": "каталог Windows"}
-MAX_SHOWN_STRINGS = 5000
 
 
 class Bridge(QObject):
@@ -84,7 +84,6 @@ class AnalyzerWindow(QMainWindow):
         self.report: FileReport | None = None
         self._banner_before = None
         self._busy = False
-        self._strings: list[tuple[int, str, str]] = []
         self._build_ui()
 
     # ---------- интерфейс ----------
@@ -118,12 +117,13 @@ class AnalyzerWindow(QMainWindow):
         self.pe_tree = _make_tree(["Элемент", "Значение", "Размер на диске", "Энтропия", "Права"],
                                   [320, 260, 130, 90, 80])
         self.code_tab = CodeTab()
+        self.strings_tab = StringsTab()
         self.tabs.addTab(self.general_tree, "Общие")
         self.tabs.addTab(self.sig_tree, "Подпись")
         self.tabs.addTab(self.checks_tree, "Проверка")
         self.tabs.addTab(self.pe_tree, "PE")
         self.tabs.addTab(self.code_tab, "Код")
-        self.tabs.addTab(self._build_strings_tab(), "Строки")
+        self.tabs.addTab(self.strings_tab, "Строки")
         layout.addWidget(self.tabs, 1)
 
         buttons = QHBoxLayout()
@@ -143,26 +143,6 @@ class AnalyzerWindow(QMainWindow):
 
         self.setCentralWidget(root)
         self._set_actions(False)
-
-    def _build_strings_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        row = QHBoxLayout()
-        self.str_filter = QLineEdit()
-        self.str_filter.setAcceptDrops(False)
-        self.str_filter.setPlaceholderText("Фильтр по тексту строки...")
-        self.str_filter.textChanged.connect(lambda _: self._refill_strings())
-        self.str_interesting = QCheckBox("Только интересные (адреса, ключи реестра, API и т.п.)")
-        self.str_interesting.toggled.connect(lambda _: self._refill_strings())
-        self.str_count = QLabel("")
-        row.addWidget(self.str_filter, 1)
-        row.addWidget(self.str_interesting)
-        row.addWidget(self.str_count)
-        layout.addLayout(row)
-        self.str_tree = _make_tree(["Смещение", "Вид", "Строка"], [100, 70, 900])
-        self.str_tree.setRootIsDecorated(False)
-        layout.addWidget(self.str_tree)
-        return tab
 
     def _set_actions(self, enabled: bool):
         for button in (self.btn_quarantine, self.btn_copy, self.btn_vt, self.btn_folder):
@@ -264,8 +244,8 @@ class AnalyzerWindow(QMainWindow):
         self._fill_checks(report)
         self._fill_pe(report)
         self.code_tab.set_view(report.code)
-        self._strings = report.strings
-        self._refill_strings()
+        self.code_tab.set_file(Path(report.path), report.pe is not None)
+        self.strings_tab.set_file(Path(report.path))
         self.statusBar().showMessage(f"Готово: {report.name}", 8000)
 
     # ---------- заполнение вкладок ----------
@@ -398,29 +378,6 @@ class AnalyzerWindow(QMainWindow):
             exports = _group(tree, f"Экспорты ({len(pe.exports)})")
             for name in pe.exports:
                 exports.addChild(QTreeWidgetItem([name]))
-
-    def _refill_strings(self):
-        text = self.str_filter.text().strip().lower()
-        only = self.str_interesting.isChecked()
-        tree = self.str_tree
-        tree.setUpdatesEnabled(False)
-        tree.clear()
-        shown = 0
-        for offset, kind, value in self._strings:
-            interesting = bool(INTERESTING.search(value))
-            if only and not interesting:
-                continue
-            if text and text not in value.lower():
-                continue
-            item = QTreeWidgetItem([f"{offset:08X}", kind, value])
-            if interesting:
-                _paint(item, MARK, 3)
-            tree.addTopLevelItem(item)
-            shown += 1
-            if shown >= MAX_SHOWN_STRINGS:
-                break
-        tree.setUpdatesEnabled(True)
-        self.str_count.setText(f"Показано {shown} из {len(self._strings)}")
 
     # ---------- действия ----------
     def copy_hashes(self):

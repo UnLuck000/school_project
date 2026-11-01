@@ -47,6 +47,7 @@ from ui.registry import FEATURES, HANDLERS
 from ui.tray import TrayIcon, load_app_icon
 from ui.debug_mode import DebugKeyWatcher, load_gate
 from ui.single_instance import SingleInstance
+from ui.exclusions_page import ExclusionsPage
 
 import appinfo
 
@@ -55,6 +56,8 @@ from autoruns.window import AutorunsWindow
 from analyzer.window import AnalyzerWindow
 
 from recovery.window import RecoveryWindow
+from recovery.journal_page import JournalPage
+
 
 SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
@@ -150,16 +153,6 @@ class ScanWorker(QThread):
 
 class MainWindow(QMainWindow):
     update_finished = Signal(str)
-    # заголовки и начальная ширина столбцов таблицы карантина
-    QUAR_COLUMNS = [
-        ("Дата", 140),
-        ("Исходный путь", 300),
-        ("Размер, КБ", 90),
-        ("SHA-256", 220),
-        ("Статус", 110),
-        ("Причина", 160),
-        ("Подпись", 240),
-    ]
 
     def __init__(self):
         super().__init__()
@@ -189,6 +182,8 @@ class MainWindow(QMainWindow):
         self.dashboard = DashboardPage()
         self.tools_page = ToolsPage(self)
         self.debug_page = DebugPage(self)
+        self.journal_page = JournalPage()
+        self.exclusions_page = ExclusionsPage()
         self.settings_page = SettingsPage()
         self.about_page = AboutPage()
 
@@ -201,6 +196,8 @@ class MainWindow(QMainWindow):
         self.shell.add_page("Защита", self._build_protection_tab())
         self.shell.add_page("Сеть", self._build_network_tab())
         self.shell.add_page("Карантин", quarantine_tabs)
+        self.shell.add_page("Журнал", self.journal_page)
+        self.shell.add_page("Исключения", self.exclusions_page)
         self.shell.add_page("Инструменты", self.tools_page)
         self.shell.add_page("Настройки", self.settings_page)
         self.shell.add_page("О программе", self.about_page)
@@ -219,12 +216,27 @@ class MainWindow(QMainWindow):
         self.dashboard.open_processes.connect(self.open_process_manager)
         self.settings_page.changed.connect(self.on_setting_changed)
         self.update_finished.connect(self._on_update_finished)
-        self.shell.page_changed.connect(
-            lambda title: self.refresh_dashboard() if title in ("Главная", "Отладка") else None)
+        self.shell.page_changed.connect(self._on_page_changed)
+        self.journal_page.undone.connect(self.on_undone)
 
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
+        self.refresh_dashboard()
+
+    def _on_page_changed(self, title: str):
+        if title in ("Главная", "Отладка"):
+            self.refresh_dashboard()
+        elif title == "Журнал":
+            self.journal_page.refresh()
+        elif title == "Исключения":
+            self.exclusions_page.refresh()
+
+    def on_undone(self, record: dict):
+        """Действие отменено на странице журнала: обновляем окна, где оно было видно."""
+        if self.autoruns_window is not None:
+            self.autoruns_window.handle_undo(record)
+        self.refresh_quarantine()
         self.refresh_dashboard()
 
     # ---------- центр восстановления ----------
@@ -322,11 +334,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(parent, feature.title, f"Ошибка: {e}")
 
     def open_autoruns(self, journal: bool = False):
+        if journal:  # журнал теперь отдельная страница главного меню
+            self.show_main("Журнал")
+            return
         if self.autoruns_window is None:
             self.autoruns_window = AutorunsWindow()
             self.autoruns_window.analyze_requested.connect(lambda path: self.open_analyzer(path))
             self.autoruns_window.quarantine_changed.connect(self.refresh_quarantine)
             self.autoruns_window.quarantine_changed.connect(self.refresh_dashboard)
+            self.autoruns_window.journal_changed.connect(self.journal_page.refresh)
+            self.autoruns_window.exclusions_changed.connect(self.exclusions_page.refresh)
             self.apply_on_top(cfg.get("general/on_top"))
         self.autoruns_window.show()
         self.autoruns_window.raise_()
@@ -771,6 +788,18 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
 
     # ---------- вкладка «Карантин» ----------
+
+
+    QUAR_COLUMNS = [
+        ("Дата", 140),
+        ("Исходный путь", 300),
+        ("Размер, КБ", 90),
+        ("SHA-256", 220),
+        ("Статус", 110),
+        ("Подпись", 160),
+        ("Причина", 240),
+    ]   # заголовки и начальная ширина столбцов таблицы карантина
+
     def _build_quarantine_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)

@@ -1,0 +1,72 @@
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from scanner import exclusions
+
+CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
+KEY_ROLE = Qt.ItemDataRole.UserRole + 2
+
+
+class ExclusionsPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        title = QLabel("Исключения")
+        title.setStyleSheet("font-size: 20pt; font-weight: 600;")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Записи автозапуска и находки проверки системы, которым вы доверяете: они не "
+            "показываются при проверках. Исключение перестаёт действовать, если запись или "
+            "файл изменились. Убранное из исключений появится при следующей проверке.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Раздел", "Что", "Подробности", "Добавлено"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        header = self.tree.header()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        for i, width in enumerate((140, 380, 480, 160)):
+            self.tree.setColumnWidth(i, width)
+        layout.addWidget(self.tree, 1)
+
+        row = QHBoxLayout()
+        remove = QPushButton("Убрать из исключений")
+        remove.clicked.connect(self.remove_selected)
+        refresh = QPushButton("Обновить")
+        refresh.clicked.connect(self.refresh)
+        row.addWidget(remove)
+        row.addWidget(refresh)
+        row.addStretch()
+        layout.addLayout(row)
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.tree.clear()
+        for item in exclusions.items():
+            row = QTreeWidgetItem([exclusions.CATEGORY_TEXT.get(item["category"], item["category"]),
+                                   item["title"], item["detail"], item["added"].replace("T", " ")])
+            row.setData(0, CATEGORY_ROLE, item["category"])
+            row.setData(0, KEY_ROLE, item["key"])
+            for col in range(4):
+                row.setToolTip(col, item["detail"] or item["title"])
+            self.tree.addTopLevelItem(row)
+
+    def remove_selected(self) -> None:
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.information(self, "Исключения", "Сначала выберите строку в списке")
+            return
+        item = selected[0]
+        answer = QMessageBox.question(
+            self, "Исключения", f"Убрать из исключений?\n\n{item.text(1)}\n\n"
+            "При следующей проверке запись снова будет показана.")
+        if answer == QMessageBox.StandardButton.Yes:
+            exclusions.remove(item.data(0, CATEGORY_ROLE), item.data(0, KEY_ROLE))
+            self.refresh()

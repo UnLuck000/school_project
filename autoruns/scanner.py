@@ -36,7 +36,19 @@ RUN_KEYS = [
     ("HKLM", CV + r"\Policies\Explorer\Run"),
     ("HKLM", r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"),
 ]
+
+TASKS_SCRIPT = (
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ErrorActionPreference='SilentlyContinue';"
+    "$r=@(Get-ScheduledTask | ForEach-Object {"
+    "$t=$_;$a=@($t.Actions | Where-Object {$_.Execute})[0];"
+    "[PSCustomObject]@{p=$t.TaskPath;n=$t.TaskName;s=[string]$t.State;"
+    "c=$a.Execute;g=$a.Arguments;"
+    "k=@($t.Triggers | ForEach-Object {($_.CimClass.CimClassName -replace 'MSFT_Task','') "
+    "-replace 'Trigger',''})}});"
+    "ConvertTo-Json -Compress -Depth 3 -InputObject $r")
+
 APPROVED = CV + r"\Explorer\StartupApproved"
+SERVICES_KEY = r"SYSTEM\CurrentControlSet\Services"
 
 SUSPICIOUS_CMD = re.compile(
     r"(-enc(odedcommand)?\b|frombase64string|downloadstring|downloadfile|"
@@ -171,7 +183,7 @@ def collect_startup() -> list[Entry]:
 # ---------- службы ----------
 def _service_values(name: str) -> tuple[str, int, int]:
     """(ServiceDll, Start, DelayedAutostart) из реестра."""
-    base = rf"SYSTEM\CurrentControlSet\Services\{name}"
+    base = f"{SERVICES_KEY}\\{name}"
     dll, start, delayed = "", 2, 0
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as key:
@@ -192,37 +204,58 @@ def _service_values(name: str) -> tuple[str, int, int]:
     return _resolve_exe(dll), int(start), int(delayed)
 
 
-def collect_services() -> list[Entry]:
-    entries = []
+def _reg_value(path: str, name: str):
     try:
-        services = list(psutil.win_service_iter())
-    except (AttributeError, psutil.Error, OSError):
-        return entries
-    for service in services:
-        try:
-            info = service.as_dict()
-        except (psutil.Error, OSError):
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+            return winreg.QueryValueEx(key, name)[0]
+    except OSError:
+        return None
+
+
+def _reg_subkeys(path: str) -> list[str]:
+    names: list[str] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+            i = 0
+            while True:
+                try:
+                    names.append(winreg.EnumKey(key, i))
+                except OSError:
+                    break
+                i += 1
+    except OSError:
+        pass
+    return names
+
+
+def collect_services() -> list[Entry]:
+    entries: list[Entry] = []
+    for name in _reg_subkeys(SERVICES_KEY):
+        base = f"{SERVICES_KEY}\\{name}"
+        if _reg_value(base, "Start") != 2:  # 2 = автоматический запуск
             continue
-        if info.get("start_type") != "automatic":
-            continue
-        binpath = info.get("binpath") or ""
-        host = _resolve_exe(_command_exe(binpath))
-        dll, start, delayed = _service_values(info["name"])
-        mode = "delayed-auto" if start == 2 and delayed else "auto"
+        service_type = _reg_value(base, "Type")
+        if not isinstance(service_type, int) or not service_type & 0x30:
+            continue  # только службы Win32, драйверы не рассматриваем
+        image = str(_reg_value(base, "ImagePath") or "")
+        display = str(_reg_value(base, "DisplayName") or name)
+        if display.startswith("@"):  # строка-ссылка на ресурс: показываем имя службы
+            display = name
+        host = _resolve_exe(_command_exe(image))
+        dll, _, delayed = _service_values(name)
         entries.append(Entry(
-            kind="service", name=info["name"],
-            location=f"Служба: {info.get('display_name', '')}", command=binpath,
+            kind="service", name=name, location=f"Служба: {display}", command=image,
             exe=dll or host,  # для svchost проверяем настоящую библиотеку службы
-            extra={"service": info["name"], "start_mode": mode}))
+            extra={"service": name, "start_mode": "delayed-auto" if delayed else "auto"}))
     return entries
 
 
 # ---------- планировщик заданий ----------
-def collect_tasks() -> tuple[list[Entry], int]:
+def _collect_tasks_xml() -> tuple[list[Entry], list[str]]:
     entries: list[Entry] = []
     unreadable = 0
     if not TASKS_DIR.is_dir():
-        return entries, 0
+        return entries, []
     for file in TASKS_DIR.rglob("*"):
         try:
             if not file.is_file():
@@ -250,7 +283,40 @@ def collect_tasks() -> tuple[list[Entry], int]:
                 exe=_resolve_exe(_command_exe(command)), enabled=enabled,
                 extra={"task": name}))
             break  # одна запись на задачу
-    return entries, unreadable
+    notes = ([f"Не удалось прочитать задач планировщика: {unreadable} (нужны права администратора)"]
+             if unreadable else [])
+    return entries, notes
+
+
+def collect_tasks() -> tuple[list[Entry], list[str]]:
+    """Задачи через интерфейс планировщика: видны все задачи, корневые и вложенные."""
+    out = _powershell(TASKS_SCRIPT, timeout=90)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return _collect_tasks_xml()  # PowerShell недоступен: читаем файлы задач
+    if isinstance(data, dict):
+        data = [data]
+    entries: list[Entry] = []
+    without_exe = 0
+    for d in data:
+        execute = (d.get("c") or "").strip()
+        if not execute:
+            without_exe += 1
+            continue
+        name = (d.get("p") or "\\") + (d.get("n") or "")
+        triggers = d.get("k") or []
+        if isinstance(triggers, str):
+            triggers = [triggers]
+        where = "Планировщик заданий" + (f" ({', '.join(triggers)})" if triggers else "")
+        entries.append(Entry(
+            kind="task", name=name, location=where,
+            command=f"{execute} {d.get('g') or ''}".strip(),
+            exe=_resolve_exe(_command_exe(execute)), enabled=d.get("s") != "Disabled",
+            extra={"task": name}))
+    notes = ([f"Задач без исполняемого файла (системные COM-обработчики) пропущено: {without_exe}"]
+             if without_exe else [])
+    return entries, notes
 
 
 # ---------- подписки WMI ----------
@@ -276,17 +342,19 @@ def collect_wmi() -> list[Entry]:
     return entries
 
 
-def collect_all() -> tuple[list[Entry], list[str]]:
-    """Собирает записи автозапуска (быстро, без проверки файлов) и заметки для пользователя."""
+def collect_all(progress=None) -> tuple[list[Entry], list[str]]:
+    """Собирает записи автозапуска (без проверки файлов) и заметки для пользователя."""
     if winreg is None:
         return [], ["Сканер автозапуска работает только в Windows"]
+    say = progress or (lambda text: None)
     notes: list[str] = []
+    say("Читаю реестр, папки автозагрузки и службы...")
     entries = collect_registry() + collect_winlogon() + collect_startup() + collect_services()
-    tasks, unreadable = collect_tasks()
+    say("Читаю планировщик заданий (несколько секунд)...")
+    tasks, task_notes = collect_tasks()
     entries += tasks
-    if unreadable:
-        notes.append(f"Не удалось прочитать задач планировщика: {unreadable} "
-                     "(нужны права администратора)")
+    notes += task_notes
+    say("Читаю подписки WMI...")
     entries += collect_wmi()
     return entries, notes
 

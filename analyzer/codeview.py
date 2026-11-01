@@ -1,14 +1,17 @@
 import re
+import threading
+from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QObject, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QPainter, QPalette, QSyntaxHighlighter, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QDialog, QHeaderView, QLabel, QPlainTextEdit, QSplitter, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPlainTextEdit,
+    QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from analyzer import disasm
 from processmanager.colors import text_color
 
 CATEGORY_COLORS = {"decoded": (170, 204, 255), "suspicious": (255, 190, 110),
@@ -145,15 +148,71 @@ class CodeEdit(QPlainTextEdit):
         self.centerCursor()
 
 
+class _Bridge(QObject):
+    done = Signal(int, str, str, str)  # номер запроса, текст, язык, пояснение
+
+
+MODE_OVERVIEW, MODE_DISASM, MODE_HEX = range(3)
+
+
 class CodeTab(QWidget):
-    """Вкладка «Код»: исходный текст (или дизассемблер) и результаты разбора."""
+    """Вкладка «Код»: обзор (исходный текст, разбор скрипта), дизассемблер разделов PE
+    и постраничный hex-просмотр всего файла."""
     def __init__(self):
         super().__init__()
         self._view = None
         self._highlighter = None
+        self._path: Path | None = None
+        self._pe_map = None
+        self._page = 0
+        self._request = 0
+        self._bridge = _Bridge()
+        self._bridge.done.connect(self._on_done)
         layout = QVBoxLayout(self)
+
+        controls = QHBoxLayout()
+        self.mode = QComboBox()
+        self.mode.addItems(["Обзор", "Дизассемблер", "Hex (весь файл)"])
+        self.mode.setToolTip("Обзор: исходный текст скрипта или код точки входа.\n"
+                             "Дизассемблер: выбранный раздел программы.\n"
+                             "Hex: байты всего файла по страницам 64 КБ.")
+        self.mode.currentIndexChanged.connect(lambda _: self._mode_changed())
+        controls.addWidget(QLabel("Вид:"))
+        controls.addWidget(self.mode)
+
+        self.region = QComboBox()
+        self.region.setMinimumWidth(240)
+        self.size = QComboBox()
+        for n in disasm.DISASM_SIZES:
+            self.size.addItem(f"{n // 1024} КБ" if n < 1048576 else f"{n // 1048576} МБ", n)
+        self.size.setCurrentIndex(1)
+        self.btn_disasm = QPushButton("Разобрать")
+        self.btn_disasm.clicked.connect(self._run_disasm)
+        self.disasm_controls = [QLabel("Раздел:"), self.region, QLabel("Объём:"), self.size,
+                                self.btn_disasm]
+
+        self.btn_prev = QPushButton("◀")
+        self.btn_prev.setFixedWidth(36)
+        self.btn_prev.clicked.connect(lambda: self._show_page(self._page - 1))
+        self.page_label = QLabel("")
+        self.btn_next = QPushButton("▶")
+        self.btn_next.setFixedWidth(36)
+        self.btn_next.clicked.connect(lambda: self._show_page(self._page + 1))
+        self.goto_edit = QLineEdit()
+        self.goto_edit.setAcceptDrops(False)
+        self.goto_edit.setPlaceholderText("Перейти к смещению (hex)")
+        self.goto_edit.setMaximumWidth(190)
+        self.goto_edit.returnPressed.connect(self._goto_offset)
+        self.hex_controls = [self.btn_prev, self.page_label, self.btn_next, self.goto_edit]
+
+        for w in self.disasm_controls + self.hex_controls:
+            controls.addWidget(w)
+        controls.addStretch()
+        layout.addLayout(controls)
+
         self.note = QLabel("")
         self.note.setWordWrap(True)
+        self.note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.note)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -172,19 +231,112 @@ class CodeTab(QWidget):
         layout.addWidget(splitter, 1)
         self.findings.itemClicked.connect(self._goto)
         self.findings.itemDoubleClicked.connect(self._show_full)
+        self._mode_changed()
 
+    # ---------- файл и режимы ----------
+    def set_file(self, path: Path | None, is_pe: bool) -> None:
+        """Файл для дизассемблера и hex-просмотра (вызывается после set_view)."""
+        self._path = path
+        self._page = 0
+        self._pe_map = disasm.load_pe_map(path) if (path and is_pe) else None
+        self.region.clear()
+        if self._pe_map is not None:
+            for r in self._pe_map.regions:
+                if r.size:
+                    self.region.addItem(f"{r.title} ({max(1, r.size // 1024)} КБ)", r)
+        self.mode.model().item(MODE_DISASM).setEnabled(self._pe_map is not None)
+        if self.mode.currentIndex() != MODE_OVERVIEW:
+            self.mode.setCurrentIndex(MODE_OVERVIEW)
+        else:
+            self._mode_changed()
+
+    def _mode_changed(self) -> None:
+        mode = self.mode.currentIndex()
+        for w in self.disasm_controls:
+            w.setVisible(mode == MODE_DISASM)
+        for w in self.hex_controls:
+            w.setVisible(mode == MODE_HEX)
+        self.findings.setVisible(mode == MODE_OVERVIEW)
+        if mode == MODE_OVERVIEW:
+            self._show_overview()
+        elif mode == MODE_DISASM:
+            self._run_disasm()
+        else:
+            self._show_page(self._page)
+
+    def _set_text(self, text: str, language: str) -> None:
+        if self._highlighter is not None:
+            self._highlighter.setDocument(None)  # иначе подсветки накладываются друг на друга
+        self.edit.setPlainText(text)
+        self._highlighter = Highlighter(self.edit.document(), language)
+
+    def _show_overview(self) -> None:
+        view = self._view
+        self.note.setText(f"<b>{view.title}.</b> {view.note}" if view else "")
+        self._set_text(view.text if view else "", view.language if view else "text")
+
+    def _run_disasm(self) -> None:
+        region = self.region.currentData()
+        if self._path is None or self._pe_map is None or region is None:
+            return
+        self._request += 1
+        request, path, pe_map, size = self._request, self._path, self._pe_map, self.size.currentData()
+        self.note.setText("Дизассемблирую...")
+        self.btn_disasm.setEnabled(False)
+
+        def work():
+            try:
+                text, note = disasm.disassemble(path, pe_map, region, size)
+                language = "text" if note.startswith("Не удалось") else "asm"
+            except Exception as e:  # просмотр не должен ломать окно
+                text, note, language = "", f"Не удалось дизассемблировать: {e}", "text"
+            self._bridge.done.emit(request, text, language, note)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_done(self, request: int, text: str, language: str, note: str) -> None:
+        self.btn_disasm.setEnabled(True)
+        if request != self._request or self.mode.currentIndex() != MODE_DISASM:
+            return  # устаревший результат
+        self.note.setText(note)
+        self._set_text(text, language)
+
+    def _show_page(self, page: int) -> None:
+        if self._path is None:
+            return
+        try:
+            text, self._page, pages = disasm.hex_page(self._path, page)
+        except OSError as e:
+            self.note.setText(f"Не удалось прочитать файл: {e}")
+            return
+        start = self._page * disasm.HEX_PAGE
+        self.page_label.setText(f"Страница {self._page + 1} из {pages}")
+        self.btn_prev.setEnabled(self._page > 0)
+        self.btn_next.setEnabled(self._page < pages - 1)
+        self.note.setText(f"Байты с 0x{start:08X} по 0x{start + disasm.HEX_PAGE - 1:08X}. "
+                          "Слева смещение в файле, справа печатные символы.")
+        self._set_text(text, "text")
+
+    def _goto_offset(self) -> None:
+        text = self.goto_edit.text().strip().lower().removeprefix("0x")
+        try:
+            offset = int(text, 16)
+        except ValueError:
+            self.note.setText("Смещение указывается в шестнадцатеричном виде, например 1F400")
+            return
+        self._show_page(offset // disasm.HEX_PAGE)
+        self.edit.goto_line((offset % disasm.HEX_PAGE) // 16 + 1)
+
+    # ---------- обзор ----------
     def set_view(self, view) -> None:
         self._view = view
         self.findings.clear()
         if view is None:
-            self.note.setText("")
-            self.edit.setPlainText("")
+            self._path, self._pe_map = None, None
+        if self.mode.currentIndex() == MODE_OVERVIEW:
+            self._show_overview()
+        if view is None:
             return
-        self.note.setText(f"<b>{view.title}.</b> {view.note}")
-        if self._highlighter is not None:
-            self._highlighter.setDocument(None)  # иначе подсветки накладываются друг на друга
-        self.edit.setPlainText(view.text)
-        self._highlighter = Highlighter(self.edit.document(), view.language)
         for index, f in enumerate(view.findings):
             shown = f.value.replace("\n", " ")
             item = QTreeWidgetItem([CATEGORY_TEXT.get(f.category, f.category), f.title,
@@ -203,7 +355,7 @@ class CodeTab(QWidget):
 
     def _goto(self, item, _column) -> None:
         f = self._finding(item)
-        if f is not None and f.line:
+        if f is not None and f.line and self.mode.currentIndex() == MODE_OVERVIEW:
             self.edit.goto_line(f.line)
 
     def _show_full(self, item, _column) -> None:

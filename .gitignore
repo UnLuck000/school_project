@@ -17,3 +17,5 @@ build/
 logs/
 journal/
 debug_mode/passwords.txt
+cache/
+signatures/exclusions.json

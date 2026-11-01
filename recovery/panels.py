@@ -40,8 +40,9 @@ def _hint(text: str) -> QLabel:
 
 
 class FindingsPanel(QWidget):
-    """Список находок одной проверки с кнопкой исправления выбранной."""
-    fix_requested = Signal(object)  # Finding
+    """Список находок одной проверки с кнопками исправления и добавления в исключения."""
+    fix_requested = Signal(object)      # Finding
+    exclude_requested = Signal(object)  # Finding
 
     def __init__(self, hint: str):
         super().__init__()
@@ -53,11 +54,15 @@ class FindingsPanel(QWidget):
         self.btn_fix = QPushButton("Исправить выбранное")
         self.btn_fix.setEnabled(False)
         self.btn_fix.clicked.connect(self._on_fix)
+        self.btn_trust = QPushButton("Доверять (в исключения)")
+        self.btn_trust.setEnabled(False)
+        self.btn_trust.clicked.connect(self._on_trust)
         row.addWidget(self.summary, 1)
+        row.addWidget(self.btn_trust)
         row.addWidget(self.btn_fix)
         layout.addLayout(row)
         self.tree = _make_tree(["Проверка", "Состояние", "Подробности"], [380, 300, 520])
-        self.tree.itemSelectionChanged.connect(self._update_button)
+        self.tree.itemSelectionChanged.connect(self._update_buttons)
         layout.addWidget(self.tree, 1)
 
     def set_findings(self, findings: list) -> None:
@@ -72,22 +77,28 @@ class FindingsPanel(QWidget):
             self.tree.addTopLevelItem(item)
         problems = sum(1 for f in findings if f.level in ("warning", "bad"))
         self.summary.setText(f"Требуют внимания: {problems}" if problems else "Проблем не найдено")
-        self._update_button()
+        self._update_buttons()
 
     def _selected(self):
         items = self.tree.selectedItems()
         return self._findings[items[0].data(0, INDEX_ROLE)] if items else None
 
-    def _update_button(self) -> None:
+    def _update_buttons(self) -> None:
         f = self._selected()
         has_fix = f is not None and f.fix is not None
         self.btn_fix.setEnabled(has_fix)
         self.btn_fix.setText(f.fix_title if has_fix else "Исправить выбранное")
+        self.btn_trust.setEnabled(f is not None and f.level != "ok")
 
     def _on_fix(self) -> None:
         f = self._selected()
         if f is not None and f.fix is not None:
             self.fix_requested.emit(f)
+
+    def _on_trust(self) -> None:
+        f = self._selected()
+        if f is not None:
+            self.exclude_requested.emit(f)
 
 
 class PolicyPanel(QWidget):
@@ -95,6 +106,7 @@ class PolicyPanel(QWidget):
     scan_requested = Signal()
     unlock_hits_requested = Signal(object)   # список PolicyHit
     unlock_names_requested = Signal(object)  # список имён ограничений
+    exclude_hits_requested = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -125,11 +137,18 @@ class PolicyPanel(QWidget):
         select.clicked.connect(lambda checked=False: self._toggle_all(self.scan_tree))
         unlock = QPushButton("Разблокировать выбранные")
         unlock.clicked.connect(lambda checked=False: self._unlock_selected_hits())
+        trust = QPushButton("Доверять выбранным")
+        trust.clicked.connect(lambda checked=False: self._trust_selected())
         row.addWidget(self.auto_cb, 1)
-        for button in (scan, select, unlock):
+        for button in (scan, select, trust, unlock):
             row.addWidget(button)
         layout.addLayout(row)
         return tab
+
+    def _trust_selected(self) -> None:
+        indices = self._checked_indices(self.scan_tree)
+        if indices:
+            self.exclude_hits_requested.emit([self._hits[i] for i in indices])
 
     def set_hits(self, hits: list) -> None:
         self._hits = hits

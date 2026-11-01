@@ -7,6 +7,9 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 from ui.pages import AboutPage, DashboardPage, DebugPage, SettingsPage, ToolsPage
 from ui.registry import FEATURES
+from ui.exclusions_page import ExclusionsPage
+
+from recovery.journal_page import JournalPage
 
 
 @pytest.fixture(scope="module")
@@ -19,6 +22,8 @@ def test_pages_load(app):
     SettingsPage()
     AboutPage()
     DebugPage(window=None)
+    JournalPage()
+    ExclusionsPage()
 
 
 def test_every_feature_has_a_button(app):

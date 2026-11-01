@@ -3,7 +3,7 @@ import pytest
 
 from scanner import engine, features
 from scanner.heuristics import Finding, PEReport
-from scanner.signature import SignatureInfo, describe
+from scanner.signature import VALID, SignatureInfo, describe, verify_signature
 
 
 def test_text_file_is_not_validly_signed(tmp_path):

@@ -6,8 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from autoruns import actions
@@ -16,7 +16,7 @@ from autoruns.scanner import Context, assess, collect_all
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from processmanager.system import is_admin, open_in_explorer
-from recovery import journal
+from scanner import exclusions
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
 
@@ -31,7 +31,7 @@ FLAG_DONE = "обработано программой"
 FLAG_QUARANTINED = "файл в карантине"
 REMOVE_ROW_KINDS = {"run", "startup", "service"}  # после исправления записи нет в списке
 
-TAB_ALL, TAB_REGISTRY, TAB_STARTUP, TAB_TASKS, TAB_JOURNAL = range(5)
+TAB_ALL, TAB_REGISTRY, TAB_STARTUP, TAB_TASKS, TAB_SERVICES = range(5)
 # какие записи показывает каждая вкладка
 VIEWS = [
     ("all", lambda e: True),
@@ -40,7 +40,14 @@ VIEWS = [
     ("winlogon", lambda e: e.kind == "winlogon"),
     ("startup", lambda e: e.kind == "startup"),
     ("tasks", lambda e: e.kind == "task"),
+    ("services", lambda e: e.kind == "service"),
 ]
+# что скрывает галочка «Скрывать проверенное»
+HIDE_RULES = {
+    "all": lambda e: e.level == "normal",
+    "services": lambda e: e.level == "normal",
+    "tasks": lambda e: e.level == "normal" and e.name.lower().startswith("\\microsoft\\"),
+}
 
 
 class Bridge(QObject):
@@ -99,10 +106,11 @@ class EntryView(QWidget):
     selection_changed = Signal()
     context_requested = Signal(object, object)  # вкладка, позиция
 
-    def __init__(self, accepts, hide_normal: bool = False):
+    def __init__(self, accepts, hide_rule=None):
         super().__init__()
         self.accepts = accepts
-        self.hide_normal = hide_normal
+        self.hide_rule = hide_rule
+        self.hide_enabled = hide_rule is not None  # по умолчанию проверенное скрыто
         self.items: dict[str, RankItem] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -114,6 +122,9 @@ class EntryView(QWidget):
         self.tree.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, pos))
         layout.addWidget(self.tree)
+
+    def _is_hidden(self, e: Entry) -> bool:
+        return self.hide_enabled and self.hide_rule is not None and self.hide_rule(e)
 
     def begin_bulk(self) -> None:
         self.tree.setSortingEnabled(False)
@@ -133,13 +144,13 @@ class EntryView(QWidget):
         fill_item(item, e)  # сначала заполняем, потом вставляем: сортировка видит итоговые данные
         self.items[e.key] = item
         self.tree.addTopLevelItem(item)
-        item.setHidden(self.hide_normal and e.level == "normal")
+        item.setHidden(self._is_hidden(e))
 
     def refresh(self, e: Entry) -> None:
         item = self.items.get(e.key)
         if item is not None:
             fill_item(item, e)
-            item.setHidden(self.hide_normal and e.level == "normal")
+            item.setHidden(self._is_hidden(e))
 
     def remove(self, key: str) -> None:
         item = self.items.pop(key, None)
@@ -148,10 +159,10 @@ class EntryView(QWidget):
             if index >= 0:
                 self.tree.takeTopLevelItem(index)
 
-    def apply_hide(self, entries: dict, hide: bool) -> None:
-        self.hide_normal = hide
+    def set_hide(self, enabled: bool, entries: dict) -> None:
+        self.hide_enabled = enabled
         for key, item in self.items.items():
-            item.setHidden(hide and entries[key].level == "normal")
+            item.setHidden(self._is_hidden(entries[key]))
 
     def selected_key(self):
         items = self.tree.selectedItems()
@@ -161,6 +172,8 @@ class EntryView(QWidget):
 class AutorunsWindow(QMainWindow):
     quarantine_changed = Signal()
     analyze_requested = Signal(str)
+    journal_changed = Signal()
+    exclusions_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -178,8 +191,7 @@ class AutorunsWindow(QMainWindow):
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
-        self.views = {key: EntryView(accepts, hide_normal=(key == "all"))
-                      for key, accepts in VIEWS}
+        self.views = {key: EntryView(accepts, HIDE_RULES.get(key)) for key, accepts in VIEWS}
         for view in self.views.values():
             view.selection_changed.connect(self._update_buttons)
             view.context_requested.connect(self._show_menu)
@@ -197,7 +209,7 @@ class AutorunsWindow(QMainWindow):
         self.main_tabs.addTab(self.reg_tabs, "Реестр")
         self.main_tabs.addTab(self.views["startup"], "Папка автозагрузки")
         self.main_tabs.addTab(self.views["tasks"], "Планировщик заданий")
-        self.main_tabs.addTab(self._build_journal_tab(), "Журнал действий")
+        self.main_tabs.addTab(self.views["services"], "Службы")
         layout.addWidget(self.main_tabs, 1)
         self.main_tabs.currentChanged.connect(lambda _: self._update_buttons())
         self.reg_tabs.currentChanged.connect(lambda _: self._update_buttons())
@@ -208,7 +220,6 @@ class AutorunsWindow(QMainWindow):
         else:
             self.statusBar().showMessage(
                 "Без прав администратора часть задач и записей недоступна для чтения и изменения")
-        self.refresh_journal()
         self._update_buttons()
 
     # ---------- панель кнопок (видна на любой вкладке) ----------
@@ -222,19 +233,27 @@ class AutorunsWindow(QMainWindow):
         self.btn_fix.clicked.connect(self.fix_selected)
         self.btn_quarantine = QPushButton("Карантин файла")
         self.btn_quarantine.clicked.connect(self.quarantine_selected)
+        self.btn_trust = QPushButton("Доверять (в исключения)")
+        self.btn_trust.clicked.connect(self.trust_selected)
         self.btn_folder = QPushButton("Папка файла")
         self.btn_folder.clicked.connect(self.open_folder)
         self.btn_analyze = QPushButton("Открыть в анализаторе")
         self.btn_analyze.clicked.connect(self.analyze_selected)
-        self.hide_normal = QCheckBox("Скрывать проверенные (вкладка «Всё»)")
-        self.hide_normal.setChecked(True)
-        self.hide_normal.toggled.connect(
-            lambda on: self.views["all"].apply_hide(self.entries, on))
-        for w in (self.btn_scan, self.btn_fix, self.btn_quarantine,
-                  self.btn_folder, self.btn_analyze, self.hide_normal):
+        self.hide_cb = QCheckBox("Скрывать проверенное")
+        self.hide_cb.setToolTip("Вкладки «Всё» и «Службы»: записи с нормальной оценкой. "
+                                "«Планировщик заданий»: проверенные задачи Microsoft.")
+        self.hide_cb.setChecked(True)
+        self.hide_cb.toggled.connect(self._toggle_hide)
+        for w in (self.btn_scan, self.btn_fix, self.btn_quarantine, self.btn_trust,
+                  self.btn_folder, self.btn_analyze, self.hide_cb):
             row.addWidget(w)
         row.addStretch()
         return row
+
+    def _toggle_hide(self, enabled: bool) -> None:
+        for view in self.views.values():
+            if view.hide_rule is not None:
+                view.set_hide(enabled, self.entries)
 
     def _current_view(self) -> EntryView | None:
         index = self.main_tabs.currentIndex()
@@ -246,7 +265,9 @@ class AutorunsWindow(QMainWindow):
             return self.views["startup"]
         if index == TAB_TASKS:
             return self.views["tasks"]
-        return None  # вкладка журнала
+        if index == TAB_SERVICES:
+            return self.views["services"]
+        return None
 
     def selected_entry(self) -> Entry | None:
         view = self._current_view()
@@ -267,12 +288,14 @@ class AutorunsWindow(QMainWindow):
         self.btn_fix.setToolTip(reason)
         self.btn_quarantine.setEnabled(q_allowed)
         self.btn_quarantine.setToolTip(q_reason)
+        self.btn_trust.setEnabled(e is not None and e.assessed)
         self.btn_folder.setEnabled(has_file)
         self.btn_analyze.setEnabled(has_file)
 
     def _show_menu(self, view: EntryView, pos) -> None:
         menu = QMenu(self)
-        for button in (self.btn_fix, self.btn_quarantine, self.btn_folder, self.btn_analyze):
+        for button in (self.btn_fix, self.btn_quarantine, self.btn_trust,
+                       self.btn_folder, self.btn_analyze):
             action = menu.addAction(button.text())
             action.setEnabled(button.isEnabled())
             action.triggered.connect(lambda checked=False, b=button: b.click())
@@ -288,6 +311,7 @@ class AutorunsWindow(QMainWindow):
         self.reg_tabs.setTabText(2, f"Winlogon ({n['winlogon']})")
         self.main_tabs.setTabText(TAB_STARTUP, f"Папка автозагрузки ({n['startup']})")
         self.main_tabs.setTabText(TAB_TASKS, f"Планировщик заданий ({n['tasks']})")
+        self.main_tabs.setTabText(TAB_SERVICES, f"Службы ({n['services']})")
 
     # ---------- сканирование (всегда общее) ----------
     def scan(self) -> None:
@@ -300,7 +324,16 @@ class AutorunsWindow(QMainWindow):
         self._thread.start()
 
     def _scan_job(self) -> None:
-        entries, notes = collect_all()
+        entries, notes = collect_all(self.bridge.progress.emit)
+
+        data = exclusions.load()  # записи из исключений не показываем и не проверяем
+        kept = [e for e in entries
+                if not exclusions.matches(data, "autoruns", exclusions.entry_key(e),
+                                          exclusions.fingerprint(e.exe))]
+        if len(kept) != len(entries):
+            notes.append(f"Скрыто исключений: {len(entries) - len(kept)}")
+        entries = kept
+
         self.bridge.entries.emit(entries)
         self.bridge.progress.emit(f"Найдено записей: {len(entries)}. Проверяю файлы и подписи...")
         ctx = Context(load_all_signatures(SIG_DIR), get_rules("all"), set(load_whitelist()))
@@ -365,14 +398,22 @@ class AutorunsWindow(QMainWindow):
             view.add(e)
         self._update_titles()
 
-    def _remove_row(self, key: str) -> None:
+    def _drop_entry(self, key: str) -> Entry | None:
         for view in self.views.values():
             view.remove(key)
         entry = self.entries.pop(key, None)
-        if entry is not None:
-            self.removed[key] = entry
         self._update_titles()
         self._update_buttons()
+        return entry
+
+    def _remove_row(self, key: str) -> None:
+        entry = self._drop_entry(key)
+        if entry is not None:
+            self.removed[key] = entry  # запоминаем: откат из журнала вернёт запись в список
+
+    def handle_undo(self, record: dict) -> None:
+        """Вызывается главным окном, когда в журнале отменено действие."""
+        self._after_undo(record)
 
     def _after_undo(self, record: dict) -> bool:
         """Обновляет списки после отката. False, если запись в них не найдена."""
@@ -398,7 +439,7 @@ class AutorunsWindow(QMainWindow):
             return True
         return False
 
-    # ---------- исправление ----------
+    # ---------- действия ----------
     def fix_selected(self) -> None:
         e = self.selected_entry()
         if e is None:
@@ -426,7 +467,7 @@ class AutorunsWindow(QMainWindow):
             e.enabled = False        # задача остаётся в списке как отключённая
             self._refresh_entry(e)
         self.statusBar().showMessage(message, 10000)
-        self.refresh_journal()
+        self.journal_changed.emit()
         self._update_buttons()
 
     def quarantine_selected(self) -> None:
@@ -441,7 +482,7 @@ class AutorunsWindow(QMainWindow):
             self, "Карантин файла",
             f"Переместить в карантин файл:\n{e.exe}\n\n"
             "Запись автозапуска останется, поэтому обычно сначала отключают её. "
-            "Вернуть файл можно на вкладке «Журнал действий».")
+            "Вернуть файл можно на странице «Журнал».")
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
@@ -459,8 +500,26 @@ class AutorunsWindow(QMainWindow):
             e.flags.append(FLAG_QUARANTINED)
         self._refresh_entry(e)
         self.statusBar().showMessage(message, 10000)
-        self.refresh_journal()
+        self.journal_changed.emit()
         self.quarantine_changed.emit()
+
+    def trust_selected(self) -> None:
+        e = self.selected_entry()
+        if e is None:
+            return
+        answer = QMessageBox.question(
+            self, "Доверять записи",
+            f"{e.name}\n{e.command}\n\nДобавить запись в исключения? Она не будет показываться "
+            "при сканировании, пока не изменится её команда или файл. Управлять исключениями "
+            "можно на странице «Исключения» главного окна.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        exclusions.add("autoruns", exclusions.entry_key(e),
+                       f"{KIND_TITLES[e.kind]}: {e.name}", e.command,
+                       exclusions.fingerprint(e.exe))
+        self._drop_entry(e.key)
+        self.statusBar().showMessage("Запись добавлена в исключения", 8000)
+        self.exclusions_changed.emit()
 
     def open_folder(self) -> None:
         e = self.selected_entry()
@@ -471,63 +530,6 @@ class AutorunsWindow(QMainWindow):
         e = self.selected_entry()
         if e is not None and e.exe and os.path.isfile(e.exe):
             self.analyze_requested.emit(e.exe)
-
-    # ---------- вкладка «Журнал действий» ----------
-    def _build_journal_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.addWidget(QLabel(
-            "Все исправления программы. Выберите действие и нажмите «Отменить действие», "
-            "чтобы вернуть прежнее состояние."))
-        self.journal_tree = _make_tree(["Время", "Действие", "Статус"], [160, 800, 140])
-        layout.addWidget(self.journal_tree)
-        row = QHBoxLayout()
-        undo_btn = QPushButton("Отменить действие")
-        undo_btn.clicked.connect(self.undo_selected)
-        refresh_btn = QPushButton("Обновить")
-        refresh_btn.clicked.connect(self.refresh_journal)
-        row.addWidget(undo_btn)
-        row.addWidget(refresh_btn)
-        row.addStretch()
-        layout.addLayout(row)
-        return tab
-
-    def refresh_journal(self) -> None:
-        self.journal_tree.clear()
-        for record in reversed(journal.read_all()):
-            status = f"Отменено {record['undone_at']}" if record["undone"] else "Выполнено"
-            item = QTreeWidgetItem([record["time"].replace("T", " "), record["title"], status])
-            item.setData(0, KEY_ROLE, record["id"])
-            if record["undone"]:
-                for col in range(3):
-                    item.setForeground(col, QBrush(QColor("gray")))
-            self.journal_tree.addTopLevelItem(item)
-
-    def show_journal(self) -> None:
-        self.main_tabs.setCurrentIndex(TAB_JOURNAL)
-        self.refresh_journal()
-
-    def undo_selected(self) -> None:
-        item = self.journal_tree.currentItem()
-        if item is None:
-            QMessageBox.information(self, "Журнал", "Сначала выберите действие в списке")
-            return
-        record_id = item.data(0, KEY_ROLE)
-        record = next((r for r in journal.read_all() if r["id"] == record_id), None)
-        answer = QMessageBox.question(
-            self, "Отмена действия", f"Отменить действие?\n\n{item.text(1)}")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            message = journal.undo(record_id)
-        except (ValueError, OSError) as exc:
-            QMessageBox.critical(self, "Отмена действия", f"Не удалось отменить: {exc}")
-            return
-        if record is not None and not self._after_undo(record):
-            message += " Нажмите «Сканировать всё», чтобы обновить списки."
-        self.statusBar().showMessage(message, 10000)
-        self.refresh_journal()
-        self.quarantine_changed.emit()
 
     def shutdown(self) -> None:
         """Вызывается при закрытии главного окна."""

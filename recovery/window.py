@@ -11,12 +11,17 @@ from PySide6.QtWidgets import (
 )
 
 import appinfo
-# from processmanager.colors import text_color
+
 from processmanager.system import is_admin
+
 from recovery import actions
+from recovery import assoc
 from recovery import system as rsys
 from recovery import checks
+from recovery.assoc_panel import AssocPanel
 from recovery.panels import FindingsPanel, PolicyPanel
+
+from scanner import exclusions
 
 
 COMMANDS = {
@@ -35,7 +40,7 @@ LEVEL_COLORS = {"ok": (170, 230, 170), "info": (170, 204, 255),
                 "warning": (255, 190, 110), "bad": (255, 128, 128)}
 PROGRESS_RE = re.compile(r"\d+(?:[.,]\d+)?\s*%")
 INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
-TAB_POINTS, TAB_INTEGRITY, TAB_CHECKS = 0, 1, 2
+TAB_POINTS, TAB_INTEGRITY, TAB_CHECKS, TAB_ASSOC = 0, 1, 2, 3
 
 
 class Bridge(QObject):
@@ -78,6 +83,8 @@ class RecoveryWindow(QMainWindow):
         self._proc = None
         self._partial = ""
         self._last_progress = False
+        self._last_results = None
+        self._last_assoc: list = []
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -86,6 +93,8 @@ class RecoveryWindow(QMainWindow):
         self.tabs.addTab(self._build_points_tab(), "Точки восстановления")
         self.tabs.addTab(self._build_integrity_tab(), "Целостность Windows")
         self.tabs.addTab(self._build_checks_tab(), "Проверка системы")
+        self.tabs.addTab(self._build_assoc_tab(), "Файловые ассоциации")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
         self.statusBar().showMessage("Готово")
@@ -157,6 +166,20 @@ class RecoveryWindow(QMainWindow):
             self.statusBar().showMessage(payload.splitlines()[0], 10000)
             QMessageBox.information(self, "Исправление", payload)
             self.run_system_check()
+        elif kind == "assoc_check":
+            self._apply_assoc_issues(payload)
+        elif kind == "assoc_snapshot":
+            self.assoc_panel.set_snapshots(payload)
+            self.statusBar().showMessage("Снимок файловых ассоциаций сохранён", 8000)
+        elif kind == "assoc_compare":
+            self.assoc_panel.set_diffs(payload)
+            self.statusBar().showMessage(f"Отличий от снимка: {len(payload)}", 8000)
+        elif kind == "assoc_fix":
+            self.statusBar().showMessage(payload.splitlines()[0], 10000)
+            QMessageBox.information(self, "Файловые ассоциации", payload)
+            self.run_assoc_check()
+            if self.assoc_panel.snapshots.currentData() is not None:
+                self.assoc_panel.btn_compare.click()
 
     # ---------- вкладка «Точки восстановления» ----------
 
@@ -373,12 +396,14 @@ class RecoveryWindow(QMainWindow):
         for category, title, hint in self.PANELS:
             panel = FindingsPanel(hint)
             panel.fix_requested.connect(self.fix_finding)
+            panel.exclude_requested.connect(self.exclude_finding)
             self.panels[category] = panel
             self.check_tabs.addTab(panel, title)
         self.policy_panel = PolicyPanel()
         self.policy_panel.scan_requested.connect(self.run_system_check)
         self.policy_panel.unlock_hits_requested.connect(self.unlock_hits)
         self.policy_panel.unlock_names_requested.connect(self.unlock_names)
+        self.policy_panel.exclude_hits_requested.connect(self.exclude_hits)
         self.check_tabs.addTab(self.policy_panel, "Политики и блокировки")
         return tab
 
@@ -386,17 +411,55 @@ class RecoveryWindow(QMainWindow):
         self._async("checks", checks.run_all, "Проверяю систему...")
 
     def _apply_results(self, results) -> None:
-        problems = 0
+        self._last_results = results
+        data = exclusions.load()
+        hidden = problems = 0
         for category, panel in self.panels.items():
-            findings = results.findings.get(category, [])
+            findings = []
+            for f in results.findings.get(category, []):
+                if exclusions.matches(data, "checks", exclusions.finding_key(f)):
+                    hidden += 1
+                else:
+                    findings.append(f)
             panel.set_findings(findings)
             problems += sum(1 for f in findings if f.level in ("warning", "bad"))
-        self.policy_panel.set_hits(results.hits)
-        problems += len(results.hits)
+        hits = []
+        for h in results.hits:
+            if exclusions.matches(data, "checks", exclusions.hit_key(h)):
+                hidden += 1
+            else:
+                hits.append(h)
+        self.policy_panel.set_hits(hits)
+        problems += len(hits)
         message = f"Проверка завершена. Требуют внимания: {problems}"
+        if hidden:
+            message += f". Скрыто исключений: {hidden}"
         if results.policy_error:
             message += f". Сканирование политик не удалось: {results.policy_error}"
         self.statusBar().showMessage(message, 12000)
+
+    def _confirm_trust(self, text: str) -> bool:
+        answer = QMessageBox.question(
+            self, "Доверять",
+            f"{text}\n\nДобавить в исключения? Это больше не будет показываться при проверках, "
+            "пока оно не изменится. Управлять исключениями можно на странице «Исключения» "
+            "главного окна.")
+        return answer == QMessageBox.StandardButton.Yes
+
+    def exclude_finding(self, finding) -> None:
+        if self._confirm_trust(f"{finding.title}\n{finding.status}"):
+            exclusions.add("checks", exclusions.finding_key(finding), finding.title,
+                           finding.detail or finding.status)
+            if self._last_results is not None:
+                self._apply_results(self._last_results)
+
+    def exclude_hits(self, hits) -> None:
+        if self._confirm_trust(f"Ограничений: {len(hits)}"):
+            for h in hits:
+                exclusions.add("checks", exclusions.hit_key(h), h.title,
+                               f"{h.hive}\\{h.path}\\{h.name} = {h.value}")
+            if self._last_results is not None:
+                self._apply_results(self._last_results)
 
     def fix_finding(self, finding) -> None:
         answer = QMessageBox.question(
@@ -425,6 +488,85 @@ class RecoveryWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self._async("unlock", lambda: actions.unlock_by_names(names),
                         "Снимаю ограничения...")
+
+    # ---------- вкладка «Файловые ассоциации» ----------
+
+    def _build_assoc_tab(self) -> QWidget:
+        self.assoc_panel = AssocPanel()
+        panel = self.assoc_panel
+        panel.check_requested.connect(self.run_assoc_check)
+        panel.fix_requested.connect(self.fix_assoc_issues)
+        panel.exclude_requested.connect(self.exclude_assoc_issue)
+        panel.snapshot_requested.connect(self.take_assoc_snapshot)
+        panel.compare_requested.connect(self.compare_assoc)
+        panel.restore_requested.connect(self.restore_assoc)
+        self._busy_buttons += [panel.btn_check, panel.btn_snapshot]
+        panel.set_snapshots(assoc.list_snapshots())
+        return panel
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == TAB_ASSOC and not self.assoc_panel.checked_once and not self._busy:
+            self.run_assoc_check()
+
+    def run_assoc_check(self) -> None:
+        def job():
+            if not assoc.list_snapshots():  # первый снимок, чтобы было с чем сравнивать
+                assoc.take_snapshot("автоматически при первой проверке")
+            return assoc.check_critical()
+        self._async("assoc_check", job, "Проверяю файловые ассоциации...")
+
+    def _apply_assoc_issues(self, issues) -> None:
+        self._last_assoc = issues
+        data = exclusions.load()
+        shown = [i for i in issues if not exclusions.matches(data, "checks", i.key)]
+        self.assoc_panel.set_issues(shown)
+        self.assoc_panel.set_snapshots(assoc.list_snapshots())
+        hidden = len(issues) - len(shown)
+        problems = sum(1 for i in shown if i.level != "ok")
+        message = f"Ассоциации проверены. Проблем: {problems}"
+        if hidden:
+            message += f". Скрыто исключений: {hidden}"
+        self.statusBar().showMessage(message, 10000)
+
+    def exclude_assoc_issue(self, issue) -> None:
+        if self._confirm_trust(f"{issue.ext}: {issue.title}\n{issue.detail}"):
+            exclusions.add("checks", issue.key, f"{issue.ext}: {issue.title}", issue.detail)
+            self._apply_assoc_issues(self._last_assoc)
+
+    def fix_assoc_issues(self, issues) -> None:
+        lines = "\n".join(f"• {i.ext}: {i.title}" for i in issues[:10])
+        more = f"\n...и ещё {len(issues) - 10}" if len(issues) > 10 else ""
+        answer = QMessageBox.question(
+            self, "Файловые ассоциации",
+            f"Исправить ({len(issues)})?\n\n{lines}{more}\n\n"
+            "Изменение попадёт в журнал действий и отменяется одним действием. "
+            "Исправления в HKLM требуют прав администратора.")
+        if answer == QMessageBox.StandardButton.Yes:
+            ops = [op for i in issues for op in i.ops]
+            title = "Файловые ассоциации: исправлено " + ", ".join(sorted({i.ext for i in issues}))
+            self._async("assoc_fix", lambda: assoc.apply_ops(ops, title), "Исправляю...")
+
+    def take_assoc_snapshot(self) -> None:
+        def job():
+            assoc.take_snapshot()
+            return assoc.list_snapshots()
+        self._async("assoc_snapshot", job, "Сохраняю снимок ассоциаций...")
+
+    def compare_assoc(self, path) -> None:
+        self._async("assoc_compare", lambda: assoc.compare(assoc.load_snapshot(path)),
+                    "Сравниваю со снимком...")
+
+    def restore_assoc(self, diffs) -> None:
+        answer = QMessageBox.question(
+            self, "Файловые ассоциации",
+            f"Вернуть к состоянию снимка отмеченные значения ({len(diffs)})?\n\n"
+            "Удаляемые разделы сохраняются в резервную копию. Действие попадёт в журнал "
+            "и отменяется одним действием.")
+        if answer == QMessageBox.StandardButton.Yes:
+            ops = [op for d in diffs for op in d.ops]
+            title = ("Файловые ассоциации: восстановлено из снимка "
+                     + ", ".join(sorted({d.ext for d in diffs}))[:120])
+            self._async("assoc_fix", lambda: assoc.apply_ops(ops, title), "Восстанавливаю...")
 
     # ---------- завершение ----------
 

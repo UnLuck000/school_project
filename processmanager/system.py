@@ -3,6 +3,9 @@ import os
 import subprocess
 import sys
 import time
+import csv
+import io
+import struct
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +14,7 @@ import psutil
 
 from scanner.hashing import sha256_of
 from scanner.signature import describe, inspect_signature
+from processmanager import ntsnap
 from processmanager.origin import assign_origins, load_autostart
 
 SYSTEM_ROOT = Path(os.environ.get("SystemRoot", r"C:\Windows"))
@@ -29,6 +33,7 @@ NO_EXE_SYSTEM = {"system", "system idle process", "registry",
 SYSTEM_ACCOUNTS = ("NT AUTHORITY", "NT SERVICE", "WINDOW MANAGER", "FONT DRIVER HOST")
 LOLBINS = {"cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe",
            "mshta.exe", "regsvr32.exe", "rundll32.exe", "certutil.exe", "bitsadmin.exe"}
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 @dataclass
@@ -133,26 +138,42 @@ _svc_cache: tuple[float, set[int], int] = (-1e9, set(), 0)
 _auto_cache: tuple[float, tuple] = (-1e9, (set(), set()))
 
 
-def service_info() -> tuple[set[int], int]:
-    """(PID процессов со службами, PID службы «Планировщик заданий»); раз в 15 секунд."""
-    global _svc_cache
-    now = time.monotonic()
-    if now - _svc_cache[0] < 15:
-        return _svc_cache[1], _svc_cache[2]
+def parse_tasklist(text: str) -> tuple[set[int], int]:
+    """Разбирает вывод `tasklist /svc /fo csv /nh`: PID процессов со службами и PID службы Schedule."""
     pids: set[int] = set()
     schedule_pid = 0
+    for row in csv.reader(io.StringIO(text)):
+        if len(row) < 3 or not row[1].strip().isdigit():
+            continue
+        services = row[2].strip()
+        if not services or "/" in services:  # «N/A», «Н/Д»: у процесса нет служб
+            continue
+        pid = int(row[1])
+        pids.add(pid)
+        if "Schedule" in [s.strip() for s in services.split(",")]:
+            schedule_pid = pid
+    return pids, schedule_pid
+
+
+def service_info() -> tuple[set[int], int]:
+    """(PID процессов со службами, PID службы «Планировщик заданий»). Обновляется раз в 30 секунд
+    одним быстрым вызовом tasklist вместо сотни запросов к службам."""
+    global _svc_cache
+    now = time.monotonic()
+    if now - _svc_cache[0] < 30:
+        return _svc_cache[1], _svc_cache[2]
+    pids, schedule_pid = _svc_cache[1], _svc_cache[2]  # при сбое остаются прежние значения
     try:
-        for service in psutil.win_service_iter():
-            try:
-                pid = service.pid()
-                name = service.name()
-            except psutil.Error:
-                continue
-            if pid:
-                pids.add(pid)
-                if name == "Schedule":
-                    schedule_pid = pid
-    except (AttributeError, psutil.Error, OSError):
+        result = subprocess.run(["tasklist", "/svc", "/fo", "csv", "/nh"],
+                                capture_output=True, timeout=20, creationflags=NO_WINDOW)
+        try:
+            text = result.stdout.decode("oem", "replace")
+        except LookupError:  # не Windows
+            text = result.stdout.decode("utf-8", "replace")
+        parsed = parse_tasklist(text)
+        if parsed[0]:
+            pids, schedule_pid = parsed
+    except (OSError, subprocess.SubprocessError):
         pass
     _svc_cache = (now, pids, schedule_pid)
     return pids, schedule_pid
@@ -203,20 +224,69 @@ def mark_system(procs: list[ProcInfo]) -> None:
             node, hops = parent, hops + 1
 
 
-def take_snapshot() -> list[ProcInfo]:
+_identity_cache: dict[str, tuple[str, str]] = {}   # ключ процесса -> (путь, пользователь)
+_cpu_prev: tuple[float, dict[str, float]] = (0.0, {})  # время снимка, время ЦП по процессам
+
+
+def _raw_snapshot() -> list[ProcInfo]:
+    """Один системный вызов на весь список; путь и пользователь только для новых процессов."""
+    global _cpu_prev
     ncpu = psutil.cpu_count() or 1
-    services, schedule_pid = service_info()
+    now = time.monotonic()
+    prev_time, prev_cpu = _cpu_prev
+    elapsed = now - prev_time if prev_time else 0.0
+    procs: list[ProcInfo] = []
+    cpu_times: dict[str, float] = {}
+    for r in ntsnap.list_processes():
+        created = 0.0 if r.pid in (0, 4) else r.created  # как в psutil: время условное
+        info = ProcInfo(pid=r.pid, ppid=r.ppid if r.pid else 0, name=r.name, exe="", user="",
+                        rss=r.rss, cpu=0.0, created=created,
+                        status="stopped" if r.suspended else "running")
+        key = info.key
+        ident = _identity_cache.get(key)
+        if ident is None:
+            ident = _identity_cache[key] = ntsnap.identity(r.pid)
+        info.exe, info.user = ident
+        if r.pid in (0, 4):
+            info.user = "NT AUTHORITY\\SYSTEM"
+        cpu_times[key] = r.cpu_time
+        if elapsed > 0 and key in prev_cpu:
+            info.cpu = max(0.0, (r.cpu_time - prev_cpu[key]) / elapsed / ncpu * 100)
+        procs.append(info)
+    _cpu_prev = (now, cpu_times)
+    for key in [k for k in _identity_cache if k not in cpu_times]:
+        del _identity_cache[key]
+    return procs
+
+
+def _psutil_snapshot() -> list[ProcInfo]:
+    """Запасной вариант (не Windows или сбой системного вызова)."""
+    ncpu = psutil.cpu_count() or 1
     attrs = ["pid", "ppid", "name", "exe", "username", "memory_info",
              "cpu_percent", "create_time", "status"]
     procs: list[ProcInfo] = []
     for proc in psutil.process_iter(attrs):
         i = proc.info
         mem = i.get("memory_info")
-        info = ProcInfo(
+        procs.append(ProcInfo(
             pid=i["pid"], ppid=i.get("ppid") or 0, name=i.get("name") or "?",
             exe=i.get("exe") or "", user=i.get("username") or "",
             rss=mem.rss if mem else 0, cpu=(i.get("cpu_percent") or 0.0) / ncpu,
-            created=i.get("create_time") or 0.0, status=i.get("status") or "")
+            created=i.get("create_time") or 0.0, status=i.get("status") or ""))
+    return procs
+
+
+def take_snapshot() -> list[ProcInfo]:
+    services, schedule_pid = service_info()
+    procs: list[ProcInfo] | None = None
+    if ntsnap.AVAILABLE:
+        try:
+            procs = _raw_snapshot()
+        except (OSError, struct.error, ValueError):
+            procs = None
+    if procs is None:
+        procs = _psutil_snapshot()
+    for info in procs:
         info.service = info.pid in services
         info.sys_account = info.user.upper().startswith(SYSTEM_ACCOUNTS)
         info.own = bool(OWN_USER) and info.user == OWN_USER
@@ -224,7 +294,6 @@ def take_snapshot() -> list[ProcInfo]:
         if flags is None:
             flags = _flags_cache[info.key] = query_flags(info.pid)
         info.elevated, info.wow64, info.critical = flags
-        procs.append(info)
 
     alive = {p.key for p in procs}
     for key in [k for k in _flags_cache if k not in alive]:
