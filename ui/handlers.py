@@ -16,6 +16,12 @@ def open_journal(window):
     window.open_autoruns(journal=True)
 
 
+@implements("btnMemoryDeep")
+def memory_deep(window):
+    window.open_process_manager()
+    window.proc_window.find_injections()
+
+
 @implements("btnFileAnalyzer")
 def open_analyzer(window):
     window.open_analyzer()

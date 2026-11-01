@@ -120,9 +120,96 @@ def _user_extensions() -> list[str]:
     return sorted(found)
 
 
+def all_extensions() -> list[str]:
+    """Все расширения, известные системе: HKLM, HKCU и выбор пользователя."""
+    found = {n.lower() for n in list_subkeys("HKLM", CLASSES) if n.startswith(".")}
+    return sorted(found | set(_user_extensions()))
+
+
+# ---------- все расширения и их программы ----------
+ASSOCF_NOTRUNCATE, ASSOCF_INIT_IGNOREUNKNOWN = 0x20, 0x400
+ASSOCSTR_COMMAND, ASSOCSTR_EXECUTABLE = 1, 2
+ASSOCSTR_FRIENDLYDOCNAME, ASSOCSTR_FRIENDLYAPPNAME = 3, 4
+_assoc_query = None
+
+
+def _query(ext: str, what: int) -> str:
+    """Что Проводник сделает с файлом (AssocQueryStringW учитывает HKCU, HKLM и UserChoice)."""
+    global _assoc_query
+    if _assoc_query is None:
+        import ctypes
+        from ctypes import wintypes
+        fn = ctypes.WinDLL("shlwapi").AssocQueryStringW
+        fn.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                       wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        fn.restype = ctypes.c_long
+
+        def call(e: str, w: int) -> str:
+            buf = ctypes.create_unicode_buffer(2048)
+            size = wintypes.DWORD(2048)
+            ok = fn(ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN, w, e, None, buf,
+                    ctypes.byref(size)) == 0
+            return buf.value if ok else ""
+        _assoc_query = call
+    return _assoc_query(ext, what)
+
+
+@dataclass
+class ExtInfo:
+    ext: str
+    type_name: str      # описание типа файла
+    progid: str
+    source: str         # откуда взят обработчик
+    app: str            # название программы
+    exe: str            # исполняемый файл программы
+    command: str
+    level: str = "ok"   # ok | warning | bad
+    note: str = ""
+
+
+USER_DIRS = ("\\appdata\\local\\temp\\", "\\downloads\\", "\\users\\public\\")
+
+
+def list_all(progress=None) -> list[ExtInfo]:
+    """Все расширения с программами, которые их открывают. Медленно (секунды)."""
+    result: list[ExtInfo] = []
+    exts = all_extensions()
+    for i, ext in enumerate(exts):
+        if progress and i % 100 == 0:
+            progress(f"Расширений обработано: {i} из {len(exts)}")
+        progid, source = "", ""
+        for name in USER_CHOICE_KEYS:
+            exists, value, _ = read_value("HKCU", f"{FILE_EXTS}\\{ext}\\{name}", "ProgId")
+            if exists and value:
+                progid, source = str(value), "выбор пользователя"
+                break
+        if not progid:
+            for hive, label in (("HKCU", "HKCU (пользователь)"), ("HKLM", "HKLM (система)")):
+                exists, value, _ = read_value(hive, f"{CLASSES}\\{ext}", "")
+                if exists and value:
+                    progid, source = str(value), label
+                    break
+        exe = _query(ext, ASSOCSTR_EXECUTABLE)
+        command = _query(ext, ASSOCSTR_COMMAND)
+        app = _query(ext, ASSOCSTR_FRIENDLYAPPNAME)
+        info = ExtInfo(ext, _query(ext, ASSOCSTR_FRIENDLYDOCNAME), progid, source or "—",
+                       app, exe, command)
+        if exe.strip('"') in ("%1", ""):
+            info.exe = "запускается сам файл" if exe else ""
+        elif not os.path.isfile(exe):
+            if "\\" in exe:
+                info.level, info.note = "warning", "программа не найдена на диске"
+        elif any(d in exe.lower() for d in USER_DIRS):
+            info.level, info.note = "warning", "программа во временной или пользовательской папке"
+        result.append(info)
+    if progress:
+        progress(f"Расширений: {len(result)}")
+    return result
+
+
 # ---------- снимки ----------
 def take_snapshot(comment: str = "") -> Path:
-    exts = sorted(set(SNAPSHOT_EXTS) | set(_user_extensions()))
+    exts = sorted(set(SNAPSHOT_EXTS) | set(all_extensions()))
     data = {"time": datetime.now().isoformat(timespec="seconds"), "comment": comment,
             "extensions": {ext: read_state(ext) for ext in exts}}
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -275,7 +362,7 @@ def _ops_to(old: dict, cur: dict) -> tuple[list[Op], str]:
 def compare(snapshot: dict) -> list[AssocDiff]:
     diffs: list[AssocDiff] = []
     saved = snapshot.get("extensions", {})
-    exts = sorted(set(saved) | set(SNAPSHOT_EXTS) | set(_user_extensions()))
+    exts = sorted(set(saved) | set(SNAPSHOT_EXTS) | set(all_extensions()))
     empty = {"key": False, "exists": False, "value": None, "type": None}
     for ext in exts:
         now = read_state(ext)

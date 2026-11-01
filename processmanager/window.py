@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from processmanager.colors import BY_ID, CATEGORIES, classify, text_color
 from processmanager.memscan import MemResult, get_rules, scan_process
+from processmanager.memview import InjectionScanDialog, MemoryDialog
 from processmanager.origin import FILTERS, HELP, ORIGINS
 from processmanager.system import (
     ProcInfo, enable_debug_privilege, is_admin, open_in_explorer,
@@ -131,6 +132,8 @@ class ProcessWindow(QMainWindow):
             ("check", "Проверить файл", self.check_selected_file),
             ("scan", "Сканировать память", self.scan_selected_memory),
             ("scan_all", "Сканировать все процессы", self.scan_all_memory),
+            ("memdeep", "Память: регионы и модули", self.show_memory_map),
+            ("inject", "Найти внедрение кода", self.find_injections),
             ("cancel", "Остановить скан", self.cancel_scan),
         ]
         for d in definitions:
@@ -186,7 +189,20 @@ class ProcessWindow(QMainWindow):
         self.tree.itemSelectionChanged.connect(lambda: self._update_actions(announce=True))
         self.setCentralWidget(self.tree)
 
-        self._build_legend(toolbar)
+        legend = self._build_legend(toolbar)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.show_properties())
+
+        # меню «Вид»: панель действий и легенду можно вернуть, даже если обе закрыты
+        view_menu = self.menuBar().addMenu("Вид")
+        toolbar_action = toolbar.toggleViewAction()
+        toolbar_action.setText("Панель действий")
+        legend_action = legend.toggleViewAction()
+        legend_action.setText("Легенда цветов")
+        view_menu.addAction(toolbar_action)
+        view_menu.addAction(legend_action)
+        process_menu = self.menuBar().addMenu("Процесс")
+        for action in self.menu_actions:
+            process_menu.addSeparator() if action is None else process_menu.addAction(action)
         self._update_actions()
 
         if self.admin:
@@ -225,6 +241,7 @@ class ProcessWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         toolbar.addSeparator()
         toolbar.addAction(dock.toggleViewAction())  # кнопка показа и скрытия легенды
+        return dock
 
     def _show_menu(self, pos):
         menu = QMenu(self)
@@ -589,6 +606,17 @@ class ProcessWindow(QMainWindow):
 
     def relaunch(self):
         self.restart_requested.emit()
+
+    # ---------- карта памяти (VirtualQueryEx) и модули ----------
+    def show_memory_map(self):
+        p = self._selected()
+        if p:
+            MemoryDialog(p.pid, p.name, self).show()
+
+    def find_injections(self):
+        procs = [(p.pid, p.name, p.exe) for p in self.procs.values()
+                 if p.pid not in (0, 4, os.getpid())]
+        InjectionScanDialog(procs, self).show()
 
     # ---------- сканирование памяти ----------
     def scan_selected_memory(self):

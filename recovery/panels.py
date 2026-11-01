@@ -18,7 +18,7 @@ def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
     tree.setHeaderLabels(columns)
     tree.setRootIsDecorated(False)
     tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl и Shift
     header = tree.header()
     header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     header.setStretchLastSection(True)
@@ -33,6 +33,33 @@ def _paint(item: QTreeWidgetItem, rgb, columns: int) -> None:
         item.setForeground(col, QBrush(text_color(rgb)))
 
 
+def link_checks(tree: QTreeWidget) -> None:
+    """Флажок, поставленный у одной из выделенных строк, ставится у всех выделенных
+    (как в Проводнике: выделить с Ctrl или Shift и отметить разом)."""
+    busy = []
+
+    def changed(item: QTreeWidgetItem, column: int) -> None:
+        if busy or column != 0 or not item.isSelected():
+            return
+        busy.append(1)
+        try:
+            for other in tree.selectedItems():
+                if other is not item and other.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    other.setCheckState(0, item.checkState(0))
+        finally:
+            busy.clear()
+
+    tree.itemChanged.connect(changed)
+
+
+def checked_or_selected(tree: QTreeWidget) -> list[QTreeWidgetItem]:
+    """Отмеченные флажком строки, а если таких нет, выделенные."""
+    items = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    checked = [it for it in items if it.flags() & Qt.ItemFlag.ItemIsUserCheckable
+               and it.checkState(0) == Qt.CheckState.Checked]
+    return checked or [it for it in items if it.isSelected()]
+
+
 def _hint(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
@@ -41,8 +68,8 @@ def _hint(text: str) -> QLabel:
 
 class FindingsPanel(QWidget):
     """Список находок одной проверки с кнопками исправления и добавления в исключения."""
-    fix_requested = Signal(object)      # Finding
-    exclude_requested = Signal(object)  # Finding
+    fix_requested = Signal(object)      # список Finding
+    exclude_requested = Signal(object)  # список Finding
 
     def __init__(self, hint: str):
         super().__init__()
@@ -79,26 +106,30 @@ class FindingsPanel(QWidget):
         self.summary.setText(f"Требуют внимания: {problems}" if problems else "Проблем не найдено")
         self._update_buttons()
 
-    def _selected(self):
+    def _selected(self) -> list:
         items = self.tree.selectedItems()
-        return self._findings[items[0].data(0, INDEX_ROLE)] if items else None
+        return [self._findings[item.data(0, INDEX_ROLE)] for item in items]
 
     def _update_buttons(self) -> None:
-        f = self._selected()
-        has_fix = f is not None and f.fix is not None
-        self.btn_fix.setEnabled(has_fix)
-        self.btn_fix.setText(f.fix_title if has_fix else "Исправить выбранное")
-        self.btn_trust.setEnabled(f is not None and f.level != "ok")
+        selected = self._selected()
+        fixable = [f for f in selected if f.fix is not None]
+        self.btn_fix.setEnabled(bool(fixable))
+        if len(selected) == 1 and fixable:
+            self.btn_fix.setText(fixable[0].fix_title)
+        else:
+            self.btn_fix.setText(f"Исправить выбранное ({len(fixable)})" if len(selected) > 1
+                                 else "Исправить выбранное")
+        self.btn_trust.setEnabled(any(f.level != "ok" for f in selected))
 
     def _on_fix(self) -> None:
-        f = self._selected()
-        if f is not None and f.fix is not None:
-            self.fix_requested.emit(f)
+        fixable = [f for f in self._selected() if f.fix is not None]
+        if fixable:
+            self.fix_requested.emit(fixable)
 
     def _on_trust(self) -> None:
-        f = self._selected()
-        if f is not None:
-            self.exclude_requested.emit(f)
+        findings = [f for f in self._selected() if f.level != "ok"]
+        if findings:
+            self.exclude_requested.emit(findings)
 
 
 class PolicyPanel(QWidget):
@@ -127,6 +158,7 @@ class PolicyPanel(QWidget):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         self.scan_tree = _make_tree(["№", "Ограничение", "Значение", "Путь"], [50, 520, 110, 560])
+        link_checks(self.scan_tree)
         layout.addWidget(self.scan_tree, 1)
 
         row = QHBoxLayout()
@@ -183,6 +215,7 @@ class PolicyPanel(QWidget):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         self.manual_tree = _make_tree(["Ограничение", "Описание", "Состояние"], [260, 560, 160])
+        link_checks(self.manual_tree)
         self._manual_items: dict[str, QTreeWidgetItem] = {}
         for restriction in policies.CATALOG:
             item = QTreeWidgetItem([restriction.name, restriction.description,
@@ -205,8 +238,8 @@ class PolicyPanel(QWidget):
         return tab
 
     def _unlock_selected_names(self) -> None:
-        names = [name for name, item in self._manual_items.items()
-                 if item.checkState(0) == Qt.CheckState.Checked]
+        chosen = checked_or_selected(self.manual_tree)
+        names = [name for name, item in self._manual_items.items() if item in chosen]
         if names:
             self.unlock_names_requested.emit(names)
 
@@ -221,9 +254,4 @@ class PolicyPanel(QWidget):
 
     @staticmethod
     def _checked_indices(tree: QTreeWidget) -> list[int]:
-        result = []
-        for i in range(tree.topLevelItemCount()):
-            item = tree.topLevelItem(i)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                result.append(item.data(0, INDEX_ROLE))
-        return result
+        return [item.data(0, INDEX_ROLE) for item in checked_or_selected(tree)]

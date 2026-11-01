@@ -58,14 +58,15 @@ class TrayIcon(QSystemTrayIcon):
         items = (
             ("Сканер автозапуска", window.open_autoruns),
             ("Диспетчер процессов", window.open_process_manager),
-            ("Анализатор файла", lambda: window.run_feature("btnFileAnalyzer")),
+            ("Сканирование папки/файла", lambda: window.run_feature("btnFileAnalyzer")),
             ("Проверка системы", lambda: window.run_feature("btnSystemChecks")),
         )
         for text, handler in items:
             tools.addAction(text).triggered.connect(
                 lambda checked=False, h=handler: h())
 
-        menu.addAction("Настройки").triggered.connect(
+        self.settings_action = menu.addAction("Настройки")  # виден только в режиме отладки
+        self.settings_action.triggered.connect(
             lambda checked=False: window.show_main("Настройки"))
         menu.addSeparator()
         menu.addAction("Выход").triggered.connect(lambda checked=False: window.quit_app())

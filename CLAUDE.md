@@ -16,7 +16,10 @@
   heuristics, signature (WinVerifyTrust, каталоги, издатель), whitelist, exclusions
 - processmanager/: диспетчер процессов (отдельное окно), colors, origin, memscan (YARA по памяти),
   enrich (фоновая проверка подписей с кэшем на диске), ntsnap (снимок процессов одним вызовом
-  NtQuerySystemInformation; psutil.process_iter не использовать: O(n²) и держит GIL, интерфейс лагает)
+  NtQuerySystemInformation; psutil.process_iter не использовать: O(n²) и держит GIL, интерфейс лагает),
+  memdeep + memview (карта памяти через VirtualQueryEx: приватные исполняемые и RWX-регионы,
+  MZ в приватной памяти, образы вне списка модулей; модули с подписями; поиск по всем процессам;
+  программы с JIT — .NET, Java, браузеры — определяются по модулям и оцениваются мягче)
 - networkmonitor/: мониторинг соединений; monitor.py (корень): мониторинг папок (watchdog)
 - autoruns/: сканер автозапуска (вкладки Всё, Реестр{Run,RunOnce,Winlogon}, Папка автозагрузки,
   Планировщик, Службы), действия с откатом
@@ -24,13 +27,25 @@
   обновления, брандмауэр, BCD), policies (ограничения реестра), actions, panels, window,
   journal_page, assoc + assoc_panel (файловые ассоциации: снимки в journal/assoc_snapshots,
   сравнение, восстановление с резервной копией разделов через reg export, проверка критичных
-  расширений на перехват в HKCU)
-- analyzer/: анализатор файла (report, code, codeview, window); disasm (дизассемблер разделов PE
-  с именами импортов, hex по страницам 64 КБ), strings + stringsview (весь файл до 256 МБ через
-  mmap, категории, фильтры, экспорт CSV/TXT, таблица на QAbstractTableModel)
+  расширений на перехват в HKCU; вкладка «Все расширения»: программа через AssocQueryStringW)
+- analyzer/: страница «Сканирование папки/файла» (scanpage): файл — window.FileView (вкладки
+  «Общие» = общие + подпись, «Проверка» = слои + PE, «Код» = обзор / дизассемблер / hex и строки);
+  папка — folderview (только её файлы и папки, без вложенных; проверка check_file, меню ПКМ,
+  свойства). fileops: свойства, размер на диске, владелец, Корзина, переименование и белый
+  список с откатом. report, code, codeview, disasm, strings + stringsview — как раньше.
+  Отдельного окна анализатора больше нет: open_analyzer(path) открывает эту страницу
 - ui/: боковая навигация (shell), страницы из Qt Designer (ui/designer/*.ui, загружаются
-  QUiLoader), settings, theme, tray, single_instance, registry+handlers (кнопки-заглушки)
-- debug_mode/ — скрытый режим отладки, в .gitignore (проверка пароля и хэши комбинаций)
+  QUiLoader), settings, theme (все темы на стиле Fusion: стиль windows11 не перекрашивается на
+  лету; список тем в theme.THEMES), tray, single_instance, registry+handlers (кнопки-заглушки)
+- ui/debug_mode.py: PasswordGate (соль + SHA-256 в debug_mode/passwords.txt, папка в .gitignore).
+  Пароля нет — режим отладки включён всегда; пароль задаётся на вкладке «Отладка». Страница
+  «Настройки» (и пункт в трее) видна только в режиме отладки
+- Главное меню: Главная, Сканирование папки/файла, Защита, Сеть, Журнал действий (вкладки
+  Действия, Карантин, Белый список, Исключения), Инструменты, Настройки, О программе, Отладка.
+  Защита файлов включается при запуске всегда; general/block_exit запрещает выход (кроме
+  перезапуска от администратора и конца сеанса Windows)
+- Заголовки окон Windows перекрашиваются через DWM (theme.set_title_bar): Qt сам не меняет их
+  при смене темы на ходу и даже возвращает прежний цвет, поэтому установка повторяется по таймеру
 
 ## Соглашения
 - Каждое изменяющее систему действие пишется в журнал (`recovery/journal.log_action`) вместе с
@@ -39,6 +54,9 @@
 - Значения для PowerShell передаются через переменные окружения, не подставляются в скрипт.
 - Кнопки-заглушки: добавить имя в `ui/registry.py` FEATURES, функцию с `@implements("btnИмя")`
   в `ui/handlers.py`.
+- Списки с действиями — ExtendedSelection (Ctrl/Shift); действия работают со всеми выделенными
+  строками, флажки через recovery.panels.link_checks / checked_or_selected.
+- Правки через Bash heredoc портят обратные слэши: Python-скрипты для правок писать в файл.
 - Кнопки и поля из .ui нельзя переименовывать (имена используются в коде); `pytest` проверяет XML.
 - Проверки Microsoft Defender из программы убраны намеренно (у части пользователей он вырезан).
 - Не хранить в Git: signatures/whitelist.json, signatures/exclusions.json, signatures/feeds/,

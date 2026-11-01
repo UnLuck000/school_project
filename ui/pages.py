@@ -1,8 +1,8 @@
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QLabel, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 import appinfo
@@ -13,7 +13,8 @@ from ui.registry import FEATURES, HANDLERS
 
 from processmanager.system import is_admin
 
-THEMES = ["system", "light", "dark"]  # порядок совпадает с пунктами списка в Designer
+from ui.debug_mode import MIN_LEN, PasswordGate
+from ui.theme import THEMES as THEME_LIST, THEME_IDS as THEMES
 
 
 def _run_feature(widget, window, feature, handler) -> None:
@@ -134,15 +135,17 @@ class SettingsPage(_UiPage):
         ui = self.ui
         self.chk_autostart = child(ui, QCheckBox, "chkAutostart")
         self.chk_ask_admin = child(ui, QCheckBox, "chkAskAdmin")
-        self.chk_auto_protect = child(ui, QCheckBox, "chkAutoProtect")
+        self.chk_block_exit = child(ui, QCheckBox, "chkBlockExit")
         self.chk_on_top = child(ui, QCheckBox, "chkOnTop")
         self.cmb_theme = child(ui, QComboBox, "cmbTheme")
+        self.cmb_theme.clear()  # список тем задаётся в ui/theme.py
+        self.cmb_theme.addItems([title for _, title in THEME_LIST])
         self.spn_threshold = child(ui, QSpinBox, "spnThreshold")
         self.spn_workers = child(ui, QSpinBox, "spnWorkers")
         self.spn_interval = child(ui, QSpinBox, "spnInterval")
         self.chk_tray = child(ui, QCheckBox, "chkTray")
         self.chk_explorer = child(ui, QCheckBox, "chkExplorerMenu")
-        self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_auto_protect,
+        self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_block_exit,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
                      self.spn_workers, self.spn_interval, self.chk_tray,
                      self.chk_explorer,)
@@ -150,7 +153,7 @@ class SettingsPage(_UiPage):
 
         self.chk_autostart.toggled.connect(self._on_autostart)
         self.chk_ask_admin.toggled.connect(lambda v: self._save("startup/ask_admin", v))
-        self.chk_auto_protect.toggled.connect(lambda v: self._save("startup/auto_protect", v))
+        self.chk_block_exit.toggled.connect(lambda v: self._save("general/block_exit", v))
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
         self.chk_tray.toggled.connect(lambda v: self._save("general/close_to_tray", v))
         self.chk_explorer.toggled.connect(self._on_explorer_menu)
@@ -166,7 +169,7 @@ class SettingsPage(_UiPage):
             widget.blockSignals(True)
         self.chk_autostart.setChecked(cfg.autostart_enabled())
         self.chk_ask_admin.setChecked(cfg.get("startup/ask_admin"))
-        self.chk_auto_protect.setChecked(cfg.get("startup/auto_protect"))
+        self.chk_block_exit.setChecked(cfg.get("general/block_exit"))
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
         self.chk_tray.setChecked(cfg.get("general/close_to_tray"))
         self.chk_explorer.setChecked(cfg.explorer_menu_enabled())
@@ -244,14 +247,77 @@ class DebugPage(_UiPage):
     """Служебная страница: видна только в режиме отладки."""
     UI_NAME = "debug_page"
     update_databases = Signal()
+    password_changed = Signal(bool)  # True: пароль задан
 
-    def __init__(self, window):
+    def __init__(self, window, gate: PasswordGate | None = None):
         super().__init__()
+        self.gate = gate
         self.lbl_hashes = child(self.ui, QLabel, "lblHashes")
         self.lbl_rules = child(self.ui, QLabel, "lblRules")
+        self.lbl_password = child(self.ui, QLabel, "lblPasswordState")
+        self.btn_set_password = child(self.ui, QPushButton, "btnSetPassword")
+        self.btn_remove_password = child(self.ui, QPushButton, "btnRemovePassword")
         child(self.ui, QPushButton, "btnUpdateDatabases").clicked.connect(
             lambda checked=False: self.update_databases.emit())
+        self.btn_set_password.clicked.connect(lambda checked=False: self.set_password())
+        self.btn_remove_password.clicked.connect(lambda checked=False: self.remove_password())
         bind_features(self, self.ui, window)
+        self.update_password_state()
+
+    def update_password_state(self) -> None:
+        has = self.gate is not None and self.gate.has_password()
+        self.btn_set_password.setText("Сменить пароль" if has else "Установить пароль")
+        self.btn_set_password.setEnabled(self.gate is not None)
+        self.btn_remove_password.setEnabled(has)
+        self.lbl_password.setText(
+            "Пароль задан. Чтобы скрыть или открыть вкладку «Отладка», наберите его на "
+            "клавиатуре в любом окне программы." if has else
+            "Пароль не задан, поэтому режим отладки включён всегда. Задайте пароль, чтобы "
+            "скрыть вкладку: после этого она открывается только набором пароля на клавиатуре.")
+
+    def set_password(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.btn_set_password.text())
+        form = QFormLayout(dialog)
+        first, second = QLineEdit(), QLineEdit()
+        for edit in (first, second):
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(QLabel(f"Не меньше {MIN_LEN} символов, регистр не учитывается. "
+                           "Хранится только хэш пароля."))
+        form.addRow("Пароль:", first)
+        form.addRow("Ещё раз:", second)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        while dialog.exec() == QDialog.DialogCode.Accepted:
+            if first.text() != second.text():
+                QMessageBox.warning(self, "Пароль", "Пароли не совпадают")
+                continue
+            try:
+                self.gate.set_password(first.text())
+            except (ValueError, OSError) as e:
+                QMessageBox.warning(self, "Пароль", str(e))
+                continue
+            self.update_password_state()
+            self.password_changed.emit(True)
+            QMessageBox.information(
+                self, "Пароль", "Пароль сохранён. Вкладка остаётся открытой до тех пор, "
+                "пока вы не наберёте пароль ещё раз или не перезапустите программу.")
+            return
+
+    def remove_password(self) -> None:
+        answer = QMessageBox.question(
+            self, "Пароль", "Убрать пароль? Режим отладки будет включён всегда.")
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                self.gate.remove_password()
+            except OSError as e:
+                QMessageBox.warning(self, "Пароль", f"Не удалось удалить файл пароля: {e}")
+                return
+            self.update_password_state()
+            self.password_changed.emit(False)
 
     def refresh(self, hashes: int, rules: int, rule_files: int) -> None:
         self.lbl_hashes.setText(f"{hashes:,}".replace(",", " "))

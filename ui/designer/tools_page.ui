@@ -31,7 +31,7 @@
       <widget class="QGroupBox" name="groupAnalysis">
        <property name="title"><string>Анализ</string></property>
        <layout class="QVBoxLayout" name="layoutAnalysis">
-        <item><widget class="QPushButton" name="btnFileAnalyzer"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Анализатор файла</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnFileAnalyzer"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сканирование папки/файла</string></property></widget></item>
         <item><widget class="QPushButton" name="btnProcessManager"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
        </layout>
       </widget>

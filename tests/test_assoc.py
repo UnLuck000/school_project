@@ -18,7 +18,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "BACKUP_DIR", tmp_path / "backup")
     monkeypatch.setattr(assoc, "SNAPSHOT_DIR", tmp_path / "snapshots")
     monkeypatch.setattr(assoc, "SNAPSHOT_EXTS", [EXT])
-    monkeypatch.setattr(assoc, "_user_extensions", lambda: [])
+    monkeypatch.setattr(assoc, "all_extensions", lambda: [])
     yield winreg
     for path in (rf"{assoc.CLASSES}\{EXT}", rf"{assoc.CLASSES}\studyavevil\shell\open\command",
                  rf"{assoc.CLASSES}\studyavevil\shell\open", rf"{assoc.CLASSES}\studyavevil\shell",

@@ -1,6 +1,6 @@
-APP_NAME = "MyAntiviruS"
-SHORT_NAME = "myAV"
-VERSION = "0.1.0"
+APP_NAME = "StretchBIT"
+SHORT_NAME = "SBIT"
+VERSION = "0.1.1"
 YEAR = 2026
 AUTHOR = "Владимир"                         # TODO: впишите автора
 ORGANIZATION = ""                           # TODO: школа или университет

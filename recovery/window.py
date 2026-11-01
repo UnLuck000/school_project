@@ -55,7 +55,7 @@ def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
     tree.setHeaderLabels(columns)
     tree.setRootIsDecorated(False)
     tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl и Shift
     header = tree.header()
     header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     header.setStretchLastSection(True)
@@ -174,6 +174,9 @@ class RecoveryWindow(QMainWindow):
         elif kind == "assoc_compare":
             self.assoc_panel.set_diffs(payload)
             self.statusBar().showMessage(f"Отличий от снимка: {len(payload)}", 8000)
+        elif kind == "assoc_list":
+            self.assoc_panel.set_extensions(payload)
+            self.statusBar().showMessage(f"Расширений в системе: {len(payload)}", 8000)
         elif kind == "assoc_fix":
             self.statusBar().showMessage(payload.splitlines()[0], 10000)
             QMessageBox.information(self, "Файловые ассоциации", payload)
@@ -446,10 +449,13 @@ class RecoveryWindow(QMainWindow):
             "главного окна.")
         return answer == QMessageBox.StandardButton.Yes
 
-    def exclude_finding(self, finding) -> None:
-        if self._confirm_trust(f"{finding.title}\n{finding.status}"):
-            exclusions.add("checks", exclusions.finding_key(finding), finding.title,
-                           finding.detail or finding.status)
+    def exclude_finding(self, findings) -> None:
+        text = (f"{findings[0].title}\n{findings[0].status}" if len(findings) == 1
+                else f"Находок: {len(findings)}\n" + "\n".join(f"• {f.title}" for f in findings[:10]))
+        if self._confirm_trust(text):
+            for finding in findings:
+                exclusions.add("checks", exclusions.finding_key(finding), finding.title,
+                               finding.detail or finding.status)
             if self._last_results is not None:
                 self._apply_results(self._last_results)
 
@@ -461,14 +467,37 @@ class RecoveryWindow(QMainWindow):
             if self._last_results is not None:
                 self._apply_results(self._last_results)
 
-    def fix_finding(self, finding) -> None:
+    def fix_finding(self, findings) -> None:
+        if len(findings) == 1:
+            finding = findings[0]
+            title = finding.fix_title
+            text = (f"{finding.title}\n{finding.status}\n{finding.detail}\n\n"
+                    f"Выполнить: {finding.fix_title}?")
+        else:
+            title = "Исправление"
+            text = (f"Исправить находки ({len(findings)})?\n\n"
+                    + "\n".join(f"• {f.title}: {f.fix_title}" for f in findings[:10]))
         answer = QMessageBox.question(
-            self, finding.fix_title,
-            f"{finding.title}\n{finding.status}\n{finding.detail}\n\n"
-            f"Выполнить: {finding.fix_title}?\n\n"
-            "Изменение попадёт в журнал действий, и его можно будет отменить.")
+            self, title, text + "\n\nИзменения попадут в журнал действий, их можно будет отменить.")
         if answer == QMessageBox.StandardButton.Yes:
-            self._async("fix", lambda: actions.apply_fix(finding), "Выполняю исправление...")
+            self._async("fix", lambda: self._fix_many(findings), "Выполняю исправление...")
+
+    @staticmethod
+    def _fix_many(findings) -> str:
+        if len(findings) == 1:
+            return actions.apply_fix(findings[0])
+        done, errors = [], []
+        for finding in findings:
+            try:
+                done.append(actions.apply_fix(finding))
+            except (OSError, ValueError) as e:
+                errors.append(f"{finding.title}: {e}")
+        if not done:
+            raise OSError("\n".join(errors[:10]))
+        text = f"Исправлено: {len(done)}. Отменить можно в журнале действий."
+        if errors:
+            text += f"\nНе удалось: {len(errors)}\n" + "\n".join(errors[:10])
+        return text
 
     def unlock_hits(self, hits) -> None:
         lines = "\n".join(f"• {h.title}" for h in hits[:8])
@@ -500,7 +529,8 @@ class RecoveryWindow(QMainWindow):
         panel.snapshot_requested.connect(self.take_assoc_snapshot)
         panel.compare_requested.connect(self.compare_assoc)
         panel.restore_requested.connect(self.restore_assoc)
-        self._busy_buttons += [panel.btn_check, panel.btn_snapshot]
+        panel.list_requested.connect(self.list_extensions)
+        self._busy_buttons += [panel.btn_check, panel.btn_snapshot, panel.btn_list]
         panel.set_snapshots(assoc.list_snapshots())
         return panel
 
@@ -528,9 +558,11 @@ class RecoveryWindow(QMainWindow):
             message += f". Скрыто исключений: {hidden}"
         self.statusBar().showMessage(message, 10000)
 
-    def exclude_assoc_issue(self, issue) -> None:
-        if self._confirm_trust(f"{issue.ext}: {issue.title}\n{issue.detail}"):
-            exclusions.add("checks", issue.key, f"{issue.ext}: {issue.title}", issue.detail)
+    def exclude_assoc_issue(self, issues) -> None:
+        text = "\n".join(f"{i.ext}: {i.title}\n{i.detail}" for i in issues[:8])
+        if self._confirm_trust(text):
+            for issue in issues:
+                exclusions.add("checks", issue.key, f"{issue.ext}: {issue.title}", issue.detail)
             self._apply_assoc_issues(self._last_assoc)
 
     def fix_assoc_issues(self, issues) -> None:
@@ -545,6 +577,12 @@ class RecoveryWindow(QMainWindow):
             ops = [op for i in issues for op in i.ops]
             title = "Файловые ассоциации: исправлено " + ", ".join(sorted({i.ext for i in issues}))
             self._async("assoc_fix", lambda: assoc.apply_ops(ops, title), "Исправляю...")
+
+    def list_extensions(self) -> None:
+        if self._busy:
+            self.assoc_panel.listed_once = False  # загрузим при следующем открытии вкладки
+        self._async("assoc_list", assoc.list_all,
+                    "Собираю все расширения и их программы (несколько секунд)...")
 
     def take_assoc_snapshot(self) -> None:
         def job():

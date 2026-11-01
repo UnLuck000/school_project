@@ -1,28 +1,25 @@
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTabWidget, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QMessageBox, QPushButton, QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
-import autoruns.actions  # noqa: F401  (регистрирует откат карантина в журнале)
 from analyzer.report import (
     FileReport, build_report, human_size, is_suspicious_api, is_windows_path,
 )
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
-from processmanager.system import allow_drops_from_lower_integrity, is_admin, open_in_explorer
-from quarantine import quarantine_file
-from recovery import journal
+from processmanager.system import open_in_explorer
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
 
+from analyzer import fileops
 from analyzer.codeview import CodeTab
-from analyzer.stringsview import StringsTab
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 LEVEL_COLORS = {"threat": (255, 128, 128), "suspicious": (255, 190, 110),
@@ -69,43 +66,44 @@ def _group(tree: QTreeWidget, title: str) -> QTreeWidgetItem:
     return item
 
 
-class AnalyzerWindow(QMainWindow):
+def _section(title: str, widget: QWidget) -> QGroupBox:
+    """Раздел вкладки с заголовком (например, «Общие сведения» и «Цифровая подпись»)."""
+    box = QGroupBox(title)
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(6, 6, 6, 6)
+    layout.addWidget(widget)
+    return box
+
+
+def _split(*sections: QWidget, sizes=None) -> QSplitter:
+    splitter = QSplitter(Qt.Orientation.Vertical)
+    for s in sections:
+        splitter.addWidget(s)
+    if sizes:
+        splitter.setSizes(sizes)
+    return splitter
+
+
+class FileView(QWidget):
+    """Результат проверки одного файла: «Общие», «Проверка», «Код»."""
     quarantine_changed = Signal()
+    status = Signal(str, int)        # текст для строки состояния, время показа (мс)
+    busy_changed = Signal(bool)
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Анализатор файла")
-        self.resize(1150, 780)
-        self.setAcceptDrops(True)
-
         self.bridge = Bridge()
         self.bridge.done.connect(self.on_done)
         self.bridge.failed.connect(self.on_failed)
         self.report: FileReport | None = None
-        self._banner_before = None
         self._busy = False
         self._build_ui()
 
     # ---------- интерфейс ----------
     def _build_ui(self):
-        root = QWidget()
-        layout = QVBoxLayout(root)
-
-        row = QHBoxLayout()
-        self.path_edit = QLineEdit()
-        self.path_edit.setAcceptDrops(False)  # иначе поле само перехватывает перетаскивание
-        self.path_edit.setPlaceholderText("Путь к файлу или перетащите файл в это окно")
-        self.path_edit.returnPressed.connect(self.analyze_clicked)
-        browse = QPushButton("Обзор...")
-        browse.clicked.connect(self.browse)
-        self.btn_analyze = QPushButton("Анализировать")
-        self.btn_analyze.clicked.connect(self.analyze_clicked)
-        row.addWidget(self.path_edit, 1)
-        row.addWidget(browse)
-        row.addWidget(self.btn_analyze)
-        layout.addLayout(row)
-
-        self.banner = QLabel("Выберите файл для анализа. Файл не запускается: анализ статический.")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.banner = QLabel("Файл не запускается: анализ статический.")
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet("padding: 10px; border-radius: 6px; font-size: 12pt;")
         layout.addWidget(self.banner)
@@ -117,13 +115,13 @@ class AnalyzerWindow(QMainWindow):
         self.pe_tree = _make_tree(["Элемент", "Значение", "Размер на диске", "Энтропия", "Права"],
                                   [320, 260, 130, 90, 80])
         self.code_tab = CodeTab()
-        self.strings_tab = StringsTab()
-        self.tabs.addTab(self.general_tree, "Общие")
-        self.tabs.addTab(self.sig_tree, "Подпись")
-        self.tabs.addTab(self.checks_tree, "Проверка")
-        self.tabs.addTab(self.pe_tree, "PE")
+        self.tabs.addTab(_split(_section("Общие сведения", self.general_tree),
+                                _section("Цифровая подпись", self.sig_tree), sizes=[420, 170]),
+                         "Общие")
+        self.tabs.addTab(_split(_section("Слои проверки", self.checks_tree),
+                                _section("Структура PE", self.pe_tree), sizes=[230, 360]),
+                         "Проверка")
         self.tabs.addTab(self.code_tab, "Код")
-        self.tabs.addTab(self.strings_tab, "Строки")
         layout.addWidget(self.tabs, 1)
 
         buttons = QHBoxLayout()
@@ -140,8 +138,6 @@ class AnalyzerWindow(QMainWindow):
             buttons.addWidget(button)
         buttons.addStretch()
         layout.addLayout(buttons)
-
-        self.setCentralWidget(root)
         self._set_actions(False)
 
     def _set_actions(self, enabled: bool):
@@ -149,66 +145,22 @@ class AnalyzerWindow(QMainWindow):
             button.setEnabled(enabled)
 
     # ---------- загрузка файла ----------
-    @staticmethod
-    def _first_local_file(event) -> str | None:
-        for url in event.mimeData().urls():
-            if url.isLocalFile():
-                return url.toLocalFile()
-        return None
-
-    def dragEnterEvent(self, event):
-        if self._first_local_file(event):
-            if self._banner_before is None:
-                self._banner_before = self.banner.text()
-            self.banner.setText("Отпустите кнопку мыши, чтобы проанализировать файл")
-            event.acceptProposedAction()
-
-    def dragLeaveEvent(self, event):
-        self._restore_banner()
-
-    def dropEvent(self, event):
-        path = self._first_local_file(event)
-        self._restore_banner()
-        if path:
-            event.acceptProposedAction()
-            self.load_file(path)
-
-    def _restore_banner(self):
-        if self._banner_before is not None:
-            self.banner.setText(self._banner_before)
-            self._banner_before = None
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if is_admin():  # окно с повышенными правами по умолчанию не принимает файлы из обычного Проводника
-            allow_drops_from_lower_integrity(int(self.winId()))
-
-    def browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для анализа")
-        if path:
-            self.load_file(path)
-
-    def analyze_clicked(self):
-        path = self.path_edit.text().strip().strip('"')
-        if path:
-            self.load_file(path)
-
-    def load_file(self, path: str):
+    def load_file(self, path: str) -> bool:
         file = Path(path)
         if not file.is_file():
-            QMessageBox.warning(self, "Анализатор", f"Файл не найден или это папка:\n{path}")
-            return
+            QMessageBox.warning(self, "Сканирование", f"Файл не найден:\n{path}")
+            return False
         if self._busy:
-            return
+            return False
         self._busy = True
-        self.btn_analyze.setEnabled(False)
+        self.busy_changed.emit(True)
         self._set_actions(False)
-        self.path_edit.setText(str(file))
         self.banner.setStyleSheet("padding: 10px; border-radius: 6px; font-size: 12pt;")
-        self.banner.setText("Анализирую...")
-        self.statusBar().showMessage(
-            "Загружаю базы и правила (при первом запуске это занимает несколько секунд)...")
+        self.banner.setText(f"Анализирую {file.name}...")
+        self.status.emit(
+            "Загружаю базы и правила (при первом запуске это занимает несколько секунд)...", 0)
         threading.Thread(target=self._job, args=(file,), daemon=True).start()
+        return True
 
     def _job(self, path: Path):
         try:
@@ -224,14 +176,14 @@ class AnalyzerWindow(QMainWindow):
 
     def on_failed(self, text: str):
         self._busy = False
-        self.btn_analyze.setEnabled(True)
+        self.busy_changed.emit(False)
         self.banner.setText(text)
-        self.statusBar().clearMessage()
+        self.status.emit("", 0)
 
     def on_done(self, report: FileReport):
         self._busy = False
+        self.busy_changed.emit(False)
         self.report = report
-        self.btn_analyze.setEnabled(True)
         self._set_actions(True)
 
         rgb = LEVEL_COLORS[report.level]
@@ -245,8 +197,7 @@ class AnalyzerWindow(QMainWindow):
         self._fill_pe(report)
         self.code_tab.set_view(report.code)
         self.code_tab.set_file(Path(report.path), report.pe is not None)
-        self.strings_tab.set_file(Path(report.path))
-        self.statusBar().showMessage(f"Готово: {report.name}", 8000)
+        self.status.emit(f"Готово: {report.name}", 8000)
 
     # ---------- заполнение вкладок ----------
     def _fill_general(self, r: FileReport):
@@ -385,7 +336,7 @@ class AnalyzerWindow(QMainWindow):
         if r is not None:
             QApplication.clipboard().setText(
                 f"MD5: {r.md5}\nSHA-1: {r.sha1}\nSHA-256: {r.sha256}")
-            self.statusBar().showMessage("Хэши скопированы в буфер обмена", 5000)
+            self.status.emit("Хэши скопированы в буфер обмена", 5000)
 
     def open_virustotal(self):
         r = self.report
@@ -413,11 +364,11 @@ class AnalyzerWindow(QMainWindow):
         answer = QMessageBox.question(
             self, "Карантин",
             f"Переместить файл в карантин?\n\n{r.path}\n\nВернуть его можно на странице "
-            "«Карантин» или в «Журнале действий».")
+            "«Журнал действий», вкладка «Карантин».")
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            item_id = quarantine_file(path, reason="Анализатор файла: " + r.verdict[:80])
+            fileops.quarantine(str(path), "Сканирование файла: " + r.verdict[:80])
         except PermissionError:
             QMessageBox.critical(self, "Карантин",
                                  "Файл занят: вероятно, программа запущена. "
@@ -426,8 +377,6 @@ class AnalyzerWindow(QMainWindow):
         except OSError as e:
             QMessageBox.critical(self, "Карантин", f"Не удалось выполнить: {e}")
             return
-        journal.log_action(f"Файл «{path.name}» перемещён в карантин (анализатор)",
-                           "quarantine_restore", {"id": item_id})
         self.btn_quarantine.setEnabled(False)
-        self.statusBar().showMessage("Файл перемещён в карантин", 8000)
+        self.status.emit("Файл перемещён в карантин", 8000)
         self.quarantine_changed.emit()

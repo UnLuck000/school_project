@@ -14,11 +14,11 @@ if sys.stdout is None or sys.stderr is None:  # pythonw или exe без кон
     sys.stdout = sys.stdout or _log
     sys.stderr = sys.stderr or _log
 
-from PySide6.QtCore import QEvent, Qt, QThread, Signal, QObject, QSettings, QUrl
+from PySide6.QtCore import QEvent, Qt, Signal, QObject, QSettings, QUrl
 from PySide6.QtGui import QFontMetrics, QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
-    QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
+    QListWidget, QMainWindow, QMessageBox,
     QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
     QTabWidget, QToolTip, QVBoxLayout, QWidget, QCheckBox, QLabel,
     QListWidgetItem, QSystemTrayIcon
@@ -27,10 +27,9 @@ from PySide6.QtWidgets import (
 from scanner import heuristics
 from scanner.whitelist import load_whitelist, remove_from_whitelist
 from scanner.hashing import load_all_signatures
-from scanner.engine import scan_tree
-from scanner.yara_engine import load_rules, count_rules
+from scanner.yara_engine import count_rules
 from quarantine import (
-    QUARANTINE_DIR, STATUS_QUARANTINED, quarantine_file, list_quarantine, restore_file, delete_file,
+    QUARANTINE_DIR, STATUS_QUARANTINED, list_quarantine, restore_file, delete_file,
 )
 from monitor import RealtimeMonitor
 from networkmonitor.connections import LEVEL_TEXT, terminate_process
@@ -53,7 +52,7 @@ import appinfo
 
 from autoruns.window import AutorunsWindow
 
-from analyzer.window import AnalyzerWindow
+from analyzer.scanpage import ScanPage
 
 from recovery.window import RecoveryWindow
 from recovery.journal_page import JournalPage
@@ -99,56 +98,7 @@ class ElidedTooltipDelegate(QStyledItemDelegate):
         return super().helpEvent(event, view, option, index)
 
 
-class ScanWorker(QThread):
-    """Сканирует папку в отдельном потоке и сообщает о ходе работы сигналами."""
-    file_checked = Signal(str)
-    threat_found = Signal(str)
-    error = Signal(str)
-    scan_finished = Signal(int, bool)
-
-    def __init__(self, root: str):
-        super().__init__()
-        self.root = root
-        self.stop_event = threading.Event()
-
-    def stop(self):
-        self.stop_event.set()
-
-    def run(self):
-        try:
-            sigs = load_all_signatures(SIGNATURES.parent)
-        except OSError as e:
-            self.error.emit(f"Не удалось загрузить базу сигнатур: {e}")
-            return
-
-        rules, _ = load_rules(RULES_DIR)
-
-        last_emit = 0.0
-
-        def on_file(path):
-            nonlocal last_emit
-            now = time.monotonic()
-            if now - last_emit > 0.1:
-                last_emit = now
-                self.file_checked.emit(str(path))
-
-        whitelist = set(load_whitelist())
-
-        found = 0
-        for infected, reason in scan_tree(
-                Path(self.root), sigs, rules,
-                exclude=[QUARANTINE_DIR, RULES_DIR.resolve()],
-                on_file=on_file, stop=self.stop_event,
-                whitelist=whitelist):
-            found += 1
-            try:
-                quarantine_file(infected, reason=reason)
-                self.threat_found.emit(f"[!] {infected} ({reason}) -> в карантине")
-            except OSError as e:
-                self.threat_found.emit(
-                    f"[!] {infected} ({reason}) -> не удалось изолировать: {e}")
-
-        self.scan_finished.emit(found, self.stop_event.is_set())
+SCAN_PAGE = "Сканирование папки/файла"
 
 
 class MainWindow(QMainWindow):
@@ -158,7 +108,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{appinfo.APP_NAME} {appinfo.VERSION}")
         self.resize(1000, 560)
-        self.worker: ScanWorker | None = None
         self.settings = QSettings("StudyAV", "myav")
         self.monitor: RealtimeMonitor | None = None
         self.bridge = MonitorBridge()
@@ -169,9 +118,10 @@ class MainWindow(QMainWindow):
         self.net_bridge.event.connect(self.on_net_event)
         self.proc_window: ProcessWindow | None = None
         self.guard = None  # SingleInstance, задаётся при запуске
-        self.analyzer_window: AnalyzerWindow | None = None
         self.tray: TrayIcon | None = None
         self._quitting = False
+        self._session_ending = False
+        QApplication.instance().commitDataRequest.connect(self._on_session_end)
         self._tray_hint_shown = False
         self.autoruns_window: AutorunsWindow | None = None
         self.recovery_window: RecoveryWindow | None = None
@@ -181,33 +131,54 @@ class MainWindow(QMainWindow):
         self.shell = Shell()
         self.dashboard = DashboardPage()
         self.tools_page = ToolsPage(self)
-        self.debug_page = DebugPage(self)
-        self.journal_page = JournalPage()
-        self.exclusions_page = ExclusionsPage()
+        self.debug_gate = load_gate()
+        self.debug_page = DebugPage(self, self.debug_gate)
+        self.journal_page = JournalPage(show_title=False)
+        self.exclusions_page = ExclusionsPage(show_title=False)
         self.settings_page = SettingsPage()
         self.about_page = AboutPage()
 
-        quarantine_tabs = QTabWidget()
-        quarantine_tabs.addTab(self._build_quarantine_tab(), "Файлы в карантине")
-        quarantine_tabs.addTab(self._build_whitelist_tab(), "Белый список")
+        # журнал, карантин, белый список и исключения: всё, что программа сделала или
+        # запомнила, на одной странице
+        log_page = QWidget()
+        log_layout = QVBoxLayout(log_page)
+        log_layout.setContentsMargins(16, 12, 16, 12)
+        log_title = QLabel("Журнал действий")
+        log_title.setStyleSheet("font-size: 20pt; font-weight: 600;")
+        log_layout.addWidget(log_title)
+        self.log_tabs = QTabWidget()
+        self.log_tabs.addTab(self.journal_page, "Действия")
+        self.log_tabs.addTab(self._build_quarantine_tab(), "Карантин")
+        self.log_tabs.addTab(self._build_whitelist_tab(), "Белый список")
+        self.log_tabs.addTab(self.exclusions_page, "Исключения")
+        self.log_tabs.currentChanged.connect(lambda _: self._refresh_log_tab())
+        log_layout.addWidget(self.log_tabs, 1)
 
         self.shell.add_page("Главная", self.dashboard)
-        self.shell.add_page("Сканирование", self._build_scan_tab())
+        self.scan_page = ScanPage()
+        self.scan_page.status.connect(self._show_status)
+        self.scan_page.quarantine_changed.connect(self.refresh_quarantine)
+        self.scan_page.quarantine_changed.connect(self.refresh_whitelist)
+        self.scan_page.quarantine_changed.connect(self.refresh_dashboard)
+        self.scan_page.journal_changed.connect(lambda: self.journal_page.refresh())
+        self.scan_page.folder_scanned.connect(self._on_folder_scanned)
+        self.shell.add_page(SCAN_PAGE, self.scan_page)
         self.shell.add_page("Защита", self._build_protection_tab())
         self.shell.add_page("Сеть", self._build_network_tab())
-        self.shell.add_page("Карантин", quarantine_tabs)
-        self.shell.add_page("Журнал", self.journal_page)
-        self.shell.add_page("Исключения", self.exclusions_page)
+        self.shell.add_page("Журнал действий", log_page)
         self.shell.add_page("Инструменты", self.tools_page)
-        self.shell.add_page("Настройки", self.settings_page)
+        self.shell.add_page("Настройки", self.settings_page, hidden=True)  # видна в режиме отладки
         self.shell.add_page("О программе", self.about_page)
         self.shell.add_page("Отладка", self.debug_page, hidden=True)
         self.setCentralWidget(self.shell)
 
         self.debug_mode = False
-        self.debug_watcher = DebugKeyWatcher(load_gate(), self)
+        self.debug_watcher = DebugKeyWatcher(self.debug_gate, self)
         QApplication.instance().installEventFilter(self.debug_watcher)
         self.debug_watcher.triggered.connect(self.toggle_debug_mode)
+        self.debug_page.password_changed.connect(self._on_debug_password_changed)
+        if not self.debug_gate.has_password():  # пароля нет: прятать вкладку незачем
+            self.toggle_debug_mode(quiet=True)
 
         self.dashboard.quick_scan.connect(self.quick_scan)
         self.dashboard.toggle_protection.connect(self.toggle_protection)
@@ -227,10 +198,23 @@ class MainWindow(QMainWindow):
     def _on_page_changed(self, title: str):
         if title in ("Главная", "Отладка"):
             self.refresh_dashboard()
-        elif title == "Журнал":
+        elif title == "Журнал действий":
+            self._refresh_log_tab()
+
+    def _refresh_log_tab(self):
+        widget = self.log_tabs.currentWidget()
+        if widget is self.journal_page:
             self.journal_page.refresh()
-        elif title == "Исключения":
+        elif widget is self.exclusions_page:
             self.exclusions_page.refresh()
+
+    def show_log(self, tab: str = "Действия"):
+        """Открывает страницу «Журнал действий» на нужной вкладке."""
+        self.show_main("Журнал действий")
+        for i in range(self.log_tabs.count()):
+            if self.log_tabs.tabText(i) == tab:
+                self.log_tabs.setCurrentIndex(i)
+        self._refresh_log_tab()
 
     def on_undone(self, record: dict):
         """Действие отменено на странице журнала: обновляем окна, где оно было видно."""
@@ -268,7 +252,7 @@ class MainWindow(QMainWindow):
         if relaunch_as_admin():
             if self.guard is not None:
                 self.guard.release()  # новый экземпляр сразу сможет занять имя
-            self.quit_app()
+            self.quit_app(force=True)  # перезапуск разрешён и при запрете выхода
         else:
             QMessageBox.warning(parent, "Права администратора",
                                 "Не удалось перезапустить (запрос UAC отклонён?)")
@@ -276,26 +260,42 @@ class MainWindow(QMainWindow):
     # ---------- анализатор файлов ----------
 
     def open_analyzer(self, path: str | None = None):
-        if self.analyzer_window is None:
-            self.analyzer_window = AnalyzerWindow()
-            self.analyzer_window.quarantine_changed.connect(self.refresh_quarantine)
-            self.analyzer_window.quarantine_changed.connect(self.refresh_dashboard)
-            self.apply_on_top(cfg.get("general/on_top"))
-        self.analyzer_window.show()
-        self.analyzer_window.raise_()
-        self.analyzer_window.activateWindow()
+        """Файл или папка открываются на странице «Сканирование папки/файла»."""
+        self.show_main(SCAN_PAGE)
         if path:
-            self.analyzer_window.load_file(path)
+            self.scan_page.scan(path)
+
+    def _show_status(self, text: str, timeout: int):
+        if text:
+            self.statusBar().showMessage(text, timeout)
+        else:
+            self.statusBar().clearMessage()
+
+    def _on_folder_scanned(self):
+        cfg.set_("stats/last_scan", time.strftime("%Y-%m-%d %H:%M"))
+        self.refresh_dashboard()
 
     # ---------- дебаг мод ----------
 
-    def toggle_debug_mode(self):
+    def _on_debug_password_changed(self, has_password: bool):
+        if not has_password and not self.debug_mode:
+            self.toggle_debug_mode()
+
+    def toggle_debug_mode(self, quiet: bool = False):
+        if self.debug_mode and not self.debug_gate.has_password():
+            return  # без пароля режим отладки не выключается: открыть его потом было бы нечем
         self.debug_mode = not self.debug_mode
         self.shell.set_page_visible("Отладка", self.debug_mode)
-        if self.debug_mode:
+        # настройки доступны только в режиме отладки (без пароля он включён всегда)
+        self.shell.set_page_visible("Настройки", self.debug_mode)
+        if self.tray is not None:
+            self.tray.settings_action.setVisible(self.debug_mode)
+        if self.debug_mode and not quiet:  # при запуске счётчики обновятся позже
             self.refresh_dashboard()
         title = f"{appinfo.APP_NAME} {appinfo.VERSION}"
         self.setWindowTitle(title + ("  [режим отладки]" if self.debug_mode else ""))
+        if quiet:
+            return
         self.statusBar().showMessage(
             "Режим отладки включён: в меню слева появилась вкладка «Отладка»"
             if self.debug_mode else "Режим отладки выключен", 8000)
@@ -303,6 +303,7 @@ class MainWindow(QMainWindow):
     # ---------- системный трей ----------
     def setup_tray(self, icon):
         self.tray = TrayIcon(self, icon)
+        self.tray.settings_action.setVisible(self.debug_mode)
         self.tray.show()
 
     def show_main(self, page: str | None = None):
@@ -312,12 +313,35 @@ class MainWindow(QMainWindow):
             self.show()
         self.raise_()
         self.activateWindow()
+        if page == "Настройки" and not self.debug_mode:
+            return  # настройки скрыты, пока не включён режим отладки
         if page:
             self.shell.show_page(page)
 
-    def quit_app(self):
+    def quit_app(self, force: bool = False):
+        """force: выход без проверки запрета (перезапуск от администратора, конец сеанса)."""
+        if not force and cfg.get("general/block_exit"):
+            self._exit_blocked()
+            return
         self._quitting = True
         self.close()
+
+    def _exit_blocked(self):
+        text = ("Закрытие программы запрещено в настройках, чтобы антивирус не выключили "
+                "случайно. Программа продолжает работать в системном трее.")
+        if self.tray is not None:
+            self.tray.showMessage(appinfo.SHORT_NAME, text,
+                                  QSystemTrayIcon.MessageIcon.Information, 4000)
+        else:
+            QMessageBox.information(self if self.isVisible() else None, appinfo.SHORT_NAME, text)
+
+    def _on_session_end(self, *_):
+        self._session_ending = True  # Windows завершает сеанс: выход разрешён всегда
+
+    def start_protection_on_launch(self):
+        """Защита файлов включена по умолчанию: запускается сразу при старте программы."""
+        if self.monitor is None and self.watch_list.count():
+            self.toggle_protection()
 
     def run_feature(self, button_id: str):
         """Запуск функции с кнопки «Инструменты» (из трея или со страницы)."""
@@ -335,7 +359,7 @@ class MainWindow(QMainWindow):
 
     def open_autoruns(self, journal: bool = False):
         if journal:  # журнал теперь отдельная страница главного меню
-            self.show_main("Журнал")
+            self.show_log()
             return
         if self.autoruns_window is None:
             self.autoruns_window = AutorunsWindow()
@@ -383,10 +407,7 @@ class MainWindow(QMainWindow):
         if not downloads.is_dir():
             QMessageBox.information(self, "Быстрая проверка", "Папка «Загрузки» не найдена")
             return
-        self.path_edit.setText(str(downloads))
-        self.shell.show_page("Сканирование")
-        if self.scan_btn.isEnabled():
-            self.start_scan()
+        self.open_analyzer(str(downloads))
 
     def update_databases(self):
         self.statusBar().showMessage("Обновляю базы (хэши, правила YARA, адреса C2)...")
@@ -421,7 +442,7 @@ class MainWindow(QMainWindow):
             heuristics.set_threshold(int(value))
 
     def apply_on_top(self, on: bool):
-        for window in (self, self.proc_window, self.autoruns_window, self.analyzer_window, self.recovery_window):
+        for window in (self, self.proc_window, self.autoruns_window, self.recovery_window):
             if window is not None:
                 visible = window.isVisible()
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
@@ -709,84 +730,6 @@ class MainWindow(QMainWindow):
         self.refresh_whitelist()
 
     # ---------- вкладка «Сканирование» ----------
-    def _build_scan_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        row = QHBoxLayout()
-        self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("Папка для сканирования")
-        browse_btn = QPushButton("Обзор...")
-        browse_btn.clicked.connect(self.choose_folder)
-        row.addWidget(self.path_edit)
-        row.addWidget(browse_btn)
-        layout.addLayout(row)
-
-        row = QHBoxLayout()
-        self.scan_btn = QPushButton("Сканировать")
-        self.scan_btn.clicked.connect(self.start_scan)
-        self.stop_btn = QPushButton("Остановить")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop_scan)
-        row.addWidget(self.scan_btn)
-        row.addWidget(self.stop_btn)
-        row.addStretch()
-        layout.addLayout(row)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setTextVisible(False)
-        layout.addWidget(self.progress)
-
-        self.log = QListWidget()
-        layout.addWidget(self.log)
-        return tab
-
-    def choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку")
-        if folder:
-            self.path_edit.setText(folder)
-
-    def start_scan(self):
-        root = self.path_edit.text().strip()
-        if not root or not Path(root).is_dir():
-            QMessageBox.warning(self, "Ошибка", "Выберите существующую папку")
-            return
-
-        self.log.clear()
-        self.scan_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.progress.setRange(0, 0)
-
-        self.worker = ScanWorker(root)
-        self.worker.file_checked.connect(
-            lambda f: self.statusBar().showMessage(f"Проверяю: {f}"))
-        self.worker.threat_found.connect(self.log.addItem)
-        self.worker.error.connect(self.on_error)
-        self.worker.scan_finished.connect(self.on_finished)
-        self.worker.start()
-
-    def stop_scan(self):
-        if self.worker:
-            self.worker.stop()
-            self.statusBar().showMessage("Останавливаю...")
-
-    def on_error(self, text: str):
-        self._reset_scan_ui()
-        QMessageBox.critical(self, "Ошибка", text)
-
-    def on_finished(self, found: int, stopped: bool):
-        self._reset_scan_ui()
-        self.statusBar().showMessage(
-            f"{'Остановлено' if stopped else 'Готово'}. Найдено угроз: {found}")
-        cfg.set_("stats/last_scan", time.strftime("%Y-%m-%d %H:%M"))
-        self.refresh_quarantine()
-
-    def _reset_scan_ui(self):
-        self.progress.setRange(0, 1)
-        self.scan_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-
     # ---------- вкладка «Карантин» ----------
 
 
@@ -925,8 +868,7 @@ class MainWindow(QMainWindow):
         if self.recovery_window is not None:
             self.recovery_window.shutdown()
             self.recovery_window.close()
-        if self.analyzer_window is not None:
-            self.analyzer_window.close()
+        self.scan_page.shutdown()
         if self.autoruns_window is not None:
             self.autoruns_window.shutdown()
             self.autoruns_window.close()
@@ -937,9 +879,6 @@ class MainWindow(QMainWindow):
             self.net_monitor.stop()
         if self.monitor is not None:
             self.monitor.stop()
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait(5000)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -947,9 +886,9 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event):
         for url in event.mimeData().urls():
-            if url.isLocalFile() and Path(url.toLocalFile()).is_file():
+            if url.isLocalFile() and Path(url.toLocalFile()).exists():
                 event.acceptProposedAction()
-                self.open_analyzer(url.toLocalFile())  # файл откроется в анализаторе
+                self.open_analyzer(url.toLocalFile())  # файл или папка: страница сканирования
                 break
 
     def showEvent(self, event):
@@ -958,8 +897,15 @@ class MainWindow(QMainWindow):
             allow_drops_from_lower_integrity(int(self.winId()))
 
     def closeEvent(self, event):
+        if (not self._quitting and not self._session_ending and cfg.get("general/block_exit")
+                and self.tray is None):  # без трея окно просто сворачивается
+            event.ignore()
+            self.showMinimized()
+            self._exit_blocked()
+            return
         to_tray = (not self._quitting and self.tray is not None
-                   and cfg.get("general/close_to_tray"))
+                   and (cfg.get("general/close_to_tray") or cfg.get("general/block_exit"))
+                   and not self._session_ending)
         if to_tray:
             event.ignore()
             self.hide()
@@ -1050,6 +996,5 @@ if __name__ == "__main__":
         window.show()
     if analyze_path:
         window.open_analyzer(analyze_path)
-    if cfg.get("startup/auto_protect"):
-        window.toggle_protection()
+    window.start_protection_on_launch()
     sys.exit(app.exec())

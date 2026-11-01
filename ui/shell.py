@@ -1,4 +1,4 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QListWidget, QListWidgetItem, QStackedWidget, QWidget,
 )
@@ -15,12 +15,13 @@ class Shell(QWidget):
         layout.setSpacing(0)
 
         self.nav = QListWidget()
-        self.nav.setFixedWidth(200)
+        self.nav.setFixedWidth(220)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.nav.setFrameShape(QFrame.Shape.NoFrame)
         self.nav.setSpacing(2)
         self.nav.setStyleSheet(
-            "QListWidget { padding: 8px 6px; }"
-            "QListWidget::item { padding: 10px 12px; border-radius: 6px; }"
+            "QListWidget { padding: 8px 6px; outline: none; show-decoration-selected: 1; }"
+            "QListWidget::item { padding: 10px 12px; border-radius: 6px; border: none; }"
             "QListWidget::item:selected { background: palette(highlight);"
             " color: palette(highlighted-text); }")
         self.stack = QStackedWidget()

@@ -71,7 +71,8 @@ class StringsModel(QAbstractTableModel):
 
 
 class StringsTab(QWidget):
-    """Вкладка «Строки»: весь файл (до 256 МБ), категории, фильтры, экспорт."""
+    """Строки файла: весь файл (до 256 МБ), категории, фильтры, экспорт."""
+    offset_activated = Signal(int)  # двойной щелчок по строке: её смещение в файле
     def __init__(self):
         super().__init__()
         self._path: Path | None = None
@@ -127,6 +128,8 @@ class StringsTab(QWidget):
             self.table.setColumnWidth(i, width)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
+        self.table.doubleClicked.connect(
+            lambda index: self.offset_activated.emit(self.model.rows[index.row()].offset))
         layout.addWidget(self.table, 1)
 
         self._timer = QTimer(self)  # фильтр применяется после паузы в наборе

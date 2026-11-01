@@ -73,7 +73,7 @@ def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
     tree.setHeaderLabels(columns)
     tree.setRootIsDecorated(False)
     tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl и Shift
     header = tree.header()
     header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     header.setStretchLastSection(True)
@@ -164,9 +164,14 @@ class EntryView(QWidget):
         for key, item in self.items.items():
             item.setHidden(self._is_hidden(entries[key]))
 
-    def selected_key(self):
+    def selected_keys(self) -> list[str]:
+        """Ключи выделенных строк (текущая строка первой)."""
         items = self.tree.selectedItems()
-        return items[0].data(0, KEY_ROLE) if items else None
+        current = self.tree.currentItem()
+        if current in items:
+            items.remove(current)
+            items.insert(0, current)
+        return [item.data(0, KEY_ROLE) for item in items]
 
 
 class AutorunsWindow(QMainWindow):
@@ -269,26 +274,38 @@ class AutorunsWindow(QMainWindow):
             return self.views["services"]
         return None
 
-    def selected_entry(self) -> Entry | None:
+    def selected_entries(self) -> list[Entry]:
         view = self._current_view()
-        key = view.selected_key() if view else None
-        return self.entries.get(key) if key else None
+        keys = view.selected_keys() if view else []
+        return [self.entries[k] for k in keys if k in self.entries]
+
+    def selected_entry(self) -> Entry | None:
+        entries = self.selected_entries()
+        return entries[0] if entries else None
 
     def _update_buttons(self) -> None:
-        e = self.selected_entry()
+        selected = self.selected_entries()
+        e = selected[0] if selected else None
         if e is None:
             allowed, reason, q_allowed, q_reason = False, "Выберите запись в списке", False, ""
             self.btn_fix.setText("Отключить / удалить")
-        else:
+        elif len(selected) == 1:
             allowed, reason = actions.can_remediate(e)
             q_allowed, q_reason = actions.can_quarantine(e)
             self.btn_fix.setText(actions.REMEDIATION.get(e.kind, ("Исправить", ""))[0])
-        has_file = e is not None and bool(e.exe) and os.path.isfile(e.exe)
+        else:  # несколько записей: кнопка доступна, если подходит хотя бы одна
+            fixable = sum(1 for x in selected if actions.can_remediate(x)[0])
+            files = sum(1 for x in selected if actions.can_quarantine(x)[0])
+            allowed, q_allowed = fixable > 0, files > 0
+            reason = f"Подходит записей: {fixable} из {len(selected)}"
+            q_reason = f"Подходит файлов: {files} из {len(selected)}"
+            self.btn_fix.setText(f"Отключить / удалить ({fixable})")
+        has_file = len(selected) == 1 and bool(e.exe) and os.path.isfile(e.exe)
         self.btn_fix.setEnabled(allowed)
         self.btn_fix.setToolTip(reason)
         self.btn_quarantine.setEnabled(q_allowed)
         self.btn_quarantine.setToolTip(q_reason)
-        self.btn_trust.setEnabled(e is not None and e.assessed)
+        self.btn_trust.setEnabled(any(x.assessed for x in selected))
         self.btn_folder.setEnabled(has_file)
         self.btn_analyze.setEnabled(has_file)
 
@@ -440,85 +457,122 @@ class AutorunsWindow(QMainWindow):
         return False
 
     # ---------- действия ----------
+    @staticmethod
+    def _names(entries: list[Entry], limit: int = 10) -> str:
+        lines = "\n".join(f"• {e.name}" for e in entries[:limit])
+        if len(entries) > limit:
+            lines += f"\n...и ещё {len(entries) - limit}"
+        return lines
+
+    def _report(self, title: str, done: int, errors: list[str]) -> None:
+        if errors:
+            QMessageBox.warning(
+                self, title, f"Выполнено: {done}. Не удалось: {len(errors)}\n\n"
+                + "\n".join(errors[:10]) + "\n\nВозможно, нужны права администратора.")
+
     def fix_selected(self) -> None:
-        e = self.selected_entry()
-        if e is None:
+        selected = self.selected_entries()
+        entries = [e for e in selected if actions.can_remediate(e)[0]]
+        if not entries:
+            if selected:
+                QMessageBox.information(self, "Автозапуск", actions.can_remediate(selected[0])[1])
             return
-        allowed, reason = actions.can_remediate(e)
-        if not allowed:
-            QMessageBox.information(self, "Автозапуск", reason)
-            return
-        title, text = actions.REMEDIATION[e.kind]
-        answer = QMessageBox.question(
-            self, title, f"{e.name}\n{e.command}\n\n{text}\n\nВыполнить?")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            message = actions.remediate(e)
-        except OSError as exc:  # включает PermissionError и ошибки реестра
-            QMessageBox.critical(
-                self, title, f"Не удалось выполнить: {exc}\n\n"
-                "Возможно, нужны права администратора.")
-            return
-        e.flags.append(FLAG_DONE)
-        if e.kind in REMOVE_ROW_KINDS:
-            self._remove_row(e.key)  # запись исчезает из всех списков сразу
+        if len(entries) == 1:
+            e = entries[0]
+            title, text = actions.REMEDIATION[e.kind]
+            question = f"{e.name}\n{e.command}\n\n{text}\n\nВыполнить?"
         else:
-            e.enabled = False        # задача остаётся в списке как отключённая
-            self._refresh_entry(e)
-        self.statusBar().showMessage(message, 10000)
-        self.journal_changed.emit()
+            title = "Отключить / удалить"
+            question = (f"Отключить или удалить записей: {len(entries)}?\n\n{self._names(entries)}"
+                        "\n\nКаждое действие попадёт в журнал и отменяется отдельно.")
+        if QMessageBox.question(self, title, question) != QMessageBox.StandardButton.Yes:
+            return
+        errors, message = [], ""
+        for e in entries:
+            try:
+                message = actions.remediate(e)
+            except OSError as exc:  # включает PermissionError и ошибки реестра
+                errors.append(f"{e.name}: {exc}")
+                continue
+            e.flags.append(FLAG_DONE)
+            if e.kind in REMOVE_ROW_KINDS:
+                self._remove_row(e.key)  # запись исчезает из всех списков сразу
+            else:
+                e.enabled = False        # задача остаётся в списке как отключённая
+                self._refresh_entry(e)
+        done = len(entries) - len(errors)
+        if len(entries) > 1:
+            message = f"Отключено или удалено записей: {done}"
+        if done:
+            self.statusBar().showMessage(message, 10000)
+            self.journal_changed.emit()
+        self._report(title, done, errors)
         self._update_buttons()
 
     def quarantine_selected(self) -> None:
-        e = self.selected_entry()
-        if e is None:
+        selected = self.selected_entries()
+        entries, seen = [], set()
+        for e in selected:  # один файл может запускаться несколькими записями
+            if actions.can_quarantine(e)[0] and os.path.normcase(e.exe) not in seen:
+                seen.add(os.path.normcase(e.exe))
+                entries.append(e)
+        if not entries:
+            if selected:
+                QMessageBox.information(self, "Карантин файла",
+                                        actions.can_quarantine(selected[0])[1])
             return
-        allowed, reason = actions.can_quarantine(e)
-        if not allowed:
-            QMessageBox.information(self, "Карантин файла", reason)
-            return
+        files = "\n".join(e.exe for e in entries[:10])
+        if len(entries) > 10:
+            files += f"\n...и ещё {len(entries) - 10}"
         answer = QMessageBox.question(
             self, "Карантин файла",
-            f"Переместить в карантин файл:\n{e.exe}\n\n"
-            "Запись автозапуска останется, поэтому обычно сначала отключают её. "
-            "Вернуть файл можно на странице «Журнал».")
+            f"Переместить в карантин файлы ({len(entries)}):\n{files}\n\n"
+            "Записи автозапуска останутся, поэтому обычно сначала отключают их. "
+            "Вернуть файлы можно на странице «Журнал».")
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            message = actions.quarantine_target(e)
-        except PermissionError:
-            QMessageBox.critical(
-                self, "Карантин файла",
-                "Файл занят: вероятно, программа запущена. Завершите процесс "
-                "(диспетчер процессов) и повторите.")
-            return
-        except OSError as exc:
-            QMessageBox.critical(self, "Карантин файла", f"Не удалось выполнить: {exc}")
-            return
-        if FLAG_QUARANTINED not in e.flags:
-            e.flags.append(FLAG_QUARANTINED)
-        self._refresh_entry(e)
-        self.statusBar().showMessage(message, 10000)
-        self.journal_changed.emit()
-        self.quarantine_changed.emit()
+        errors, message = [], ""
+        for e in entries:
+            try:
+                message = actions.quarantine_target(e)
+            except PermissionError:
+                errors.append(f"{e.exe}: файл занят (программа запущена, завершите процесс)")
+                continue
+            except OSError as exc:
+                errors.append(f"{e.exe}: {exc}")
+                continue
+            for other in selected:  # отметка у всех выделенных записей с этим файлом
+                if os.path.normcase(other.exe) == os.path.normcase(e.exe):
+                    if FLAG_QUARANTINED not in other.flags:
+                        other.flags.append(FLAG_QUARANTINED)
+                    self._refresh_entry(other)
+        done = len(entries) - len(errors)
+        if done:
+            self.statusBar().showMessage(
+                message if len(entries) == 1 else f"В карантин перемещено файлов: {done}", 10000)
+            self.journal_changed.emit()
+            self.quarantine_changed.emit()
+        self._report("Карантин файла", done, errors)
 
     def trust_selected(self) -> None:
-        e = self.selected_entry()
-        if e is None:
+        entries = [e for e in self.selected_entries() if e.assessed]
+        if not entries:
             return
+        what = (f"{entries[0].name}\n{entries[0].command}" if len(entries) == 1
+                else f"Записей: {len(entries)}\n{self._names(entries)}")
         answer = QMessageBox.question(
             self, "Доверять записи",
-            f"{e.name}\n{e.command}\n\nДобавить запись в исключения? Она не будет показываться "
-            "при сканировании, пока не изменится её команда или файл. Управлять исключениями "
+            f"{what}\n\nДобавить в исключения? Записи не будут показываться при "
+            "сканировании, пока не изменится их команда или файл. Управлять исключениями "
             "можно на странице «Исключения» главного окна.")
         if answer != QMessageBox.StandardButton.Yes:
             return
-        exclusions.add("autoruns", exclusions.entry_key(e),
-                       f"{KIND_TITLES[e.kind]}: {e.name}", e.command,
-                       exclusions.fingerprint(e.exe))
-        self._drop_entry(e.key)
-        self.statusBar().showMessage("Запись добавлена в исключения", 8000)
+        for e in entries:
+            exclusions.add("autoruns", exclusions.entry_key(e),
+                           f"{KIND_TITLES[e.kind]}: {e.name}", e.command,
+                           exclusions.fingerprint(e.exe))
+            self._drop_entry(e.key)
+        self.statusBar().showMessage(f"Добавлено в исключения: {len(entries)}", 8000)
         self.exclusions_changed.emit()
 
     def open_folder(self) -> None:

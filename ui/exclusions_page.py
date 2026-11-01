@@ -11,13 +11,15 @@ KEY_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 class ExclusionsPage(QWidget):
-    def __init__(self):
+    def __init__(self, show_title: bool = True):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        title = QLabel("Исключения")
-        title.setStyleSheet("font-size: 20pt; font-weight: 600;")
-        layout.addWidget(title)
+        margin = (16, 12, 16, 12) if show_title else (4, 4, 4, 4)
+        layout.setContentsMargins(*margin)
+        if show_title:  # на общей странице «Журнал действий» заголовок свой
+            title = QLabel("Исключения")
+            title.setStyleSheet("font-size: 20pt; font-weight: 600;")
+            layout.addWidget(title)
         hint = QLabel(
             "Записи автозапуска и находки проверки системы, которым вы доверяете: они не "
             "показываются при проверках. Исключение перестаёт действовать, если запись или "
@@ -28,7 +30,7 @@ class ExclusionsPage(QWidget):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Раздел", "Что", "Подробности", "Добавлено"])
         self.tree.setRootIsDecorated(False)
-        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl, Shift
         header = self.tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
@@ -63,10 +65,13 @@ class ExclusionsPage(QWidget):
         if not selected:
             QMessageBox.information(self, "Исключения", "Сначала выберите строку в списке")
             return
-        item = selected[0]
+        lines = "\n".join(f"• {item.text(1)}" for item in selected[:10])
+        if len(selected) > 10:
+            lines += f"\n...и ещё {len(selected) - 10}"
         answer = QMessageBox.question(
-            self, "Исключения", f"Убрать из исключений?\n\n{item.text(1)}\n\n"
-            "При следующей проверке запись снова будет показана.")
+            self, "Исключения", f"Убрать из исключений ({len(selected)})?\n\n{lines}\n\n"
+            "При следующей проверке записи снова будут показаны.")
         if answer == QMessageBox.StandardButton.Yes:
-            exclusions.remove(item.data(0, CATEGORY_ROLE), item.data(0, KEY_ROLE))
+            for item in selected:
+                exclusions.remove(item.data(0, CATEGORY_ROLE), item.data(0, KEY_ROLE))
             self.refresh()

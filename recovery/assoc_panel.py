@@ -1,10 +1,10 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QPushButton, QSplitter, QTreeWidgetItem, QVBoxLayout,
-    QWidget,
+    QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSplitter, QTabWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from recovery.panels import LEVEL_COLORS, _hint, _make_tree, _paint
+from recovery.panels import LEVEL_COLORS, _hint, _make_tree, _paint, checked_or_selected, link_checks
 
 INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
 LEVEL_TEXT = {"ok": "В порядке", "warning": "Внимание", "bad": "Перехват"}
@@ -14,10 +14,11 @@ class AssocPanel(QWidget):
     """Файловые ассоциации: проверка критичных расширений, снимки и восстановление."""
     check_requested = Signal()
     fix_requested = Signal(object)        # список AssocIssue
-    exclude_requested = Signal(object)    # AssocIssue
+    exclude_requested = Signal(object)    # список AssocIssue
     snapshot_requested = Signal()
     compare_requested = Signal(object)    # путь к снимку
     restore_requested = Signal(object)    # список AssocDiff
+    list_requested = Signal()             # список всех расширений
 
     def __init__(self):
         super().__init__()
@@ -79,13 +80,93 @@ class AssocPanel(QWidget):
         bottom_layout.addWidget(self.diff_summary)
         self.diff_tree = _make_tree(["Расширение", "Что изменилось", "В снимке", "Сейчас"],
                                     [110, 330, 330, 330])
+        link_checks(self.diff_tree)
         bottom_layout.addWidget(self.diff_tree, 1)
         splitter.addWidget(bottom)
         splitter.setSizes([300, 300])
-        layout.addWidget(splitter, 1)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(splitter, "Проверка и снимки")
+        self.tabs.addTab(self._build_list_tab(), "Все расширения")
+        self.tabs.currentChanged.connect(self._on_tab)
+        layout.addWidget(self.tabs, 1)
         self.busy_buttons = [self.btn_check, self.btn_fix_all, self.btn_snapshot,
                              self.btn_compare, self.btn_restore]
         self._update_buttons()
+
+    # ---------- все расширения ----------
+    def _build_list_tab(self) -> QWidget:
+        tab = QWidget()
+        box = QVBoxLayout(tab)
+        row = QHBoxLayout()
+        self.ext_filter = QLineEdit()
+        self.ext_filter.setPlaceholderText("Фильтр: расширение, тип файла, программа...")
+        self.ext_filter.textChanged.connect(lambda _: self._filter_extensions())
+        self.ext_mode = QComboBox()
+        self.ext_mode.addItems(["Все расширения", "Только с программой", "Только с замечаниями"])
+        self.ext_mode.currentIndexChanged.connect(lambda _: self._filter_extensions())
+        self.btn_list = QPushButton("Обновить список")
+        self.btn_list.clicked.connect(self.list_requested.emit)
+        row.addWidget(self.ext_filter, 1)
+        row.addWidget(self.ext_mode)
+        row.addWidget(self.btn_list)
+        box.addLayout(row)
+        self.ext_summary = QLabel("Список загружается при первом открытии вкладки")
+        self.ext_summary.setWordWrap(True)
+        box.addWidget(self.ext_summary)
+        self.ext_tree = _make_tree(
+            ["Расширение", "Тип файла", "Программа", "Исполняемый файл", "Откуда",
+             "Команда запуска", "Замечание"], [110, 220, 170, 360, 150, 380, 220])
+        self.ext_tree.setSortingEnabled(True)
+        self.ext_tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        box.addWidget(self.ext_tree, 1)
+        self._extensions: list = []
+        self.listed_once = False
+        return tab
+
+    def _on_tab(self, index: int) -> None:
+        if index == 1 and not self.listed_once:
+            self.listed_once = True
+            self.list_requested.emit()
+
+    def set_extensions(self, infos: list) -> None:
+        self.listed_once = True
+        self._extensions = infos
+        tree = self.ext_tree
+        tree.setSortingEnabled(False)
+        tree.clear()
+        items = []
+        for info in infos:
+            item = QTreeWidgetItem([info.ext, info.type_name, info.app, info.exe, info.source,
+                                    info.command, info.note])
+            item.setToolTip(3, info.exe)
+            item.setToolTip(5, info.command)
+            if info.level != "ok":
+                _paint(item, LEVEL_COLORS[info.level], 7)
+            items.append(item)
+        tree.addTopLevelItems(items)
+        tree.setSortingEnabled(True)
+        self._filter_extensions()
+
+    def _filter_extensions(self) -> None:
+        words = self.ext_filter.text().lower().split()
+        mode = self.ext_mode.currentIndex()
+        shown = 0
+        for i in range(self.ext_tree.topLevelItemCount()):
+            item = self.ext_tree.topLevelItem(i)
+            text = " ".join(item.text(c) for c in range(7)).lower()
+            visible = all(w in text for w in words)
+            if mode == 1:
+                visible = visible and bool(item.text(3) or item.text(2))
+            elif mode == 2:
+                visible = visible and bool(item.text(6))
+            item.setHidden(not visible)
+            shown += visible
+        with_app = sum(1 for e in self._extensions if e.exe or e.app)
+        notes = sum(1 for e in self._extensions if e.level != "ok")
+        self.ext_summary.setText(
+            f"Расширений в системе: {len(self._extensions)}, с назначенной программой: "
+            f"{with_app}, с замечаниями: {notes}. Показано: {shown}. Программа определяется "
+            "так же, как это делает Проводник (с учётом выбора пользователя).")
 
     # ---------- проверка ----------
     def set_issues(self, issues: list) -> None:
@@ -105,20 +186,19 @@ class AssocPanel(QWidget):
                                    else "Перехватов не найдено")
         self._update_buttons()
 
-    def _selected_issue(self):
-        items = self.issues_tree.selectedItems()
-        return self._issues[items[0].data(0, INDEX_ROLE)] if items else None
+    def _selected_issues(self) -> list:
+        return [self._issues[item.data(0, INDEX_ROLE)] for item in self.issues_tree.selectedItems()]
 
     def _update_buttons(self) -> None:
-        issue = self._selected_issue()
-        self.btn_fix.setEnabled(issue is not None and bool(issue.ops))
-        self.btn_trust.setEnabled(issue is not None and issue.level != "ok")
+        selected = self._selected_issues()
+        self.btn_fix.setEnabled(any(i.ops for i in selected))
+        self.btn_trust.setEnabled(any(i.level != "ok" for i in selected))
         self.btn_fix_all.setEnabled(any(i.ops for i in self._issues))
 
     def _on_fix(self) -> None:
-        issue = self._selected_issue()
-        if issue is not None and issue.ops:
-            self.fix_requested.emit([issue])
+        issues = [i for i in self._selected_issues() if i.ops]
+        if issues:
+            self.fix_requested.emit(issues)
 
     def _on_fix_all(self) -> None:
         issues = [i for i in self._issues if i.ops]
@@ -126,9 +206,9 @@ class AssocPanel(QWidget):
             self.fix_requested.emit(issues)
 
     def _on_trust(self) -> None:
-        issue = self._selected_issue()
-        if issue is not None:
-            self.exclude_requested.emit(issue)
+        issues = [i for i in self._selected_issues() if i.level != "ok"]
+        if issues:
+            self.exclude_requested.emit(issues)
 
     # ---------- снимки ----------
     def set_snapshots(self, snapshots: list) -> None:
@@ -173,11 +253,7 @@ class AssocPanel(QWidget):
         self.btn_restore.setEnabled(restorable > 0)
 
     def _on_restore(self) -> None:
-        chosen = []
-        for i in range(self.diff_tree.topLevelItemCount()):
-            item = self.diff_tree.topLevelItem(i)
-            d = self._diffs[item.data(0, INDEX_ROLE)]
-            if d.restorable and item.checkState(0) == Qt.CheckState.Checked:
-                chosen.append(d)
+        chosen = [d for d in (self._diffs[item.data(0, INDEX_ROLE)]
+                              for item in checked_or_selected(self.diff_tree)) if d.restorable]
         if chosen:
             self.restore_requested.emit(chosen)

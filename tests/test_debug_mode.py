@@ -51,3 +51,16 @@ def test_single_instance(app):
     first = SingleInstance(name)
     assert first.listen()
     assert SingleInstance(name).already_running(notify=False)
+
+def test_password_gate_set_check_remove(tmp_path):
+    from ui.debug_mode import PasswordGate
+    gate = PasswordGate(tmp_path / "passwords.txt")
+    assert not gate.has_password() and not gate.check("anything")
+    with pytest.raises(ValueError):
+        gate.set_password("123")
+    gate.set_password("Secret1")
+    assert gate.has_password()
+    assert gate.check("abcSECRET1")  # регистр не важен, лишние символы перед паролем допустимы
+    assert PasswordGate(tmp_path / "passwords.txt").check("secret1")  # сохранён на диск
+    gate.remove_password()
+    assert not gate.has_password() and not (tmp_path / "passwords.txt").exists()

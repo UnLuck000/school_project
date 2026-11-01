@@ -18,7 +18,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULTS = {
     "startup/ask_admin": True,      # предлагать запуск от администратора
-    "startup/auto_protect": False,  # включать защиту файлов при запуске
+    "general/block_exit": False,    # запрет выхода из программы (кроме диспетчера задач)
     "general/on_top": False,        # окна поверх остальных
     "general/theme": "system",      # system | light | dark
     "scan/threshold": 7,            # порог эвристики PE (баллы)

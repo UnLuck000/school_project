@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from analyzer import disasm
+from analyzer.stringsview import StringsTab
 from processmanager.colors import text_color
 
 CATEGORY_COLORS = {"decoded": (170, 204, 255), "suspicious": (255, 190, 110),
@@ -165,6 +166,7 @@ class CodeTab(QWidget):
         self._path: Path | None = None
         self._pe_map = None
         self._page = 0
+        self._strings_loaded = False
         self._request = 0
         self._bridge = _Bridge()
         self._bridge.done.connect(self._on_done)
@@ -172,10 +174,11 @@ class CodeTab(QWidget):
 
         controls = QHBoxLayout()
         self.mode = QComboBox()
-        self.mode.addItems(["Обзор", "Дизассемблер", "Hex (весь файл)"])
+        self.mode.addItems(["Обзор", "Дизассемблер", "Hex и строки (весь файл)"])
         self.mode.setToolTip("Обзор: исходный текст скрипта или код точки входа.\n"
                              "Дизассемблер: выбранный раздел программы.\n"
-                             "Hex: байты всего файла по страницам 64 КБ.")
+                             "Hex и строки: байты всего файла по страницам 64 КБ и все "
+                             "строки файла (двойной щелчок по строке: переход к ней).")
         self.mode.currentIndexChanged.connect(lambda _: self._mode_changed())
         controls.addWidget(QLabel("Вид:"))
         controls.addWidget(self.mode)
@@ -227,7 +230,10 @@ class CodeTab(QWidget):
         for i, width in enumerate((130, 330, 560, 70)):
             self.findings.setColumnWidth(i, width)
         splitter.addWidget(self.findings)
-        splitter.setSizes([430, 190])
+        self.strings = StringsTab()  # видна в режиме «Hex и строки»
+        self.strings.offset_activated.connect(self.goto_offset)
+        splitter.addWidget(self.strings)
+        splitter.setSizes([430, 190, 260])
         layout.addWidget(splitter, 1)
         self.findings.itemClicked.connect(self._goto)
         self.findings.itemDoubleClicked.connect(self._show_full)
@@ -238,6 +244,8 @@ class CodeTab(QWidget):
         """Файл для дизассемблера и hex-просмотра (вызывается после set_view)."""
         self._path = path
         self._page = 0
+        self._strings_loaded = False  # строки ищутся при первом переходе в режим «Hex и строки»
+        self.strings.set_file(None)
         self._pe_map = disasm.load_pe_map(path) if (path and is_pe) else None
         self.region.clear()
         if self._pe_map is not None:
@@ -257,6 +265,10 @@ class CodeTab(QWidget):
         for w in self.hex_controls:
             w.setVisible(mode == MODE_HEX)
         self.findings.setVisible(mode == MODE_OVERVIEW)
+        self.strings.setVisible(mode == MODE_HEX)
+        if mode == MODE_HEX and not self._strings_loaded and self._path is not None:
+            self._strings_loaded = True
+            self.strings.set_file(self._path)
         if mode == MODE_OVERVIEW:
             self._show_overview()
         elif mode == MODE_DISASM:
@@ -324,8 +336,17 @@ class CodeTab(QWidget):
         except ValueError:
             self.note.setText("Смещение указывается в шестнадцатеричном виде, например 1F400")
             return
+        self.goto_offset(offset)
+
+    def goto_offset(self, offset: int) -> None:
+        """Показывает страницу hex с нужным смещением и выделяет его строку."""
+        if self.mode.currentIndex() != MODE_HEX:
+            self.mode.setCurrentIndex(MODE_HEX)
         self._show_page(offset // disasm.HEX_PAGE)
         self.edit.goto_line((offset % disasm.HEX_PAGE) // 16 + 1)
+        cursor = self.edit.textCursor()
+        cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+        self.edit.setTextCursor(cursor)
 
     # ---------- обзор ----------
     def set_view(self, view) -> None:
