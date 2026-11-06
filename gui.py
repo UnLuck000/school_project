@@ -345,8 +345,8 @@ class MainWindow(QMainWindow):
             self.toggle_debug_mode()
         elif ask_password(self, self.debug_gate):
             activity.record("access", "Дополнительные настройки и отладка открыты по паролю")
-            if not getattr(self, "_advanced_warned", False):  # один раз за запуск программы
-                self._advanced_warned = True
+            if not cfg.get("advanced/warned"):  # один раз за всё время, не за каждый запуск
+                cfg.set_("advanced/warned", True)
                 from toolbox.windows import info_dialog
                 info_dialog(
                     self, "Дополнительные настройки",

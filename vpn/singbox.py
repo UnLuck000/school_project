@@ -1,13 +1,13 @@
-"""VLESS в режиме TUN через sing-box (по умолчанию; Xray TUN — запасной вариант).
+"""TUN через sing-box: весь трафик системы — в локальный SOCKS Xray, Xray — к серверу VLESS.
 
-sing-box сам создаёт адаптер (wintun встроен), прописывает маршруты (auto_route,
-strict_route), перехватывает DNS (hijack-dns) и находит настоящий адаптер для соединения с
-сервером (auto_detect_interface) — без PowerShell и ручных маршрутов, как у Xray TUN.
-Настройки — по образцу Throne (github.com/throneproj/Throne, src/configs/generate.cpp),
-формат sing-box 1.12+ (новые DNS-серверы и действия маршрутов; подходит и для 1.14).
-
-Транспорт xhttp sing-box не поддерживает: такие ссылки — через Xray (build_config бросает
-ValueError с подсказкой). Нужны права администратора.
+Почему связка, а не один sing-box: сам sing-box (1.12 и 1.14) с частью серверов не проходит
+проверку REALITY («reality verification failed»), а Xray с теми же ссылками работает. Так
+устроены многие клиенты: TUN держит sing-box (адаптер, маршруты auto_route/strict_route,
+перехват DNS hijack-dns, выбор настоящего адаптера auto_detect_interface — без PowerShell и
+ручных маршрутов), протокол — Xray (поддерживает всё, включая xhttp). Собственные соединения
+Xray к серверу sing-box пропускает напрямую (правило process_name), иначе была бы петля.
+Настройки TUN — по образцу Throne (github.com/throneproj/Throne, src/configs/generate.cpp),
+формат sing-box 1.12+. Нужны права администратора.
 """
 import os
 import shutil
@@ -35,44 +35,8 @@ def find_singbox() -> str:
     return next((c for c in candidates if c and os.path.isfile(c)), "")
 
 
-def outbound(v: dict) -> dict:
-    """Ссылка vless:// (vpn.xray.parse_vless) → исходящее подключение sing-box."""
-    out = {"type": "vless", "tag": "proxy", "server": v["address"],
-           "server_port": int(v["port"]), "uuid": v["id"], "packet_encoding": "xudp"}
-    if v["flow"]:
-        out["flow"] = v["flow"]
-    if v["security"] in ("tls", "reality"):
-        tls = {"enabled": True, "server_name": v["sni"] or v["address"]}
-        if v["fp"] or v["security"] == "reality":
-            tls["utls"] = {"enabled": True, "fingerprint": v["fp"] or "chrome"}
-        if v["alpn"]:
-            tls["alpn"] = v["alpn"]
-        if v["security"] == "reality":
-            tls["reality"] = {"enabled": True, "public_key": v["pbk"], "short_id": v["sid"]}
-        out["tls"] = tls
-    network = v["network"]
-    if network == "ws":
-        transport = {"type": "ws", "path": v["path"] or "/"}
-        if v["host"]:
-            transport["headers"] = {"Host": v["host"]}
-        out["transport"] = transport
-    elif network == "grpc":
-        out["transport"] = {"type": "grpc", "service_name": v["service"]}
-    elif network == "httpupgrade":
-        out["transport"] = {"type": "httpupgrade", "path": v["path"] or "/",
-                            "host": v["host"]}
-    elif network == "http" or (network == "tcp" and v["header"] == "http"):
-        out["transport"] = {"type": "http", "path": v["path"] or "/",
-                            "host": [v["host"]] if v["host"] else []}
-    elif network in ("xhttp", "splithttp"):
-        raise ValueError("транспорт xhttp sing-box не поддерживает — выберите режим "
-                         "«TUN через Xray» или «Системный прокси»")
-    elif network not in ("tcp", "raw", ""):
-        raise ValueError(f"транспорт {network} sing-box не поддерживает")
-    return out
-
-
-def build_config(v: dict) -> dict:
+def build_config(socks_port: int, xray_exe: str) -> dict:
+    """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray). xray_exe — его соединения напрямую."""
     return {
         "log": {"level": "warn", "timestamp": True},
         "dns": {
@@ -90,15 +54,22 @@ def build_config(v: dict) -> dict:
             "auto_route": True, "strict_route": True,
             "route_exclude_address": ["127.0.0.0/8", "255.255.255.255/32", *PRIVATE],
         }],
-        "outbounds": [outbound(v), {"type": "direct", "tag": "direct"}],
+        "outbounds": [
+            {"type": "socks", "tag": "proxy", "server": "127.0.0.1",
+             "server_port": socks_port, "version": "5"},
+            {"type": "direct", "tag": "direct"},
+        ],
         "route": {
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
+                {"process_name": [os.path.basename(xray_exe) or "xray.exe"],
+                 "outbound": "direct"},
                 {"ip_is_private": True, "outbound": "direct"},
             ],
             "final": "proxy",
             "auto_detect_interface": True,
-            "default_domain_resolver": "dns-local",  # адрес самого сервера — напрямую
+            "find_process": True,
+            "default_domain_resolver": "dns-local",
         },
     }

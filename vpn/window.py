@@ -32,13 +32,21 @@ class PasteDialog(QDialog):
         self.setWindowTitle("Новый профиль VPN")
         self.resize(640, 460)
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Название профиля (необязательно — возьмётся из ссылки):"))
         self.name = QLineEdit()
-        self.name.setPlaceholderText("Название профиля")
+        self.name.setPlaceholderText("Например: Дом, Работа")
         layout.addWidget(self.name)
+        layout.addWidget(QLabel("Ссылка vless:// или конфигурация WireGuard / OpenVPN:"))
         self.text = QPlainTextEdit()
-        self.text.setPlaceholderText("Вставьте ссылку vless://..., конфигурацию WireGuard "
-                                     "([Interface] ... [Peer]) или OpenVPN (client, remote ...)")
+        self.text.setPlaceholderText("vless://UUID@адрес:порт?...#название\n\nили текст "
+                                     "конфигурации WireGuard ([Interface] ... [Peer]) или "
+                                     "OpenVPN (client, remote ...)")
         layout.addWidget(self.text, 1)
+        # ссылка в буфере обмена — сразу в поле
+        from PySide6.QtWidgets import QApplication
+        clip = QApplication.clipboard().text().strip()
+        if clip.lower().startswith("vless://"):
+            self.text.setPlainText(clip)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                    QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -118,8 +126,9 @@ class VpnWindow(QDialog):
         self._modes = list(profiles.MODES)
         self.cmb_mode.addItems(list(profiles.MODES.values()))
         self.cmb_mode.setToolTip(
-            "TUN через sing-box — весь трафик через виртуальный адаптер, маршруты и DNS "
-            "sing-box настраивает сам (нужны права администратора). Системный прокси — "
+            "TUN: sing-box + Xray — весь трафик через виртуальный адаптер: маршруты и DNS "
+            "настраивает sing-box, соединение с сервером ведёт Xray (нужны права "
+            "администратора). Системный прокси — "
             "браузеры и программы, которые слушаются прокси Windows (Xray). TUN через Xray — "
             "запасной вариант (wintun.dll рядом с xray.exe, экспериментально).")
         self.cmb_mode.currentIndexChanged.connect(self._on_mode)
@@ -221,9 +230,11 @@ class VpnWindow(QDialog):
         dialog = PasteDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        name, text = dialog.name.text().strip(), dialog.text.toPlainText().strip()
+        if not text and name.lower().startswith(("vless://", "[interface]")):
+            name, text = "", name  # ссылку вставили в поле названия
         try:
-            self._add(profiles.from_text(dialog.name.text().strip() or "Профиль",
-                                         dialog.text.toPlainText()))
+            self._add(profiles.from_text(name or "Профиль", text))
         except ValueError as e:
             QMessageBox.warning(self, "Профиль", str(e))
 

@@ -6,13 +6,14 @@
   действий: отмена — отключение туннеля.
 • OpenVPNBackend — openvpn.exe --config <ovpn> как дочерний процесс; вывод — в журнал окна,
   подключено после «Initialization Sequence Completed».
-• SingBoxBackend — VLESS в режиме TUN через sing-box (vpn/singbox.py), по умолчанию;
+• SingBoxBackend — VLESS в режиме TUN: sing-box (vpn/singbox.py) + Xray, по умолчанию;
 • XrayBackend — VLESS через Xray-core (vpn/xray.py): системный прокси или запасной TUN;
 • DemoBackend — имитация без сервера, чтобы проверить окно.
 
 Не реализовано (додумать): kill switch (правила брандмауэра на время подключения),
 разделение туннеля по программам, свой протокол, проверка утечек DNS.
 """
+import json
 import os
 import random
 import re
@@ -334,41 +335,62 @@ class XrayBackend(Backend):
 
 
 class SingBoxBackend(Backend):
-    """TUN через sing-box: адаптер, маршруты и DNS sing-box настраивает сам."""
+    """TUN: sing-box забирает трафик системы и отдаёт его в SOCKS Xray, Xray ведёт VLESS.
+    Адаптер, маршруты и DNS sing-box настраивает сам; соединения Xray — напрямую."""
 
     def __init__(self, log):
         super().__init__(log)
-        from vpn import singbox
-        self.sb = singbox
+        from vpn import singbox, xray
+        self.sb, self.x = singbox, xray
         self.exe = singbox.find_singbox()
-        self.available = bool(self.exe)
-        self.missing = ("sing-box: sing-box.exe в vpn/bin, в PATH или путь в настройке "
-                        "vpn/singbox_path (github.com/SagerNet/sing-box/releases)")
-        self.proc: subprocess.Popen | None = None
-        self.config_path: Path | None = None
+        self.xray_exe = xray.find_xray()
+        self.available = bool(self.exe and self.xray_exe)
+        self.missing = ("sing-box и Xray-core: sing-box.exe и xray.exe в vpn/bin, в PATH или "
+                        "пути в настройках vpn/singbox_path и vpn/xray_path")
+        self.proc: subprocess.Popen | None = None       # sing-box
+        self.xray_proc: subprocess.Popen | None = None
+        self.paths: list[Path] = []
+
+    def _write(self, config: dict, name: str) -> Path:
+        TUNNEL_DIR.mkdir(parents=True, exist_ok=True)
+        path = (TUNNEL_DIR / name).resolve()
+        path.write_text(json.dumps(config, ensure_ascii=False, indent=1), encoding="utf-8")
+        self.paths.append(path)
+        return path
 
     def connect(self, profile) -> None:
         self._set(CONNECTING)
-        from vpn import xray
+        x = self.x
         try:
-            config = self.sb.build_config(xray.parse_vless(profile.config))
-            self.config_path = xray.write_config(config, TUNNEL_DIR)
+            xconfig = x.build_config(x.parse_vless(profile.config), "proxy")
+            xconfig["inbounds"] = [i for i in xconfig["inbounds"] if i["protocol"] == "socks"]
+            xpath = self._write(xconfig, "xray-tun.json")
+            spath = self._write(self.sb.build_config(x.SOCKS_PORT, self.xray_exe),
+                                "sing-box.json")
         except (OSError, ValueError) as e:
-            self._set(ERROR, f"sing-box: {e}")
-            self.log(self.error)
+            self._fail(f"VLESS: {e}")
+            return
+        self.log("Xray: запуск (VLESS, локальный SOCKS для туннеля)...")
+        self.xray_proc = subprocess.Popen(
+            [self.xray_exe, "run", "-c", str(xpath)], cwd=str(Path(self.xray_exe).parent),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", creationflags=CREATE_NO_WINDOW)
+        threading.Thread(target=self._read, args=(self.xray_proc, "Xray"), daemon=True).start()
+        if not x.wait_port(x.SOCKS_PORT):
+            self._fail(self.error or "Xray не открыл локальный SOCKS (смотрите журнал)")
             return
         self.log("sing-box: запуск TUN (нужны права администратора)...")
-        self.proc = subprocess.Popen([self.exe, "run", "-c", str(self.config_path)],
-                                     cwd=str(Path(self.exe).parent), stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                                     errors="replace", creationflags=CREATE_NO_WINDOW)
-        threading.Thread(target=self._read, daemon=True).start()
+        self.proc = subprocess.Popen(
+            [self.exe, "run", "-c", str(spath)], cwd=str(Path(self.exe).parent),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", creationflags=CREATE_NO_WINDOW)
+        threading.Thread(target=self._read, args=(self.proc, "sing-box"), daemon=True).start()
         if not self._wait_adapter():
             self._fail(self.error or "sing-box не создал адаптер TUN (смотрите журнал)")
             return
         self.adapter = self.sb.TUN_NAME
         self._set(CONNECTED)
-        self.log(f"sing-box: подключено, весь трафик через {self.sb.TUN_NAME}")
+        self.log(f"Подключено: весь трафик через {self.sb.TUN_NAME} → Xray → сервер")
 
     def _wait_adapter(self, timeout: float = 10.0) -> bool:
         import psutil
@@ -381,18 +403,17 @@ class SingBoxBackend(Backend):
             time.sleep(0.3)
         return False
 
-    def _read(self) -> None:
-        proc = self.proc
+    def _read(self, proc: subprocess.Popen, title: str) -> None:
         for line in proc.stdout:
             line = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()  # цвета в выводе
             if not line:
                 continue
-            self.log("sing-box: " + line[-200:])
-            if "FATAL" in line:
-                self.error = "sing-box: " + line.split("FATAL", 1)[-1].strip()[-200:]
-        if self.state in (CONNECTED, CONNECTING) and proc is self.proc:
+            self.log(f"{title}: " + line[-200:])
+            if "FATAL" in line or "Failed to start" in line:
+                self.error = f"{title}: " + line.split("FATAL", 1)[-1].strip()[-200:]
+        if self.state in (CONNECTED, CONNECTING) and proc in (self.proc, self.xray_proc):
             self._cleanup()
-            self._set(ERROR, self.error or "sing-box завершился")
+            self._set(ERROR, self.error or f"{title} завершился")
 
     def _fail(self, text: str) -> None:
         self._cleanup()
@@ -400,22 +421,24 @@ class SingBoxBackend(Backend):
         self.log(text)
 
     def _cleanup(self) -> None:
-        proc, self.proc = self.proc, None
-        if proc and proc.poll() is None:
-            proc.terminate()  # sing-box сам убирает адаптер и маршруты
-            try:
-                proc.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        if self.config_path is not None:
-            self.config_path.unlink(missing_ok=True)  # в файле ключ подключения
-            self.config_path = None
+        for attr in ("proc", "xray_proc"):  # sing-box первым: он убирает адаптер и маршруты
+            proc = getattr(self, attr)
+            setattr(self, attr, None)
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        for path in self.paths:
+            path.unlink(missing_ok=True)  # в файлах ключ подключения
+        self.paths = []
         self.adapter = ""
 
     def disconnect(self) -> None:
         self._set(DISCONNECTED)
         self._cleanup()
-        self.log("sing-box: отключено")
+        self.log("Отключено")
 
 
 def backend_for(kind: str, log, mode: str = "") -> Backend:

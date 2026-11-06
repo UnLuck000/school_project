@@ -20,6 +20,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULTS = {
     "startup/autostart": True,      # задание планировщика при входе в Windows (с правами)
+    "advanced/warned": False,       # предупреждение при первом открытии доп. настроек уже было
     "vpn/autostart": False,         # подключать VPN вместе с программой (профиль автоподключения)
     "vpn/xray_path": "",            # xray.exe (пусто — искать самостоятельно, vpn/xray.py)
     "vpn/singbox_path": "",         # sing-box.exe (пусто — искать самостоятельно, vpn/singbox.py)
@@ -83,7 +84,7 @@ def reset() -> None:
     store = _store()
     for key in DEFAULTS:
         if key not in ("stats/last_scan", "db/last_update", "report/first_run",
-                       "report/last_end", "schedule/last_run"):
+                       "report/last_end", "schedule/last_run", "advanced/warned"):
             store.remove(key)
 
 

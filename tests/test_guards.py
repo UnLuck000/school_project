@@ -378,15 +378,15 @@ def test_singbox_config_and_modes():
     from vpn import backends, singbox, xray
     reality = ("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=tcp"
                "&security=reality&pbk=key&sid=ab&sni=www.microsoft.com&flow=xtls-rprx-vision#r")
-    config = singbox.build_config(xray.parse_vless(reality))
+    config = singbox.build_config(xray.SOCKS_PORT, r"C:\x\xray.exe")
     tun = config["inbounds"][0]
     assert tun["type"] == "tun" and tun["auto_route"] and tun["strict_route"]
-    out = config["outbounds"][0]
-    assert out["tls"]["reality"] == {"enabled": True, "public_key": "key", "short_id": "ab"}
-    assert out["flow"] == "xtls-rprx-vision" and config["route"]["auto_detect_interface"]
-    with pytest.raises(ValueError):  # xhttp — только через Xray
-        singbox.build_config(xray.parse_vless(reality.replace("type=tcp", "type=xhttp")))
-    assert profiles.from_text("x", reality).mode == "tun"  # по умолчанию — sing-box
+    assert config["outbounds"][0] == {"type": "socks", "tag": "proxy", "server": "127.0.0.1",
+                                      "server_port": xray.SOCKS_PORT, "version": "5"}
+    # соединения самого Xray — напрямую, иначе петля через туннель
+    assert {"process_name": ["xray.exe"], "outbound": "direct"} in config["route"]["rules"]
+    assert config["route"]["auto_detect_interface"] and config["route"]["find_process"]
+    assert profiles.from_text("x", reality).mode == "tun"  # по умолчанию — TUN
     assert isinstance(backends.backend_for("vless", print, "tun"), backends.SingBoxBackend)
     assert isinstance(backends.backend_for("vless", print, "tun-xray"), backends.XrayBackend)
     assert isinstance(backends.backend_for("vless", print, "proxy"), backends.XrayBackend)

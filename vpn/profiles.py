@@ -16,7 +16,7 @@ from pathlib import Path
 PROFILES_FILE = Path("vpn_profiles") / "profiles.dat"
 KINDS = {"vless": "VLESS (Xray)", "wireguard": "WireGuard", "openvpn": "OpenVPN",
          "demo": "Демо (без сервера)"}
-MODES = {"tun": "TUN через sing-box (весь трафик)",
+MODES = {"tun": "TUN: sing-box + Xray (весь трафик)",
          "proxy": "Системный прокси (Xray)",
          "tun-xray": "TUN через Xray (запасной, экспериментально)"}
 
