@@ -69,12 +69,16 @@
   Kernel-Process с правами администратора — раскладка события Windows 10/11 с порядковыми
   номерами, parse_process_start, выгрузка буферов раз в 0,1 с; без прав — опрос ntsnap раз в
   0,3 с; файл проверяется через pool, процесс на это время приостановлен (не из Windows, до
-  64 МБ, нет в кэше вердиктов); скрипты из командной строки интерпретаторов, -enc, цепочки
+  64 МБ, нет в кэше вердиктов); скрипты из командной строки интерпретаторов, -enc (только
+  если запустил неподписанный процесс, оболочка, документ, Проводник, WMI или интерпретатор;
+  промежуточный cmd.exe пропускается — real_parent; один раз на родителя и команду, команда
+  расшифровывается), цепочки
   «документ → оболочка»; ЭКСТРЕННОЕ ЗАВЕРШЕНИЕ ВРЕМЕННО ЗАКОММЕНТИРОВАНО в _check_new — угроза
   только в журнал защиты и уведомление; свои дочерние процессы не проверяются), drivers
   (уязвимые драйверы: службы из реестра, System32\drivers, EnumDeviceDrivers с правами;
   SHA-256 и Authentihash по базе LOLDrivers feeds/loldrivers.tsv; совпадение только по имени —
-  вне папки Windows; disable_service с откатом)
+  вне папки Windows; disable_service с откатом; исключения драйверов по хэшу — exclude/include,
+  категория drivers в release_exclusions.json; инструмент по умолчанию запрещён, lock/drivers)
 - updater.py: драйверы (LOLDrivers, без ключа → signatures/feeds/loldrivers.tsv); домены (ThreatFox; URLhaus — выгрузка online.csv по ключу, старые ссылки
   без ключа отвечают 410) и JA3 (SSLBL) → signatures/netfeeds/domains, netfeeds/ja3;
   хэши (MalwareBazaar и ThreatFox по ключу abuse.ch, VirusShare без ключа),
@@ -131,13 +135,27 @@
 - toolbox/extensions.py + extwindow: расширения Chromium (Preferences, Secure Preferences,
   manifest) и Firefox (extensions.json), политики ExtensionInstallForcelist и ключи внешних
   расширений в реестре; риск (установлено политикой/реестром не из магазина, все сайты, опасные
-  права); удаление целиком (реестр, запись в настройках профиля и MAC, папка) и запрет
+  права); папки нет — removed (браузер хранит пометку «удалено пользователем», чтобы не
+  поставить внешнее расширение снова; запись не трогаем, по умолчанию скрыто); удаление целиком
+  (реестр, запись в настройках профиля и MAC, папка) и запрет
   уведомлений сайтов — с копиями в journal/ext_backup и откатом; браузер должен быть закрыт.
   toolbox/driverswindow — окно уязвимых драйверов
-- vpn/: прототип VPN-клиента (инструмент «VPN»): profiles (импорт .conf WireGuard и .ovpn,
-  хранение в vpn_profiles/profiles.dat под DPAPI), backends (WireGuard через wireguard.exe
-  /installtunnelservice с откатом в журнале, OpenVPN — дочерний процесс, демо-режим; kill switch
-  не реализован), window (профили, подключение, время, трафик, внешний IP, журнал)
+- vpn/: прототип VPN-клиента (инструмент «VPN», по умолчанию разрешён): profiles (ссылки
+  vless://, .conf WireGuard, .ovpn; хранение в vpn_profiles/profiles.dat под DPAPI; у VLESS
+  режим tun — sing-box, по умолчанию | proxy — Xray | tun-xray — запасной), singbox (TUN через
+  sing-box 1.12+: auto_route, strict_route, hijack-dns, auto_detect_interface — маршруты и DNS
+  ставит сам, по образцу Throne src/configs/generate.cpp; xhttp не поддерживает),
+  xray (VLESS через Xray-core: parse_vless, build_config; системный прокси
+  127.0.0.1:10809 в HKCU Internet Settings с откатом в журнале и копией в vpn/proxy_backup —
+  recover_proxy при запуске возвращает прокси после сбоя; TUN — входящий tun Xray, адаптер
+  myav-tun, маршруты 0/1 и 128/1, до сервера — через прежний шлюз, sockopt.interface — настоящий
+  адаптер; экспериментально), backends (SingBoxBackend, XrayBackend, WireGuard через wireguard.exe
+  /installtunnelservice с откатом, OpenVPN — дочерний процесс, демо; kill switch не реализован),
+  window (профили, режим VLESS, подключение, время, трафик, внешний IP, журнал, профиль для
+  автоподключения). sing-box.exe (1.14.4, с libcronet.dll), xray.exe (26.10.31), wintun.dll,
+  geoip/geosite.dat — в vpn/bin с официальных выпусков GitHub (не в Git, кладутся в релиз;
+  в Git — тексты лицензий LICENSE-* и THIRD_PARTY.md с версиями и ссылками на исходники), иначе настройки vpn/singbox_path и vpn/xray_path, PATH, Happ. Настройка vpn/autostart (раздел «Запуск»,
+  под паролем) — подключение при запуске программы (gui.start_vpn_on_launch)
 - toolbox/: linkcheck (адрес по netfeeds, IP по C2, DGA, punycode, «@»; скачивание в
   cache/downloads с Zone.Identifier и проверкой сканером), pwned (Have I Been Pwned,
   k-анонимность: уходят 5 символов SHA-1, Add-Padding), decoys (файлы-ловушки в «Документах»
@@ -177,8 +195,9 @@
 - analyzer/: страница «Сканирование папки/файла» (scanpage): файл — window.FileView (вкладки
   «Общие» = общие + подпись, «Проверка» = слои + PE, «Код» = обзор / дизассемблер / hex и строки);
   папка — folderview (её файлы и вложенные папки: размер папки считается в фоне
-  (fileops.folder_files), сортировка по размеру; папка до 2 ГБ проверяется целиком, крупнее —
-  «Вес > 2 ГБ, не проверена»; меню ПКМ, свойства). fileops: свойства, размер на диске, владелец, Корзина, переименование и белый
+  (fileops.folder_files), сортировка по размеру; папка до 128 МБ проверяется целиком, крупнее —
+  «Вес > 128 МБ, не проверена»; меню ПКМ, свойства; у корня диска — свойства диска:
+  fileops.drive_properties). fileops: свойства, размер на диске, владелец, Корзина, переименование и белый
   список с откатом. report, code, codeview, disasm, strings + stringsview — как раньше.
   Отдельного окна анализатора больше нет: open_analyzer(path) открывает эту страницу
 - ui/: боковая навигация (shell), страницы из Qt Designer (ui/designer/*.ui, загружаются
@@ -236,12 +255,22 @@
 - Списки с действиями — ExtendedSelection (Ctrl/Shift); действия работают со всеми выделенными
   строками, флажки через recovery.panels.link_checks / checked_or_selected.
 - Правки через Bash heredoc портят обратные слэши: Python-скрипты для правок писать в файл.
+- Поля со счётчиком и выпадающие списки на прокручиваемых страницах — через
+  ui.widgets.guard_wheel: колесо меняет значение только после щелчка, иначе прокручивает
+  страницу. Строки журнала защиты — только через MainWindow.add_protect_item: вниз
+  прокручивает угроза или если журнал и так внизу, листающего пользователя не дёргает.
 - Кнопки и поля из .ui нельзя переименовывать (имена используются в коде); `pytest` проверяет XML.
 - Проверки Microsoft Defender из программы убраны намеренно (у части пользователей он вырезан).
 - Не хранить в Git: signatures/whitelist.json, signatures/exclusions.json, signatures/feeds/,
   signatures/overrides.json, reports/,
   signatures/rules/community/, signatures/.abusech_key, journal/, cache/, logs/, debug_mode/,
-  vpn_profiles/.
+  vpn_profiles/, vpn/bin/. В Git (и релиз) входит
+  signatures/release_exclusions.json
+  (scanner/exclusions.py: RELEASE_CATEGORIES drivers и programs — заранее известные безвредные
+  файлы, которые базы считают вредоносными: winws.exe и WinDivert из zapret, MsIo64.sys MSI;
+  программы учитываются всеми проверками через whitelist.trusted_hashes); белый список
+  пользователя signatures/whitelist.json (возвращённое из карантина), исключения автозапуска и
+  проверки системы — только локально.
 
 ## Состояние
 Готово: хэши + YARA + эвристика PE + подписи, мониторинг папок и сети, карантин и белый список,
@@ -249,8 +278,15 @@
 разблокировка политик, файловые ассоциации), анализатор файла (вкладки «Код» и «Строки»
 расширены), трей, один экземпляр, исключения, журнал.
 
-Плановая проверка — раздел «Плановая проверка» настроек (виден всем); контроль запуска и
-защита от стилеров — галочки chkLaunchGuard/chkStealerGuard раздела «Проверка» (под паролем).
+Настройки без пароля — только «Окно» (тема, поверх окон). Под паролем: «Запуск» (автозапуск,
+VPN при запуске), «Плановая проверка»,
+«Проверка» (контроль запуска chkLaunchGuard, защита от стилеров chkStealerGuard...), «Запреты».
+При первом вводе пароля за запуск — предупреждение (gui.open_advanced). Автозапуск по
+умолчанию: задание планировщика StudyAV (ui/settings.py: task_xml — при входе, наивысшие
+права, без ограничения времени и батареи; ensure_autostart при запуске с правами; старое
+значение Run убирается). Запуск пользователем без прав — сразу окно UAC (gui.elevate_on_start),
+без вопросов; отказ — работа без прав. Пункт «Проверить в ...» в меню Проводника включается
+всегда (ensure_explorer_menu), настройки больше нет. Запрет закрытия по умолчанию выключен.
 
 ## Дальше
 1. Исследовательский стенд (метрики TPR/FPR по слоям), скрыт за режимом отладки.

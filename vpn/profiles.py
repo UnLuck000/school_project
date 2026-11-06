@@ -1,4 +1,4 @@
-"""Профили VPN: импорт конфигураций WireGuard (.conf) и OpenVPN (.ovpn), хранение.
+"""Профили VPN: ссылки VLESS (vless://, через Xray), WireGuard (.conf), OpenVPN (.ovpn).
 
 Конфигурации содержат закрытые ключи, поэтому файл профилей (PROFILES_FILE) шифруется
 DPAPI Windows (CryptProtectData): расшифровать его может только та же учётная запись на
@@ -14,7 +14,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 PROFILES_FILE = Path("vpn_profiles") / "profiles.dat"
-KINDS = {"wireguard": "WireGuard", "openvpn": "OpenVPN", "demo": "Демо (без сервера)"}
+KINDS = {"vless": "VLESS (Xray)", "wireguard": "WireGuard", "openvpn": "OpenVPN",
+         "demo": "Демо (без сервера)"}
+MODES = {"tun": "TUN через sing-box (весь трафик)",
+         "proxy": "Системный прокси (Xray)",
+         "tun-xray": "TUN через Xray (запасной, экспериментально)"}
 
 
 @dataclass
@@ -25,6 +29,7 @@ class Profile:
     server: str = ""          # адрес сервера (для показа)
     created: float = field(default_factory=time.time)
     auto_connect: bool = False
+    mode: str = "tun"         # VLESS: tun (sing-box) | proxy (Xray) | tun-xray
 
     @property
     def title(self) -> str:
@@ -60,15 +65,24 @@ def parse_openvpn(text: str) -> dict:
 
 def detect_kind(text: str, filename: str = "") -> str:
     low = text.lower()
+    if low.lstrip().startswith("vless://"):
+        return "vless"
     if "[interface]" in low and "[peer]" in low:
         return "wireguard"
     if filename.lower().endswith(".ovpn") or re.search(r"^\s*remote\s+\S+", text, re.M):
         return "openvpn"
-    raise ValueError("Не похоже на конфигурацию WireGuard (.conf) или OpenVPN (.ovpn)")
+    raise ValueError("Не похоже на ссылку vless:// или конфигурацию WireGuard (.conf) и "
+                     "OpenVPN (.ovpn)")
 
 
 def from_text(name: str, text: str, filename: str = "") -> Profile:
     kind = detect_kind(text, filename)
+    if kind == "vless":
+        from vpn.xray import parse_vless
+        uri = text.strip().splitlines()[0].strip()  # из файла со ссылками — первая
+        info = parse_vless(uri)
+        return Profile(name=name if name and name != "Профиль" else info["name"], kind="vless",
+                       config=uri, server=f"{info['address']}:{info['port']}")
     if kind == "wireguard":
         info = parse_wireguard(text)
         if not info.get("private_key"):

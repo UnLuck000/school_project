@@ -92,10 +92,14 @@ class Extension:
     registry: list[tuple[str, str, str]] = field(default_factory=list)  # (ветка, ключ, имя)
     prefs: str = ""           # папка профиля (Chromium)
     exe: str = ""             # программа браузера (проверка, закрыт ли)
+    removed: bool = False     # папки нет: удалено, в настройках осталась пометка браузера
 
     @property
     def risk(self) -> tuple[str, list[str]]:
-        """(danger | warning | ok, причины)."""
+        """(danger | warning | ok | removed, причины)."""
+        if self.removed:
+            return "removed", ["папки расширения нет; запись в настройках — пометка браузера "
+                               "«удалено пользователем», чтобы не поставить его снова"]
         reasons = []
         if self.forced:
             reasons.append("установлено политикой или через реестр: из браузера не удалить")
@@ -229,6 +233,11 @@ def chromium_extensions() -> list[Extension]:
                 if not raw:
                     folder = _version_dir(folder)
                 ext.path = str(folder)
+                # браузер хранит запись об удалённом внешнем расширении (location 2/3/6),
+                # чтобы не установить его снова: папки нет — расширения нет
+                ext.removed = not folder.exists() and location not in (4, 8)
+                if ext.removed:
+                    ext.enabled = False
                 manifest = value.get("manifest") or _read_json(folder / "manifest.json")
                 _apply_manifest(ext, manifest, folder)
                 ext.name = ext.name or ext_id

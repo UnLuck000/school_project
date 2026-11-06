@@ -70,7 +70,7 @@ def test_tool_locks(monkeypatch):
     monkeypatch.setattr(settings, "get", values.__getitem__)
     # у каждого инструмента своя галочка; по умолчанию запрещены только эти четыре
     from ui.registry import FEATURES
-    locked = {"btnRestorePoint", "btnSfcDism", "btnMemoryDeep", "btnUsb"}
+    locked = {"btnRestorePoint", "btnSfcDism", "btnMemoryDeep", "btnUsb", "btnDrivers"}
     assert set(access.TOOL_LOCKS) <= set(FEATURES)
     for button in access.TOOL_LOCKS:
         assert access.allowed(button) == (button not in locked), button

@@ -52,6 +52,7 @@ class Driver:
     match: str = ""          # hash | authentihash | name | ""
     entry: DbEntry | None = None
     error: str = ""
+    excluded: bool = False   # пользователь доверяет (исключения, категория drivers)
 
     @property
     def name(self) -> str:
@@ -60,11 +61,13 @@ class Driver:
     @property
     def level(self) -> str:
         """danger (уязвимый или вредоносный по хэшу), warning (только имя), clean."""
-        if self.entry is None:
+        if self.entry is None or self.excluded:
             return "clean"
         return "warning" if self.match == MATCH_NAME else "danger"
 
     def verdict(self) -> str:
+        if self.excluded and self.entry is not None:
+            return f"В исключениях (в базе: {self.entry.category}, {self.entry.name})"
         if self.entry is None:
             return "Нет в базе уязвимых драйверов"
         kind = "Вредоносный драйвер" if self.entry.category == "malicious" else \
@@ -311,7 +314,32 @@ def _name_match(driver: Driver, db: Database) -> DbEntry | None:
     return db.by_name.get(driver.name.lower())
 
 
-def check(driver: Driver, db: Database) -> Driver:
+def excluded_hashes() -> set[str]:
+    """SHA-256 драйверов, которым пользователь доверяет (попадают в релиз)."""
+    from scanner import exclusions
+    return set(exclusions.load().get("drivers", {}))
+
+
+def exclude(driver: Driver) -> None:
+    from scanner import exclusions
+    exclusions.add("drivers", driver.sha256, driver.name,
+                   f"{driver.path} — {driver.verdict()}")
+    driver.excluded = True
+
+
+def include(driver: Driver) -> None:
+    from scanner import exclusions
+    exclusions.remove("drivers", driver.sha256)
+    driver.excluded = False
+
+
+def check(driver: Driver, db: Database, excluded: set[str] | None = None) -> Driver:
+    driver = _check(driver, db)
+    driver.excluded = bool(excluded and driver.sha256 in excluded)
+    return driver
+
+
+def _check(driver: Driver, db: Database) -> Driver:
     try:
         data = Path(driver.path).read_bytes()
     except OSError as e:

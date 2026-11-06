@@ -1,10 +1,11 @@
 """Общие заготовки виджетов: дерево и таблица со стандартными настройками, строка дерева
 с сортировкой по числу, подсказка с полным текстом обрезанной ячейки."""
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHeaderView, QStyledItemDelegate, QTableWidget, QToolTip, QTreeWidget,
-    QTreeWidgetItem,
+    QAbstractItemView, QAbstractScrollArea, QAbstractSpinBox, QApplication, QComboBox,
+    QHeaderView, QStyledItemDelegate, QTableWidget, QToolTip, QTreeWidget, QTreeWidgetItem,
+    QWidget,
 )
 
 
@@ -79,3 +80,32 @@ def make_table(columns: list[tuple[str, int]]) -> QTableWidget:
         table.setColumnWidth(i, width)
     table.setItemDelegate(ElidedTooltipDelegate(table))
     return table
+
+
+class _WheelGuard(QObject):
+    """Колесо над полем без фокуса прокручивает страницу, а не меняет значение."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            parent = obj.parentWidget()
+            while parent is not None and not isinstance(parent, QAbstractScrollArea):
+                parent = parent.parentWidget()
+            if parent is not None:
+                QApplication.sendEvent(parent.verticalScrollBar(), event)
+            return True
+        return False
+
+
+_wheel_guard: _WheelGuard | None = None
+
+
+def guard_wheel(root: QWidget) -> None:
+    """Поля со счётчиком, времени и выпадающие списки внутри root меняются колесом мыши
+    только после щелчка по ним (фокус); иначе колесо прокручивает страницу — на длинной
+    странице настроек случайный наезд курсора не меняет значения."""
+    global _wheel_guard
+    if _wheel_guard is None:
+        _wheel_guard = _WheelGuard()
+    for widget in root.findChildren(QAbstractSpinBox) + root.findChildren(QComboBox):
+        widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # фокус — щелчком, не колесом
+        widget.installEventFilter(_wheel_guard)

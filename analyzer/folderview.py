@@ -1,5 +1,5 @@
 """Сканирование папки: файлы и папки этого уровня, проверка каждого файла движком, действия
-по правой кнопке и свойства папки. Вложенная папка до 2 ГБ проверяется целиком (со всеми
+по правой кнопке и свойства папки. Вложенная папка до 128 МБ проверяется целиком (со всеми
 файлами внутри), крупнее — только считается её размер."""
 import os
 import queue
@@ -19,7 +19,7 @@ from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from scanner import pool as scan_pool
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist
+from scanner.whitelist import load_whitelist, trusted_hashes
 from ui.widgets import item_less
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
@@ -28,7 +28,7 @@ SORT_ROLE = Qt.ItemDataRole.UserRole + 2
 IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 3
 COLORS = {"threat": (255, 128, 128), "suspicious": (255, 190, 110), "error": (255, 255, 170)}
 COLUMNS = ["Имя", "Тип", "Размер", "Изменён", "Проверка"]
-DIR_LIMIT = 2 * 1024 ** 3  # вложенная папка тяжелее — не проверяется
+DIR_LIMIT = 128 * 1024 ** 2  # вложенная папка тяжелее — не проверяется
 
 
 class _Bridge(QObject):
@@ -58,7 +58,7 @@ def rules_and_bases():
     global _bases
     if _bases is None:
         _bases = (load_all_signatures(SIG_DIR), get_rules("all"))
-    return _bases[0], _bases[1], set(load_whitelist())
+    return _bases[0], _bases[1], trusted_hashes()
 
 
 _bases = None
@@ -208,7 +208,7 @@ class FolderView(QWidget):
         folders = len(entries) - len(files)
         self.summary.setStyleSheet("padding: 8px; border-radius: 6px; font-size: 11pt;")
         self.summary.setText(f"Папка {self.folder}: файлов {len(files)}, папок {folders}. "
-                             "Проверяю файлы и вложенные папки до 2 ГБ...")
+                             "Проверяю файлы и вложенные папки до 128 МБ...")
         self.props_tree.clear()
         self.props_tree.addTopLevelItem(QTreeWidgetItem(["Считаю...", ""]))
         sized: queue.Queue = queue.Queue()  # папки с посчитанным размером → проверка
@@ -339,7 +339,7 @@ class FolderView(QWidget):
         item.setData(2, SORT_ROLE, size)
         if size > DIR_LIMIT:
             self._big += 1
-            text = "Вес > 2 ГБ, не проверена"
+            text = "Вес > 128 МБ, не проверена"
         elif count == 0:
             text = "Пустая"
         else:
@@ -381,7 +381,7 @@ class FolderView(QWidget):
         self.summary.setStyleSheet(
             f"padding: 8px; border-radius: 6px; font-size: 11pt; font-weight: 600; "
             f"background: rgb{rgb}; color: {text_color(rgb).name()};")
-        skipped = (f" Не проверены вложенные папки тяжелее 2 ГБ: {self._big}." if self._big
+        skipped = (f" Не проверены вложенные папки тяжелее 128 МБ: {self._big}." if self._big
                    else "")
         self.summary.setText(f"{self.folder}: {text}.{skipped}")
         from recovery import activity

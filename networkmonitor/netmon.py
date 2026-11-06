@@ -14,7 +14,7 @@ from networkmonitor.ioc import load_ip_blocklist
 from networkmonitor.tls import TlsEvent, TlsWatcher
 from scanner.engine import check_file, revocation_enabled
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist
+from scanner.whitelist import load_whitelist, trusted_hashes
 from processmanager.memscan import shared_rules
 from scanner.signature import VALID, check_revocation, describe, inspect_signature
 
@@ -140,7 +140,7 @@ class NetworkMonitor:
             if key in self._verdicts:
                 return self._verdicts[key]
             reason = check_file(path, self._signatures, self._rules,
-                                set(load_whitelist())) or ""
+                                trusted_hashes()) or ""
         except OSError:
             return ""
         self._verdicts[key] = reason

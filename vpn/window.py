@@ -4,7 +4,7 @@ import time
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPlainTextEdit, QPushButton, QVBoxLayout,
 )
@@ -36,8 +36,8 @@ class PasteDialog(QDialog):
         self.name.setPlaceholderText("Название профиля")
         layout.addWidget(self.name)
         self.text = QPlainTextEdit()
-        self.text.setPlaceholderText("Вставьте конфигурацию WireGuard ([Interface] ... [Peer]) "
-                                     "или OpenVPN (client, remote ...)")
+        self.text.setPlaceholderText("Вставьте ссылку vless://..., конфигурацию WireGuard "
+                                     "([Interface] ... [Peer]) или OpenVPN (client, remote ...)")
         layout.addWidget(self.text, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                    QDialogButtonBox.StandardButton.Cancel)
@@ -112,7 +112,22 @@ class VpnWindow(QDialog):
         ip_row.addWidget(self.ip_label, 1)
         right.addLayout(ip_row)
 
-        self.chk_auto = QCheckBox("Подключать этот профиль при запуске окна")
+        mode_row = QHBoxLayout()
+        self.mode_label = QLabel("Режим VLESS:")
+        self.cmb_mode = QComboBox()
+        self._modes = list(profiles.MODES)
+        self.cmb_mode.addItems(list(profiles.MODES.values()))
+        self.cmb_mode.setToolTip(
+            "TUN через sing-box — весь трафик через виртуальный адаптер, маршруты и DNS "
+            "sing-box настраивает сам (нужны права администратора). Системный прокси — "
+            "браузеры и программы, которые слушаются прокси Windows (Xray). TUN через Xray — "
+            "запасной вариант (wintun.dll рядом с xray.exe, экспериментально).")
+        self.cmb_mode.currentIndexChanged.connect(self._on_mode)
+        mode_row.addWidget(self.mode_label)
+        mode_row.addWidget(self.cmb_mode, 1)
+        right.addLayout(mode_row)
+        self.chk_auto = QCheckBox("Профиль для автоподключения (при запуске программы — если "
+                                  "включено в настройках)")
         self.chk_auto.toggled.connect(self._on_auto)
         right.addWidget(self.chk_auto)
         kill = QCheckBox("Блокировать интернет при обрыве VPN (kill switch)")
@@ -133,10 +148,16 @@ class VpnWindow(QDialog):
         self.timer.timeout.connect(self._tick)
         self.timer.start(1000)
         self._tick()
+
+    def autoconnect(self) -> bool:
+        """VPN вместе с программой (настройка vpn/autostart): профиль автоподключения."""
         auto = next((p for p in self.profiles if p.auto_connect), None)
-        if auto is not None:
-            self.list.setCurrentRow(self.profiles.index(auto))
-            QTimer.singleShot(300, self.toggle)
+        if auto is None:
+            self.bridge.log.emit("Автоподключение: не выбран профиль для автоподключения")
+            return False
+        self.list.setCurrentRow(self.profiles.index(auto))
+        self.toggle()
+        return True
 
     # ----- профили -----
     def _fill(self, select: int = 0) -> None:
@@ -157,7 +178,21 @@ class VpnWindow(QDialog):
         self.chk_auto.blockSignals(True)
         self.chk_auto.setChecked(bool(p and p.auto_connect))
         self.chk_auto.blockSignals(False)
+        vless = bool(p and p.kind == "vless")
+        self.mode_label.setVisible(vless)
+        self.cmb_mode.setVisible(vless)
+        if vless:
+            self.cmb_mode.blockSignals(True)
+            self.cmb_mode.setCurrentIndex(self._modes.index(p.mode) if p.mode in self._modes
+                                          else 0)
+            self.cmb_mode.blockSignals(False)
         self._tick()
+
+    def _on_mode(self, index: int) -> None:
+        p = self._current()
+        if p is not None and p.kind == "vless":
+            p.mode = self._modes[index]
+            self._save()
 
     def _save(self) -> None:
         try:
@@ -237,7 +272,7 @@ class VpnWindow(QDialog):
         p = self._current()
         if p is None:
             return
-        backend = backends.backend_for(p.kind, self.bridge.log.emit)
+        backend = backends.backend_for(p.kind, self.bridge.log.emit, p.mode)
         if not backend.available:
             QMessageBox.information(self, "VPN", f"Для профиля {p.kind} нужен клиент: "
                                                  f"{backend.missing}.")
@@ -258,11 +293,14 @@ class VpnWindow(QDialog):
         self.state_label.setStyleSheet(f"font-size: 18pt; font-weight: 600; color: {color};")
         busy = state in (backends.CONNECTED, backends.CONNECTING)
         self.connect_btn.setText("Отключить" if busy else "Подключить")
+        self.cmb_mode.setEnabled(not busy)
         p = self.active if busy else self._current()
         self.info["server"].setText(p.server if p else "—")
-        self.info["kind"].setText(profiles.KINDS.get(p.kind, "—") if p else "—")
-        engine = backend if busy else (backends.backend_for(p.kind, lambda t: None) if p
-                                       else None)
+        kind = profiles.KINDS.get(p.kind, "—") if p else "—"
+        if p and p.kind == "vless":
+            kind += ", " + profiles.MODES.get(p.mode, p.mode).lower()
+        self.info["kind"].setText(kind)
+        engine = backend if busy else (self._engine(p) if p else None)
         self.info["engine"].setText(
             "—" if engine is None else getattr(engine, "exe", "") or
             ("встроенная имитация" if p and p.kind == "demo" else f"не найден: {engine.missing}"))
@@ -281,6 +319,14 @@ class VpnWindow(QDialog):
         else:
             for key in ("time", "traffic", "speed"):
                 self.info[key].setText("—")
+
+    def _engine(self, p: profiles.Profile):
+        """Чем будет подключаться профиль (для строки «Клиент»), без повторного поиска."""
+        key = (p.kind, p.mode)
+        if getattr(self, "_engine_key", None) != key:
+            self._engine_key = key
+            self._engine_cache = backends.backend_for(p.kind, lambda t: None, p.mode)
+        return self._engine_cache
 
     def _append_log(self, text: str) -> None:
         self.log_view.appendPlainText(f"{time.strftime('%H:%M:%S')}  {text}")

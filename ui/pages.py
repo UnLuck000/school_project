@@ -299,7 +299,12 @@ class SettingsPage(_UiPage):
         super().__init__()
         ui = self.ui
         self.chk_autostart = child(ui, QCheckBox, "chkAutostart")
-        self.chk_ask_admin = child(ui, QCheckBox, "chkAskAdmin")
+        self.chk_vpn_autostart = child(ui, QCheckBox, "chkVpnAutostart")
+        # «Запуск» и «Плановая проверка» — только после пароля, как «Проверка» и «Запреты»
+        self.group_startup = child(ui, QGroupBox, "groupStartup")
+        self.group_schedule = child(ui, QGroupBox, "groupSchedule")
+        self.group_startup.setVisible(False)
+        self.group_schedule.setVisible(False)
         self.chk_block_exit = child(ui, QCheckBox, "chkBlockExit")
         self.chk_on_top = child(ui, QCheckBox, "chkOnTop")
         self.cmb_theme = child(ui, QComboBox, "cmbTheme")
@@ -308,7 +313,6 @@ class SettingsPage(_UiPage):
         self.spn_threshold = child(ui, QSpinBox, "spnThreshold")
         self.spn_workers = child(ui, QSpinBox, "spnWorkers")
         self.spn_interval = child(ui, QSpinBox, "spnInterval")
-        self.chk_explorer = child(ui, QCheckBox, "chkExplorerMenu")
         self.chk_decoys = child(ui, QCheckBox, "chkDecoys")
         self.chk_launch = child(ui, QCheckBox, "chkLaunchGuard")
         self.chk_stealer = child(ui, QCheckBox, "chkStealerGuard")
@@ -362,28 +366,28 @@ class SettingsPage(_UiPage):
             ("lock/vpn", "chkLockVpn"))}
         self.btn_advanced = child(ui, QPushButton, "btnAdvanced")
         self.btn_advanced.clicked.connect(lambda checked=False: self.advanced_requested.emit())
-        self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_block_exit,
+        self._all = (self.chk_autostart, self.chk_vpn_autostart, self.chk_block_exit,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
                      self.spn_workers, self.spn_interval,
-                     self.chk_explorer, self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
+                     self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
                      self.chk_revocation, self.chk_launch, self.chk_stealer,
                      self.chk_schedule, self.cmb_schedule_kind, self.cmb_schedule_period,
                      self.time_schedule, *self.locks.values())
         self.load_values()
+        from ui.widgets import guard_wheel
+        guard_wheel(ui)  # колесо над полем прокручивает страницу, значение — после щелчка
 
         self.chk_autostart.toggled.connect(self._on_autostart)
-        self.chk_ask_admin.toggled.connect(lambda v: self._save("startup/ask_admin", v))
+        self.chk_vpn_autostart.toggled.connect(lambda v: self._save("vpn/autostart", v))
         self.chk_block_exit.toggled.connect(lambda v: self._save("general/block_exit", v))
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
-        self.chk_explorer.toggled.connect(self._on_explorer_menu)
         self.chk_decoys.toggled.connect(lambda v: self._save("protect/decoys", v))
         self.chk_launch.toggled.connect(lambda v: self._save("protect/launch", v))
         self.chk_stealer.toggled.connect(lambda v: self._save("protect/stealer", v))
         self.chk_schedule.toggled.connect(self._on_schedule_enabled)
         self.cmb_schedule_kind.currentIndexChanged.connect(
             lambda i: self._save("schedule/kind", self._kinds[i]))
-        self.cmb_schedule_period.currentIndexChanged.connect(
-            lambda i: self._save("schedule/period", self._periods[i]))
+        self.cmb_schedule_period.currentIndexChanged.connect(self._on_schedule_period)
         self.time_schedule.timeChanged.connect(
             lambda t: self._save("schedule/time", t.toString("HH:mm")))
         self.cmb_theme.currentIndexChanged.connect(
@@ -396,12 +400,17 @@ class SettingsPage(_UiPage):
         self.chk_revocation.toggled.connect(lambda v: self._save("scan/revocation", v))
         for key, box in self.locks.items():
             box.toggled.connect(lambda v, k=key: self._save(k, v))
-        child(ui, QPushButton, "btnReset").clicked.connect(lambda checked=False: self._reset())
+        # сброс снимает и запреты: только после пароля
+        self.btn_reset = child(ui, QPushButton, "btnReset")
+        self.btn_reset.clicked.connect(lambda checked=False: self._reset())
+        self.btn_reset.setVisible(False)
 
     def set_debug(self, on: bool) -> None:
-        """Разделы «Проверка» и «Запреты» видны только в режиме отладки."""
-        self.group_scan.setVisible(on)
-        self.group_locks.setVisible(on)
+        """Разделы «Запуск», «Плановая проверка», «Проверка» и «Запреты» видны только после
+        пароля администратора."""
+        for group in (self.group_startup, self.group_schedule, self.group_scan,
+                      self.group_locks, self.btn_reset):
+            group.setVisible(on)
         self.btn_advanced.setText("Скрыть дополнительные настройки и отладку" if on
                                   else "Открыть дополнительные настройки и отладку")
 
@@ -409,10 +418,9 @@ class SettingsPage(_UiPage):
         for widget in self._all:
             widget.blockSignals(True)
         self.chk_autostart.setChecked(cfg.autostart_enabled())
-        self.chk_ask_admin.setChecked(cfg.get("startup/ask_admin"))
+        self.chk_vpn_autostart.setChecked(cfg.get("vpn/autostart"))
         self.chk_block_exit.setChecked(cfg.get("general/block_exit"))
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
-        self.chk_explorer.setChecked(cfg.explorer_menu_enabled())
         self.chk_decoys.setChecked(cfg.get("protect/decoys"))
         self.chk_launch.setChecked(cfg.get("protect/launch"))
         self.chk_stealer.setChecked(cfg.get("protect/stealer"))
@@ -446,12 +454,19 @@ class SettingsPage(_UiPage):
         for w in (self.cmb_schedule_kind, self.cmb_schedule_period, self.time_schedule):
             w.setEnabled(on)
 
+    def _restart_schedule(self) -> None:
+        """Отсчёт заново: первая проверка — в ближайшее выбранное время."""
+        cfg.set_("schedule/last_run", 0.0)
+        cfg.set_("schedule/postponed", 0.0)
+
     def _on_schedule_enabled(self, on: bool) -> None:
         self._schedule_widgets(on)
-        if on:  # отсчёт — от включения: первая проверка в ближайшее выбранное время
-            cfg.set_("schedule/last_run", 0.0)
-            cfg.set_("schedule/postponed", 0.0)
+        if on:
+            self._restart_schedule()
         self._save("schedule/enabled", on)
+
+    def _on_schedule_period(self, index: int) -> None:
+        self._save("schedule/period", self._periods[index])
 
     def set_schedule_text(self, text: str) -> None:
         self.lbl_schedule_next.setText(text)
@@ -474,6 +489,7 @@ class SettingsPage(_UiPage):
     def _on_autostart(self, checked: bool) -> None:
         try:
             cfg.set_autostart(checked)
+            cfg.set_("startup/autostart", checked)
         except OSError as e:
             QMessageBox.warning(self, "Автозапуск", f"Не удалось изменить автозапуск: {e}")
             self.chk_autostart.blockSignals(True)
@@ -486,22 +502,13 @@ class SettingsPage(_UiPage):
             return
         cfg.reset()
         try:
-            cfg.set_autostart(False)
+            cfg.set_autostart(cfg.get("startup/autostart"))  # по умолчанию — включён
         except OSError:
             pass
         self.load_values()
         for key in ("general/on_top", "general/theme", "scan/threshold", "scan/mode",
                     "protect/decoys", *self.locks):
             self.changed.emit(key, cfg.get(key))
-
-    def _on_explorer_menu(self, checked: bool) -> None:
-        try:
-            cfg.set_explorer_menu(checked)
-        except OSError as e:
-            QMessageBox.warning(self, "Проводник", f"Не удалось изменить меню: {e}")
-            self.chk_explorer.blockSignals(True)
-            self.chk_explorer.setChecked(not checked)
-            self.chk_explorer.blockSignals(False)
 
 
 class AboutPage(_UiPage):

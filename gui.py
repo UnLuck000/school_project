@@ -345,6 +345,17 @@ class MainWindow(QMainWindow):
             self.toggle_debug_mode()
         elif ask_password(self, self.debug_gate):
             activity.record("access", "Дополнительные настройки и отладка открыты по паролю")
+            if not getattr(self, "_advanced_warned", False):  # один раз за запуск программы
+                self._advanced_warned = True
+                from toolbox.windows import info_dialog
+                info_dialog(
+                    self, "Дополнительные настройки",
+                    "Здесь собраны настройки, которые меняют работу защиты: автозапуск с "
+                    "правами администратора, плановая проверка, слои проверки, контроль "
+                    "запуска программ, запреты инструментов.\n\n"
+                    "Меняйте их, только если понимаете, что делаете. Неверная настройка может "
+                    "ослабить защиту компьютера или помешать работе программ. Если не уверены "
+                    "— оставьте как есть: значения по умолчанию подобраны для обычной работы.")
             self.toggle_debug_mode()
 
     def apply_access(self):
@@ -563,6 +574,7 @@ class MainWindow(QMainWindow):
                 from toolbox.driverswindow import DriversWindow
                 window = DriversWindow(self)
                 window.journal_changed.connect(self.journal_page.refresh)
+                window.exclusions_changed.connect(self.exclusions_page.refresh)
             elif name == "extensions":
                 from toolbox.extwindow import ExtensionsWindow
                 window = ExtensionsWindow(self)
@@ -1128,8 +1140,24 @@ class MainWindow(QMainWindow):
             item.setData(ID_ROLE, path)
             item.setToolTip("Правый клик: в карантин, открыть в сканере, показать в проводнике")
         item.setForeground(QBrush(QColor(color)))
-        self.protect_log.addItem(item)
-        self.protect_log.scrollToBottom()
+        self.add_protect_item(item, threat=color == "red")
+
+    def add_protect_item(self, item: QListWidgetItem, threat: bool = False) -> None:
+        """Строка в журнал защиты, не мешая читать его.
+
+        Журнал прокручивается вниз сам только при угрозе, или если он и так был внизу
+        (смотрят новые события). Если пользователь листает выше, проверенные файлы его не
+        двигают; удаление старых строк сверху (больше 500) не сдвигает видимую часть."""
+        log = self.protect_log
+        bar = log.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 1
+        log.addItem(item)
+        if log.count() > 500:  # журнал не растёт бесконечно
+            log.takeItem(0)
+            if not at_bottom and not threat:
+                bar.setValue(max(0, bar.value() - 1))  # строка сверху ушла: держим место
+        if threat or at_bottom:
+            log.scrollToBottom()
 
     def _on_launch_event(self, kind: str, info):
         if kind == "status":
@@ -1166,6 +1194,23 @@ class MainWindow(QMainWindow):
                            info.get("exe", ""), "red")
         self.show_main()
         stealer_alarm(self, info, self.stealer_guard)
+
+    # ---------- VPN ----------
+    def start_vpn_on_launch(self):
+        """Прокси, оставшийся после сбоя, возвращается; VPN подключается, если включено
+        «Подключать VPN при запуске программы» (vpn/autostart) и инструмент разрешён."""
+        from vpn import xray
+        if xray.recover_proxy():
+            self.add_event("Системный прокси возвращён (VPN был отключён аварийно)", "info")
+        if not cfg.get("vpn/autostart") or not access.allowed("btnVpn"):
+            return
+        from vpn.window import VpnWindow
+        window = self.tool_windows.get("vpn")
+        if window is None:
+            window = VpnWindow(self)
+            self.tool_windows["vpn"] = window
+        if window.autoconnect():
+            activity.record("vpn", "VPN подключается вместе с программой")
 
     # ---------- плановая проверка ----------
     def start_schedule(self):
@@ -1376,8 +1421,7 @@ class MainWindow(QMainWindow):
         item.setData(ID_ROLE, path)
         item.setToolTip("Правый клик: в карантин, открыть в сканере, показать в проводнике")
         item.setForeground(QBrush(QColor("red" if level == "threat" else "darkorange")))
-        self.protect_log.addItem(item)
-        self.protect_log.scrollToBottom()
+        self.add_protect_item(item, threat=level == "threat")
         if level == "threat":
             self.add_event(f"Угроза: {os.path.basename(path)} ({text})", "threat")
 
@@ -1547,10 +1591,7 @@ class MainWindow(QMainWindow):
         color = {"threat": "red", "error": "darkorange", "scanned": "gray"}.get(kind)
         if color:
             item.setForeground(QBrush(QColor(color)))
-        self.protect_log.addItem(item)
-        if self.protect_log.count() > 500:  # журнал не растёт бесконечно
-            self.protect_log.takeItem(0)
-        self.protect_log.scrollToBottom()
+        self.add_protect_item(item, threat=kind == "threat")
 
     # ---------- вкладка «Белый список» ----------
     def _build_whitelist_tab(self) -> QWidget:
@@ -1803,28 +1844,13 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
-def ask_for_admin() -> bool:
-    """Предлагает перезапуститься с правами администратора.
-    True, если новый процесс уже запущен и текущий нужно закрыть."""
-    if is_admin() or not cfg.get("startup/ask_admin"):
+def elevate_on_start() -> bool:
+    """Запуск пользователем без прав администратора: сразу окно UAC (без вопросов).
+    True — новый процесс с правами запущен, этот нужно закрыть; False — UAC отклонён,
+    программа работает без прав (часть защиты — в упрощённом режиме)."""
+    if is_admin():
         return False
-
-    box = QMessageBox(
-        QMessageBox.Icon.Question, "Права администратора",
-        "Для проверки памяти системных процессов, управления чужими процессами и "
-        "полной работы диспетчера нужны права администратора.\n\n"
-        "Запустить программу от имени администратора?")
-    run_btn = box.addButton("Запустить от администратора", QMessageBox.ButtonRole.AcceptRole)
-    box.addButton("Продолжить без прав", QMessageBox.ButtonRole.RejectRole)
-    dont_ask = QCheckBox("Больше не спрашивать")
-    box.setCheckBox(dont_ask)
-    box.exec()
-
-    if dont_ask.isChecked():
-        cfg.set_("startup/ask_admin", False)
-    if box.clickedButton() is run_btn:
-        return relaunch_as_admin()  # False, если пользователь отклонил запрос UAC
-    return False
+    return relaunch_as_admin()
 
 
 def _argument(name: str) -> str | None:
@@ -1857,9 +1883,13 @@ if __name__ == "__main__":
     if guard.already_running(notify=not autostart, wait=wait, message=message):
         sys.exit(0)
 
-    # при запуске из автозапуска или из меню Проводника окно UAC не показываем
-    if not autostart and not analyze_path and ask_for_admin():
+    # запуск пользователем — сразу с запросом UAC; из автозапуска (задание планировщика уже
+    # с наивысшими правами) и из меню Проводника окно UAC не показываем
+    if not autostart and not analyze_path and elevate_on_start():
         sys.exit(0)
+    if is_admin():
+        cfg.ensure_autostart()  # задание планировщика по умолчанию (создаётся только с правами)
+    cfg.ensure_explorer_menu()  # пункт «Проверить в ...» в меню файлов — всегда
     if not guard.listen():  # другой экземпляр успел занять имя
         sys.exit(0)
 
@@ -1881,4 +1911,5 @@ if __name__ == "__main__":
     window.start_usb_watch()
     window.start_auto_update()
     window.start_schedule()
+    window.start_vpn_on_launch()
     sys.exit(app.exec())

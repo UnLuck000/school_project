@@ -10,7 +10,7 @@ from watchdog.observers.api import BaseObserver
 from quarantine import quarantine_file  # noqa: F401  (нужен, когда автокарантин включён, см. _handle)
 from scanner.engine import check_file
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist
+from scanner.whitelist import load_whitelist, trusted_hashes
 from processmanager.memscan import shared_rules
 
 # временные файлы браузеров и загрузчиков: проверяем уже после переименования
@@ -262,7 +262,7 @@ class RealtimeMonitor:
                 return
             # белый список читаем при каждой проверке: восстановление файла
             # пользователем должно учитываться сразу
-            reason = check_file(path, self._signatures, self._rules, set(load_whitelist()))
+            reason = check_file(path, self._signatures, self._rules, trusted_hashes())
         except OSError:
             if tries + 1 < MAX_TRIES:
                 self._enqueue(path, tries + 1)  # файл занят, попробуем позже

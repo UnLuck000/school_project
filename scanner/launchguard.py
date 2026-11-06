@@ -107,6 +107,59 @@ def encoded_command(cmdline: list[str]) -> bool:
     return bool(ENCODED_RE.search(" ".join(cmdline[1:])))
 
 
+# кто запустил PowerShell с -enc: от этих родителей это признак атаки даже при подписи
+RISKY_PARENTS = SHELLS | DOCUMENT_APPS | {
+    "explorer.exe", "wmiprvse.exe", "winrshost.exe",
+    # интерпретаторы: подписаны, но ими пользуются загрузчики
+    "python.exe", "pythonw.exe", "py.exe", "node.exe", "java.exe", "javaw.exe", "autoit3.exe"}
+# промежуточные оболочки: смотрим, кто запустил их самих (Claude Code: claude.exe → cmd.exe →
+# powershell -enc)
+PASS_THROUGH = {"cmd.exe", "conhost.exe"}
+
+
+def real_parent(ppid: int, hops: int = 3) -> tuple[str, str]:
+    """(имя, путь) родителя, пропуская промежуточные cmd.exe; пустые — родитель завершился."""
+    from processmanager import ntsnap
+    for _ in range(hops):
+        if not ppid:
+            return "", ""
+        exe = ntsnap.identity(ppid)[0]
+        name = os.path.basename(exe).lower()
+        if name not in PASS_THROUGH:
+            return name, exe
+        try:
+            ppid = _psutil_process(ppid).ppid()
+        except Exception:
+            return name, exe
+    return name, exe
+
+
+def encoded_suspicious(parent_name: str, parent_signed: bool | None) -> bool:
+    """-enc подозрителен, если PowerShell запустила неподписанная программа (или родитель
+    уже завершился), оболочка, документ, Проводник (ярлык) или WMI. Подписанные программы
+    (Claude Code, VS Code, установщики, Планировщик заданий) так передают длинные команды
+    постоянно — без этого правила журнал защиты засыпан ложными тревогами."""
+    name = parent_name.lower()
+    if not name or parent_signed is None:
+        return True
+    return name in RISKY_PARENTS or not parent_signed
+
+
+def decode_command(cmdline: list[str]) -> str:
+    """Текст закодированной команды (Base64 от UTF-16) — первые 200 символов."""
+    import base64
+    match = ENCODED_RE.search(" ".join(cmdline[1:]))
+    if not match:
+        return ""
+    blob = match.group(0).split()[-1]
+    try:
+        text = base64.b64decode(blob + "=" * (-len(blob) % 4)).decode("utf-16-le", "replace")
+    except ValueError:
+        return ""
+    text = " ".join(text.split())
+    return text[:200] + ("..." if len(text) > 200 else "")
+
+
 class LaunchGuard:
     def __init__(self, on_event):
         self.on_event = on_event
@@ -119,6 +172,7 @@ class LaunchGuard:
         self._names: dict[int, str] = {}   # pid → имя (для цепочек: родитель уже мог выйти)
         self.checked = 0
         self.blocked = 0
+        self._reported: set[tuple[str, str]] = set()  # (родитель, команда): не повторять
 
     # ---------- управление ----------
     def start(self) -> None:
@@ -313,10 +367,17 @@ class LaunchGuard:
                     self._emit("suspicious", {"pid": pid, "name": name, "exe": target,
                                               "text": text, "killed": False})
             if encoded_command(cmdline):
-                self._emit("suspicious", {"pid": pid, "name": name, "exe": exe,
-                                          "text": "PowerShell с закодированной командой (-enc): "
-                                                  "так прячут команды загрузчики",
-                                          "killed": False})
+                origin, parent_exe = real_parent(ppid)
+                signed = _signed(parent_exe) if parent_exe else None
+                key = (origin, " ".join(cmdline))
+                if encoded_suspicious(origin, signed) and key not in self._reported:
+                    self._reported.add(key)
+                    decoded = decode_command(cmdline)
+                    self._emit("suspicious", {
+                        "pid": pid, "name": name, "exe": exe, "killed": False,
+                        "text": f"PowerShell с закодированной командой (-enc), запустил "
+                                f"{origin or parent or 'неизвестный процесс'}: так прячут команды "
+                                f"загрузчики" + (f". Команда: {decoded}" if decoded else "")})
             chain = chain_reason(parent, name)
             if chain:
                 self._emit("suspicious", {"pid": pid, "name": name, "exe": exe, "text": chain,
@@ -324,6 +385,19 @@ class LaunchGuard:
         finally:
             if suspended and not killed:
                 _resume(pid)
+
+
+_signed_cache: dict[str, bool] = {}
+
+
+def _signed(exe: str) -> bool:
+    if exe not in _signed_cache:
+        try:
+            from scanner.signature import VALID, inspect_signature
+            _signed_cache[exe] = inspect_signature(Path(exe)).status == VALID
+        except Exception:
+            _signed_cache[exe] = False
+    return _signed_cache[exe]
 
 
 def _psutil_process(pid: int):

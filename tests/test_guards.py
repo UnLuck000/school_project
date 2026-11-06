@@ -286,3 +286,118 @@ def test_vpn_demo_backend():
     backend.disconnect()
     assert backend.state == backends.DISCONNECTED
     assert backends.tunnel_name("Мой VPN #1") == "VPN__1"
+
+
+# ---------- правки после проверки ----------
+def test_encoded_command_parent_rules():
+    assert launchguard.decode_command(["powershell.exe", "-enc",
+                                       "VwByAGkAdABlAC0ASABvAHMAdAAgAGgAaQA="]) == "Write-Host hi"
+    assert not launchguard.encoded_suspicious("claude.exe", True)   # подписан: тихо
+    assert launchguard.encoded_suspicious("winword.exe", True)      # документ
+    assert launchguard.encoded_suspicious("python.exe", True)       # интерпретатор
+    assert launchguard.encoded_suspicious("dropper.exe", False)     # без подписи
+    assert launchguard.encoded_suspicious("", None)                 # родитель уже вышел
+
+
+def test_vless_profile_and_xray_config():
+    from vpn import xray
+    uri = ("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:8443?type=ws"
+           "&security=tls&path=%2Fws&host=cdn.example.com&sni=cdn.example.com"
+           "&flow=xtls-rprx-vision#%D0%94%D0%BE%D0%BC")
+    p = profiles.from_text("Профиль", uri)
+    assert (p.kind, p.server, p.name, p.mode) == ("vless", "vpn.example.com:8443", "Дом", "tun")
+    config = xray.build_config(xray.parse_vless(uri), "proxy")
+    out = config["outbounds"][0]
+    assert out["settings"]["vnext"][0]["users"][0]["flow"] == "xtls-rprx-vision"
+    assert out["streamSettings"]["wsSettings"]["headers"] == {"Host": "cdn.example.com"}
+    assert {i["port"] for i in config["inbounds"]} == {xray.SOCKS_PORT, xray.HTTP_PORT}
+    tun = xray.build_config(xray.parse_vless(uri), "tun", "Ethernet")
+    assert tun["inbounds"][0]["protocol"] == "tun"
+    assert tun["outbounds"][0]["streamSettings"]["sockopt"] == {"interface": "Ethernet"}
+    with pytest.raises(ValueError):
+        xray.parse_vless("vmess://abc")
+
+
+def test_system_proxy_restore_on_test_key():
+    import winreg
+    from vpn import xray
+    key = r"Software\StudyAVTest\InternetSettings"
+    try:
+        xray.write_proxy({"ProxyEnable": 0, "ProxyServer": "old:1", "ProxyOverride": None}, key)
+        old = xray.read_proxy(key)
+        xray.write_proxy({"ProxyEnable": 1, "ProxyServer": "127.0.0.1:10809",
+                          "ProxyOverride": xray.BYPASS}, key)
+        assert xray.read_proxy(key)["ProxyEnable"] == 1
+        xray.write_proxy(old, key)
+        assert xray.read_proxy(key) == old
+    finally:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+
+
+def test_drive_properties():
+    from analyzer import fileops
+    root = os.environ.get("SystemDrive", "C:") + "\\"
+    rows = dict(fileops.folder_properties(root))
+    assert {"Имя диска", "Тип диска", "Файловая система", "Ёмкость", "Занято",
+            "Свободно"} <= set(rows)
+    assert fileops.is_drive_root(root) and not fileops.is_drive_root(os.path.join(root, "x"))
+
+
+def test_driver_exclusions_in_release_file(tmp_path, monkeypatch):
+    from scanner import exclusions
+    monkeypatch.setattr(exclusions, "EXCLUSIONS_FILE", tmp_path / "exclusions.json")
+    monkeypatch.setattr(exclusions, "RELEASE_FILE", tmp_path / "release_exclusions.json")
+    exclusions.add("drivers", "ab" * 32, "x.sys")
+    exclusions.add("checks", "k", "hosts")
+    assert "drivers" in json.loads((tmp_path / "release_exclusions.json").read_text())
+    assert "drivers" not in json.loads((tmp_path / "exclusions.json").read_text())
+    assert set(exclusions.load()) == {"drivers", "checks"}
+    d = drivers.Driver("x.sys", sha256="ab" * 32,
+                       entry=drivers.DbEntry("vulnerable driver", "x.sys", ""),
+                       match=drivers.MATCH_HASH, excluded=True)
+    assert d.level == "clean" and "исключениях" in d.verdict()
+    assert exclusions.remove("drivers", "ab" * 32)
+
+
+def test_removed_extension_is_not_installed(tmp_path, monkeypatch):
+    local = tmp_path / "Local"
+    profile = local / "Google" / "Chrome" / "User Data" / "Default"
+    profile.mkdir(parents=True)
+    (profile / "Secure Preferences").write_text(json.dumps({"extensions": {"settings": {
+        "gonegonegonegonegonegonegonegone": {"location": 6, "from_webstore": True,
+                                             "path": "gonegone\1.0_0",
+                                             "disable_reasons": [1]}}}}))
+    (profile / "Preferences").write_text("{}")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    items = extensions.chromium_extensions()
+    assert items and items[0].removed and items[0].risk[0] == "removed"
+
+
+def test_singbox_config_and_modes():
+    from vpn import backends, singbox, xray
+    reality = ("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=tcp"
+               "&security=reality&pbk=key&sid=ab&sni=www.microsoft.com&flow=xtls-rprx-vision#r")
+    config = singbox.build_config(xray.parse_vless(reality))
+    tun = config["inbounds"][0]
+    assert tun["type"] == "tun" and tun["auto_route"] and tun["strict_route"]
+    out = config["outbounds"][0]
+    assert out["tls"]["reality"] == {"enabled": True, "public_key": "key", "short_id": "ab"}
+    assert out["flow"] == "xtls-rprx-vision" and config["route"]["auto_detect_interface"]
+    with pytest.raises(ValueError):  # xhttp — только через Xray
+        singbox.build_config(xray.parse_vless(reality.replace("type=tcp", "type=xhttp")))
+    assert profiles.from_text("x", reality).mode == "tun"  # по умолчанию — sing-box
+    assert isinstance(backends.backend_for("vless", print, "tun"), backends.SingBoxBackend)
+    assert isinstance(backends.backend_for("vless", print, "tun-xray"), backends.XrayBackend)
+    assert isinstance(backends.backend_for("vless", print, "proxy"), backends.XrayBackend)
+
+
+def test_release_trusted_files():
+    """Заранее известные безвредные файлы релиза: winws.exe и WinDivert (zapret), MsIo64.sys."""
+    from scanner import exclusions
+    from scanner.whitelist import trusted_hashes
+    data = json.loads(exclusions.RELEASE_FILE.read_text(encoding="utf-8"))
+    names = {e["title"] for e in data["programs"].values()}
+    assert {"winws.exe", "WinDivert64.sys", "WinDivert.dll", "MsIo64.sys"} <= names
+    assert {e["title"] for e in data["drivers"].values()} == {"WinDivert64.sys", "MsIo64.sys"}
+    assert set(data["programs"]) <= trusted_hashes()

@@ -206,7 +206,44 @@ def folder_files(path: str, limit: int, cancel=None) -> tuple[list[str] | None, 
     return files, size, count, opened
 
 
+DRIVE_TYPES = {2: "Съёмный диск", 3: "Локальный диск", 4: "Сетевой диск", 5: "CD/DVD",
+               6: "RAM-диск"}
+
+
+def is_drive_root(path: str) -> bool:
+    path = os.path.abspath(path)
+    return os.path.splitdrive(path)[0] != "" and os.path.dirname(path) == path
+
+
+def drive_properties(path: str) -> list[tuple[str, str]]:
+    """Свойства диска: имя, тип, файловая система, ёмкость, занято, свободно."""
+    import shutil
+    root = os.path.splitdrive(os.path.abspath(path))[0] + "\\"
+    label = ctypes.create_unicode_buffer(261)
+    fs = ctypes.create_unicode_buffer(261)
+    serial = ctypes.c_ulong()
+    kernel32 = ctypes.windll.kernel32
+    if not kernel32.GetVolumeInformationW(root, label, 261, ctypes.byref(serial), None, None,
+                                          fs, 261):
+        raise OSError(f"Диск {root} недоступен")
+    usage = shutil.disk_usage(root)
+    kind = DRIVE_TYPES.get(kernel32.GetDriveTypeW(root), "Неизвестный")
+    used = usage.total - usage.free
+    percent = used * 100 / usage.total if usage.total else 0
+    return [
+        ("Имя диска", f"{label.value or kind} ({root[:2]})"),
+        ("Тип диска", kind),
+        ("Файловая система", fs.value or "—"),
+        ("Ёмкость", exact_size(usage.total)),
+        ("Занято", f"{exact_size(used)} ({percent:.0f}%)"),
+        ("Свободно", exact_size(usage.free)),
+        ("Серийный номер тома", f"{serial.value >> 16:04X}-{serial.value & 0xFFFF:04X}"),
+    ]
+
+
 def folder_properties(path: str, cancel=None) -> list[tuple[str, str]]:
+    if is_drive_root(path):  # корень диска: свойства диска, а не обход всех его файлов
+        return drive_properties(path)
     st = os.stat(path)
     files, folders, size, on_disk = folder_stats(path, cancel)
     return [
@@ -231,7 +268,17 @@ def open_as_admin(path: str) -> bool:
 
 
 def show_in_explorer(path: str) -> None:
-    subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    """Проводник с выделенным файлом. Если пути уже нет, Проводник открыл бы «Рабочий стол»
+    со всем подряд — открываем ближайшую существующую папку."""
+    path = os.path.normpath(path)
+    if os.path.exists(path):
+        subprocess.Popen(["explorer", "/select,", path])
+        return
+    parent = os.path.dirname(path)
+    while parent and not os.path.isdir(parent) and os.path.dirname(parent) != parent:
+        parent = os.path.dirname(parent)
+    if parent and os.path.isdir(parent):
+        subprocess.Popen(["explorer", parent])
 
 
 def open_folder(path: str) -> None:

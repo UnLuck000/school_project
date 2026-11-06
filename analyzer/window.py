@@ -15,7 +15,7 @@ from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from processmanager.system import open_in_explorer
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist
+from scanner.whitelist import load_whitelist, trusted_hashes
 
 from analyzer import fileops
 from ui.widgets import make_tree
@@ -158,7 +158,7 @@ class FileView(QWidget):
     def _job(self, path: Path):
         try:
             report = build_report(path, load_all_signatures(SIG_DIR),
-                                  get_rules("all"), set(load_whitelist()))
+                                  get_rules("all"), trusted_hashes())
         except OSError as e:
             self.bridge.failed.emit(f"Не удалось прочитать файл: {e}")
             return

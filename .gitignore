@@ -22,6 +22,12 @@ signatures/exclusions.json
 signatures/overrides.json
 reports/
 vpn_profiles/
+# программы VPN (sing-box, Xray, Wintun, ~130 МБ) — в релиз отдельно; лицензии и
+# vpn/bin/THIRD_PARTY.md (версии, ссылки на исходники) — в Git
+vpn/bin/*
+!vpn/bin/LICENSE-*
+!vpn/bin/COPYING-*
+!vpn/bin/THIRD_PARTY.md
 
 # выгрузка проверок PyCharm
 inspections/

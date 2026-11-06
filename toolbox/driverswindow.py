@@ -22,6 +22,7 @@ class _Bridge(QObject):
 
 class DriversWindow(QDialog):
     journal_changed = Signal()
+    exclusions_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,7 +51,7 @@ class DriversWindow(QDialog):
         self.btn_scan = QPushButton("Проверить драйверы")
         self.btn_scan.setMinimumHeight(32)
         self.btn_scan.clicked.connect(self.scan)
-        self.chk_all = QCheckBox("Показывать все драйверы")
+        self.chk_all = QCheckBox("Показывать все драйверы (и исключения)")
         self.chk_all.toggled.connect(self._fill)
         self.status = QLabel("")
         row.addWidget(self.btn_scan)
@@ -96,8 +97,9 @@ class DriversWindow(QDialog):
                                               "(python updater.py drivers).")
                     return
                 found = drivers.list_drivers()
+                excluded = drivers.excluded_hashes()
                 for i, d in enumerate(found):
-                    drivers.check(d, db)
+                    drivers.check(d, db, excluded)
                     if i % 20 == 0:
                         self.bridge.progress.emit(i, len(found))
                 self.bridge.done.emit(found, None)
@@ -129,7 +131,7 @@ class DriversWindow(QDialog):
         self.tree.clear()
         for d in self.items:
             if d.level == "clean" and not self.chk_all.isChecked():
-                continue
+                continue  # в том числе исключения: видны с «Показывать все»
             state = "загружен" if d.running or d.loaded else (
                 "не загружен" if d.service else "без службы")
             start = drivers.START_TEXT.get(d.start, "") if d.start is not None else ""
@@ -165,8 +167,30 @@ class DriversWindow(QDialog):
         if d.service:
             act = menu.addAction("Отключить службу драйвера", lambda: self._disable(d))
             act.setEnabled(d.start != 4)
+        if d.sha256 and d.entry is not None:
+            if d.excluded:
+                menu.addAction("Убрать из исключений", lambda: self._exclude(d, False))
+            else:
+                menu.addAction("Добавить в исключения (доверяю)",
+                               lambda: self._exclude(d, True))
         menu.addAction("Копировать SHA-256", lambda: self._copy(d.sha256))
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _exclude(self, d: drivers.Driver, on: bool) -> None:
+        if on:
+            answer = QMessageBox.question(
+                self, "Исключения",
+                f"{d.name}: {d.verdict()}.\n\nДоверять этому драйверу (по хэшу файла)? Он "
+                "перестанет показываться как уязвимый; исключение попадёт в релиз программы. "
+                "Убрать: правый клик здесь или «Журнал действий» → «Исключения».")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            drivers.exclude(d)
+        else:
+            drivers.include(d)
+        activity.record("drivers", f"{d.name}: {'в исключениях' if on else 'убран из исключений'}")
+        self.exclusions_changed.emit()
+        self._fill()
 
     @staticmethod
     def _copy(text: str) -> None:

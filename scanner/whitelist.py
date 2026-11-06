@@ -7,6 +7,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent  # корень проекта
 WHITELIST_FILE = BASE_DIR / "signatures" / "whitelist.json"
 
 
+def trusted_hashes() -> set[str]:
+    """SHA-256, которые проверки не считают угрозой: белый список пользователя и заранее
+    известные безвредные программы релиза (exclusions, категория programs)."""
+    from scanner import exclusions
+    return set(load_whitelist()) | set(exclusions.load().get("programs", {}))
+
+
 def load_whitelist() -> dict[str, dict]:
     """Возвращает {sha256: {"path": ..., "added_at": ...}}."""
     try:

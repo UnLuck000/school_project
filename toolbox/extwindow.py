@@ -12,9 +12,10 @@ from recovery import activity
 from toolbox import extensions as ext_mod
 from ui.widgets import SortItem, make_tree
 
-COLORS = {"danger": "#c0392b", "warning": "#d68910"}
-RISK_TEXT = {"danger": "Опасно", "warning": "Проверить", "ok": "Обычное"}
-RISK_ORDER = {"danger": 0, "warning": 1, "ok": 2}
+COLORS = {"danger": "#c0392b", "warning": "#d68910", "removed": "#8a8a8a"}
+RISK_TEXT = {"danger": "Опасно", "warning": "Проверить", "ok": "Обычное",
+             "removed": "Удалено"}
+RISK_ORDER = {"danger": 0, "warning": 1, "ok": 2, "removed": 3}
 INDEX_ROLE = Qt.ItemDataRole.UserRole
 
 
@@ -52,9 +53,14 @@ class ExtensionsWindow(QDialog):
         self.chk_all = QCheckBox("Показывать обычные расширения из магазина")
         self.chk_all.setChecked(True)
         self.chk_all.toggled.connect(self._fill)
+        self.chk_removed = QCheckBox("Показывать удалённые")
+        self.chk_removed.setToolTip("Расширение удалено (папки нет), но браузер хранит запись "
+                                    "«удалено пользователем», чтобы не установить его снова")
+        self.chk_removed.toggled.connect(self._fill)
         self.status = QLabel("")
         row.addWidget(self.btn_refresh)
         row.addWidget(self.chk_all)
+        row.addWidget(self.chk_removed)
         row.addWidget(self.status, 1)
         layout.addLayout(row)
 
@@ -107,9 +113,11 @@ class ExtensionsWindow(QDialog):
             return
         self.items, self.sites = items, sites
         danger = sum(e.risk[0] == "danger" for e in items)
+        removed = sum(e.removed for e in items)
         allowed = sum(s.allowed for s in sites)
-        self.status.setText(f"Расширений: {len(items)}, опасных: {danger}. Сайтов с "
-                            f"разрешёнными уведомлениями: {allowed}.")
+        self.status.setText(f"Расширений: {len(items) - removed}, опасных: {danger}"
+                            + (f", удалённых: {removed}" if removed else "")
+                            + f". Сайтов с разрешёнными уведомлениями: {allowed}.")
         activity.record("extensions", self.status.text(),
                         found=[f"{e.browser}: {e.name} ({e.ext_id}) — {e.path}"
                                for e in items if e.risk[0] == "danger"])
@@ -122,6 +130,8 @@ class ExtensionsWindow(QDialog):
             level, reasons = e.risk
             if level == "ok" and not self.chk_all.isChecked():
                 continue
+            if level == "removed" and not self.chk_removed.isChecked():
+                continue
             item = SortItem([RISK_TEXT[level], e.browser, e.profile, e.name,
                              "да" if e.enabled else "нет", e.source, "; ".join(reasons),
                              e.path, e.ext_id])
@@ -132,7 +142,10 @@ class ExtensionsWindow(QDialog):
             for col in (5, 6, 7):
                 item.setToolTip(col, item.text(col))
             color = COLORS.get(level)
-            if color:
+            if level == "removed":
+                for col in range(9):
+                    item.setForeground(col, QBrush(QColor(color)))
+            elif color:
                 item.setForeground(0, QBrush(QColor(color)))
                 item.setForeground(3, QBrush(QColor(color)))
             self.tree.addTopLevelItem(item)
@@ -160,13 +173,19 @@ class ExtensionsWindow(QDialog):
         if e is None:
             return
         from analyzer import fileops
+        import os
         menu = QMenu(self)
-        if e.path:
-            menu.addAction("Показать папку в проводнике", lambda: fileops.show_in_explorer(e.path))
-            if self.window_ref is not None:
-                menu.addAction("Проверить папку сканером",
-                               lambda: self.window_ref.open_analyzer(e.path))
-        menu.addAction("Удалить расширение полностью", lambda: self._remove(e))
+        exists = bool(e.path) and os.path.exists(e.path)
+        folder = menu.addAction("Показать папку в проводнике",
+                                lambda: fileops.show_in_explorer(e.path))
+        folder.setEnabled(exists)
+        if self.window_ref is not None:
+            scan = menu.addAction("Проверить папку сканером",
+                                  lambda: self.window_ref.open_analyzer(e.path))
+            scan.setEnabled(exists)
+        remove = menu.addAction("Удалить расширение полностью", lambda: self._remove(e))
+        # у удалённого запись в настройках не трогаем: без неё браузер поставит его снова
+        remove.setEnabled(not e.removed or bool(e.registry))
         menu.addAction("Копировать ID", lambda: QApplication.clipboard().setText(e.ext_id))
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 

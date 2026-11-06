@@ -18,7 +18,7 @@ from processmanager.memscan import get_rules
 from processmanager.system import is_admin, open_in_explorer
 from scanner import exclusions, pool as scan_pool
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist
+from scanner.whitelist import load_whitelist, trusted_hashes
 from ui.textutil import elide
 from ui.widgets import SortItem, make_tree
 
@@ -336,7 +336,7 @@ class AutorunsWindow(QMainWindow):
 
         self.bridge.entries.emit(entries)
         self.bridge.progress.emit(f"Найдено записей: {len(entries)}. Проверяю файлы и подписи...")
-        ctx = Context(load_all_signatures(SIG_DIR), get_rules("all"), set(load_whitelist()))
+        ctx = Context(load_all_signatures(SIG_DIR), get_rules("all"), trusted_hashes())
         # файлы проверяются в рабочих процессах (интерфейс не тормозит), подписи — здесь
         exes = sorted({e.exe for e in entries if e.exe and os.path.isfile(e.exe)})
         for path, reason, error in scan_pool.check_files(exes, ctx.signatures, ctx.rules,

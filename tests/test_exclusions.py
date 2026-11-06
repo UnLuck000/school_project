@@ -5,6 +5,7 @@ from scanner import exclusions
 
 def _patch(monkeypatch, tmp_path):
     monkeypatch.setattr(exclusions, "EXCLUSIONS_FILE", tmp_path / "exclusions.json")
+    monkeypatch.setattr(exclusions, "RELEASE_FILE", tmp_path / "release_exclusions.json")
 
 
 def test_add_match_remove(tmp_path, monkeypatch):

@@ -200,6 +200,8 @@ class ProtectionPage(QWidget):
         grid.setRowStretch(2, 1)  # верхние карточки — по содержимому, остальное — журналу
         root.addLayout(grid, 1)
         self.set_running(False)
+        from ui.widgets import guard_wheel
+        guard_wheel(self)  # список дисков: колесо прокручивает страницу
 
     def refit(self) -> None:
         """Высота карточки «Также под защитой» — по тексту с переносами: сетка сама не

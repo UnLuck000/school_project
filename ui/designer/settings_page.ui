@@ -13,8 +13,8 @@
     <widget class="QGroupBox" name="groupStartup">
      <property name="title"><string>Запуск</string></property>
      <layout class="QVBoxLayout" name="layoutStartup">
-      <item><widget class="QCheckBox" name="chkAutostart"><property name="text"><string>Запускать вместе с Windows</string></property></widget></item>
-      <item><widget class="QCheckBox" name="chkAskAdmin"><property name="text"><string>Предлагать запуск от имени администратора при старте</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkAutostart"><property name="toolTip"><string>Задание планировщика Windows при входе в систему, с наивысшими правами: программа запускается от администратора без окна UAC. Создать или убрать задание можно только из программы, запущенной от администратора.</string></property><property name="text"><string>Запускать вместе с Windows (с правами администратора)</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkVpnAutostart"><property name="toolTip"><string>При запуске программы VPN подключается к профилю, отмеченному «Профиль для автоподключения» в окне VPN. Если инструмент «VPN» запрещён, подключения не будет.</string></property><property name="text"><string>Подключать VPN при запуске программы</string></property></widget></item>
      </layout>
     </widget>
    </item>
@@ -105,14 +105,6 @@
    <item>
     <widget class="QPushButton" name="btnReset">
      <property name="text"><string>Сбросить настройки</string></property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="groupExplorer">
-     <property name="title"><string>Интеграция с Проводником</string></property>
-     <layout class="QVBoxLayout" name="layoutExplorer">
-      <item><widget class="QCheckBox" name="chkExplorerMenu"><property name="toolTip"><string>Пункт «Проверить в myAV» появится в меню правой кнопки мыши для файлов. В Windows 11 он находится в «Показать дополнительные параметры» (или Shift+правая кнопка).</string></property><property name="text"><string>Добавить пункт «Проверить в myAV» в контекстное меню файлов</string></property></widget></item>
-     </layout>
     </widget>
    </item>
    <item>
