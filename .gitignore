@@ -31,3 +31,9 @@ vpn/bin/*
 
 # выгрузка проверок PyCharm
 inspections/
+
+# своя база хэшей (удалённые из карантина файлы) — только на этом компьютере
+signatures/hashes.txt
+# словарь орфографии PyCharm и заметки для Claude Code — не для репозитория
+dictionaries/
+CLAUDE.md

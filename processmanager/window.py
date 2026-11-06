@@ -677,7 +677,8 @@ class ProcessWindow(QMainWindow):
         if rules is None:
             self.bridge.task_done.emit(
                 "Сканирование памяти",
-                "Нет ни одного рабочего правила. Проверьте signatures/rules/memory/")
+                "Нет ни одного рабочего правила. Обновите базы: правила Elastic и сообщества "
+                "загружаются в signatures/rules/community/")
             self.bridge.mem_done.emit(True)
             return
 
