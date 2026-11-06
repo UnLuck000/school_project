@@ -141,6 +141,8 @@ class MainWindow(QMainWindow):
         self.stealer_event.connect(self._on_stealer_event)
         self.guard_status.connect(self._on_guard_status)
         self._tray_target = ""     # что открыть по щелчку на уведомлении: usb | schedule
+        from ui.notify import Notifier
+        self.notifier = Notifier(self)  # уведомления Windows с кнопками
         self._schedule_due = 0.0   # когда начнётся объявленная плановая проверка
         self.recent_events: list[tuple[str, str, str]] = []  # для главной: время, текст, уровень
         self._db_stats: dict | None = None  # счётчики баз, пересчитываются после обновления
@@ -1205,9 +1207,16 @@ class MainWindow(QMainWindow):
             self._remind(kind)
 
     def _remind(self, title: str):
-        """Обычное уведомление Windows (через значок в трее); кнопки — на странице «Защита»,
-        щелчок по уведомлению открывает её."""
-        if self.tray is not None:
+        """Уведомление Windows с кнопками «Начать сейчас», «Отложить на час», «Пропустить»
+        (ui/notify.py). Если оно недоступно — обычное уведомление через трей, щелчок по нему
+        открывает «Защиту». Те же кнопки — в полосе на странице «Защита»."""
+        shown = self.notifier.show(
+            "Плановая проверка через 10 минут",
+            f"Скоро начнётся {title.lower()}: она нагружает процессор и диск. Если вы играете "
+            "или работаете в тяжёлой программе, сохраните работу.",
+            [("Начать сейчас", "now"), ("Отложить на час", "postpone"),
+             ("Пропустить", "skip")], self._on_schedule_toast)
+        if not shown and self.tray is not None:
             self._tray_target = "schedule"
             self._usb_pending = None
             self.tray.showMessage(
@@ -1218,6 +1227,19 @@ class MainWindow(QMainWindow):
                 QSystemTrayIcon.MessageIcon.Information, 15000)
         self._show_schedule_bar(title)
         activity.record("schedule", f"Предупреждение: через 10 минут — {title.lower()}")
+
+    def _on_schedule_toast(self, argument):
+        """Кнопка в уведомлении Windows (None — закрыто без выбора: проверка начнётся)."""
+        if not self._schedule_due:
+            return  # уже решено кнопкой на странице «Защита»
+        if argument == "now":
+            self._schedule_now()
+        elif argument == "postpone":
+            self._schedule_postpone()
+        elif argument == "skip":
+            self._schedule_skip()
+        elif argument == "":
+            self.show_main("Защита")
 
     def _show_schedule_bar(self, title: str):
         page = self.protection_page

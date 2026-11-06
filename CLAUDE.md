@@ -60,10 +60,12 @@
   лаунчеров: steamapps\common, Epic Games...) проверяются только EXECUTABLE_EXTS, вне игр
   пропускаются ASSET_EXTS и файлы данных от 256 МБ, если в начале нет MZ; найденное —
   в журнал защиты; mode="quick" — быстрая: Windows и Users целиком (full_roots), на дисках
-  только .exe/.dll и MZ до 16 МБ, quick_reason), schedule (плановая проверка: next_run от
+  только программы и библиотеки до 16 МБ (QUICK_EXTS) и MZ только в .txt, .tmp, .bak,
+  .png, .pdf, .docx, .pptx до 16 МБ (QUICK_MZ_EXTS: открытие файла ~5 мс), quick_reason), schedule (плановая проверка: next_run от
   schedule/last_run + период 1w/2w/1m/3m во время schedule/time; пропущенная начинается
-  после предупреждения; gui.check_schedule раз в 30 с, окно toolbox.windows.ScheduleReminder
-  за 10 минут: начать, отложить на час, пропустить), launchguard (контроль запуска: ETW
+  после предупреждения; gui.check_schedule раз в 15 с; за 10 минут — уведомление Windows с кнопками «Начать сейчас», «Отложить на час»,
+  «Пропустить» (ui/notify.py: windows-toasts, AUMID StudyAV.myav в HKCU\Software\Classes  AppUserModelId; без пакета — обычное уведомление через трей) и полоса schedule_bar с теми же
+  кнопками на «Защите»), launchguard (контроль запуска: ETW
   Kernel-Process с правами администратора — раскладка события Windows 10/11 с порядковыми
   номерами, parse_process_start, выгрузка буферов раз в 0,1 с; без прав — опрос ntsnap раз в
   0,3 с; файл проверяется через pool, процесс на это время приостановлен (не из Windows, до

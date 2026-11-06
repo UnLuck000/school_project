@@ -13,10 +13,9 @@
 Быстрая проверка (mode="quick", quick_plan): папки Windows и Users — целиком, как полная;
 в остальных папках дисков — только файлы до QUICK_LIMIT (16 МБ): программы и библиотеки
 (QUICK_EXTS: .exe, .dll, .sys, .pyd...) и файлы с заголовком MZ в начале. Ради MZ
-открываются только файлы, под которые обычно прячут программы (QUICK_MZ_EXTS: без
-расширения, .bin, .dat, .tmp, числовые): открытие файла стоит ~5 мс (его проверяет и
-Защитник Windows), и проверка заголовков у всех 150 тыс. файлов вне Windows и Users заняла
-14 минут; с этим правилом — около 35 тыс. открытий.
+открываются только .txt, .tmp, .bak, .png, .pdf, .docx, .pptx (QUICK_MZ_EXTS): открытие
+файла стоит ~5 мс (его проверяет и Защитник Windows), и проверка заголовков у всех 150 тыс.
+файлов вне Windows и Users заняла 14 минут.
 """
 import ctypes
 import os
@@ -35,8 +34,7 @@ QUICK_LIMIT = 16 * 1024 * 1024  # быстрая проверка вне Windows
 QUICK_EXTS = {".exe", ".dll", ".sys", ".scr", ".com", ".pif", ".cpl", ".ocx", ".drv", ".efi",
               ".pyd", ".node", ".msi"}
 # быстрая проверка: под эти расширения прячут программы — открываем и ищем MZ
-QUICK_MZ_EXTS = {"", ".bin", ".dat", ".data", ".tmp", ".temp", ".bak", ".old", ".dll_",
-                 ".exe_", ".dl_", ".ex_", ".jpg", ".png", ".txt", ".pdf", ".doc", ".docx"}
+QUICK_MZ_EXTS = {".txt", ".tmp", ".bak", ".png", ".pdf", ".docx", ".pptx"}
 BATCH = 256                     # файлов в одном обращении к pool: результаты идут потоком
 
 # архивы ресурсов и данные игровых движков: в них нет исполняемого кода
@@ -193,7 +191,7 @@ def quick_reason(name: str, size: int) -> str | None:
     ext = os.path.splitext(name)[1].lower()
     if ext in QUICK_EXTS:
         return None
-    if ext in QUICK_MZ_EXTS or ext[1:].isdigit():
+    if ext in QUICK_MZ_EXTS:
         return "mz"
     return "не программа (быстрая проверка)"
 

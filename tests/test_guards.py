@@ -177,11 +177,11 @@ def test_quick_scan_filter(tmp_path, monkeypatch):
     other.mkdir()
     (windows / "notes.txt").write_text("x")             # Windows: проверяется всё
     (other / "tool.exe").write_bytes(b"MZ")              # .exe до 16 МБ
-    (other / "hidden.bin").write_bytes(b"MZ" + b"\0" * 10)  # программа под чужим расширением
-    (other / "data.bin").write_bytes(b"\0" * 10)
-    (other / "photo.jpg").write_bytes(b"MZ")             # программа под видом картинки
-    (other / "lib.js").write_bytes(b"MZ")                # .js на MZ не открывается
-    (other / "mod.pyd").write_bytes(b" ")               # библиотека: без открытия
+    (other / "hidden.png").write_bytes(b"MZ" + b"\0" * 10)  # программа под видом картинки
+    (other / "data.png").write_bytes(b"\x89PNG")         # настоящая картинка
+    (other / "photo.jpg").write_bytes(b"MZ")             # .jpg на MZ не открывается
+    (other / "lib.bin").write_bytes(b"MZ")               # .bin — тоже
+    (other / "mod.pyd").write_bytes(b"\0")               # библиотека: без открытия
     big = other / "big.exe"
     with open(big, "wb") as f:
         f.truncate(fullscan.QUICK_LIMIT)
@@ -192,7 +192,7 @@ def test_quick_scan_filter(tmp_path, monkeypatch):
         found += list(fullscan.walk(root, stats, cancel, quick,
                                     {str(windows)} if quick else None))
     names = sorted(os.path.basename(p) for p in found)
-    assert names == ["hidden.bin", "mod.pyd", "notes.txt", "photo.jpg", "tool.exe"]
+    assert names == ["hidden.png", "mod.pyd", "notes.txt", "tool.exe"]
 
 
 # ---------- расширения ----------
