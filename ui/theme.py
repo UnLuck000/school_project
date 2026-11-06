@@ -181,10 +181,10 @@ def _install_title_bar_filter(app) -> None:
     from PySide6.QtCore import QEvent, QObject
 
     class TitleBarFilter(QObject):
-        def eventFilter(self, obj, event):
-            if event.type() == QEvent.Type.Show and getattr(obj, "isWindow", None) \
-                    and obj.isWindow():
-                set_title_bar(obj, _dark)
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Type.Show and getattr(watched, "isWindow", None) \
+                    and watched.isWindow():
+                set_title_bar(watched, _dark)
             return False
 
     _filter = TitleBarFilter(app)

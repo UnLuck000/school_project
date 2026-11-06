@@ -46,7 +46,7 @@ def classify(p, mem_match: bool) -> str | None:
     flags = {
         "yara": mem_match,
         "masq": p.masq,
-        "untrusted": p.sig_status == "invalid",
+        "untrusted": p.sig_status in ("invalid", "revoked"),
         "packed": p.packed,
         "suspended": p.status == "stopped",
         "service": p.service,

@@ -1,8 +1,12 @@
-from PySide6.QtCore import QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+import time
+
+from PySide6.QtCore import QSize, QUrl, Signal
+from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGroupBox, QLabel,
+    QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStyle, QVBoxLayout,
+    QWidget,
 )
 
 import appinfo
@@ -17,7 +21,13 @@ from ui.debug_mode import MIN_LEN, PasswordGate
 from ui.theme import THEMES as THEME_LIST, THEME_IDS as THEMES
 
 
-def _run_feature(widget, window, feature, handler) -> None:
+def run_feature(widget, window, feature, handler) -> None:
+    """Запуск инструмента: запрет, заглушка «в разработке», ошибка — сообщением."""
+    from ui import access
+    button_id = next((k for k, v in FEATURES.items() if v is feature), "")
+    if not access.allowed(button_id):
+        QMessageBox.information(widget, feature.title, access.LOCKED_TIP)
+        return
     if handler is None:
         QMessageBox.information(
             widget, feature.title, f"Функция в разработке.\n\nПлан:\n{feature.plan}")
@@ -39,7 +49,7 @@ def bind_features(widget, ui_root, window) -> None:
             button.setText(f"{button.text()}   (скоро)")
         button.setToolTip(feature.plan)
         button.clicked.connect(
-            lambda checked=False, f=feature, h=handler: _run_feature(widget, window, f, h))
+            lambda checked=False, f=feature, h=handler: run_feature(widget, window, f, h))
 
 
 class _UiPage(QWidget):
@@ -60,29 +70,71 @@ class DashboardPage(_UiPage):
     toggle_protection = Signal()
     check_updates = Signal()
     open_processes = Signal()
+    open_scan = Signal()
+    open_journal = Signal()
+
+    GOOD, BAD, WARN = "#2e9e4f", "#c0392b", "#d68910"
+    STYLE = """
+        QFrame[card="true"] { background: palette(base); border: 1px solid palette(mid);
+                              border-radius: 8px; }
+        QFrame[card="true"] QLabel { background: transparent; border: none; }
+        QFrame[card="true"] QLabel[caption="true"] { color: palette(placeholder-text); }
+        QPushButton[action="true"] { text-align: left; padding: 6px 12px; }
+    """
 
     def __init__(self):
         super().__init__()
         ui = self.ui
         names = {"protection": "lblProtection", "network": "lblNetwork",
                  "quarantine": "lblQuarantine", "whitelist": "lblWhitelist",
-                 "last_scan": "lblLastScan"}
+                 "last_scan": "lblLastScan", "databases": "lblDatabases"}
         self.labels = {key: child(ui, QLabel, name) for key, name in names.items()}
         self.btn_protection = child(ui, QPushButton, "btnStartProtection")
+        self.hero = child(ui, QFrame, "frameHero")
+        self.hero_icon = child(ui, QLabel, "lblHeroIcon")
+        self.hero_title = child(ui, QLabel, "lblHeroTitle")
+        self.hero_text = child(ui, QLabel, "lblHeroText")
+        self.events = child(ui, QListWidget, "listEvents")
+        self.events.setWordWrap(True)
+        ui.setStyleSheet(self.STYLE)
+        for label in self.labels.values():
+            label.setWordWrap(True)
+            label.setStyleSheet("font-size: 13pt; font-weight: 600;")
+        for name in ("captionProtection", "captionNetwork", "captionQuarantine",
+                     "captionWhitelist", "captionLastScan", "captionDatabases"):
+            child(ui, QLabel, name).setProperty("caption", True)
 
-        child(ui, QPushButton, "btnQuickScan").clicked.connect(
-            lambda checked=False: self.quick_scan.emit())
+        style = self.style()
+        icons = QStyle.StandardPixmap
+        buttons = [("btnQuickScan", self.quick_scan, icons.SP_DirOpenIcon),
+                   ("btnScanPath", self.open_scan, icons.SP_FileDialogContentsView),
+                   ("btnOpenProcesses", self.open_processes, icons.SP_ComputerIcon),
+                   ("btnOpenJournal", self.open_journal, icons.SP_FileDialogDetailedView),
+                   ("btnCheckUpdates", self.check_updates, icons.SP_BrowserReload)]
+        for name, signal, icon in buttons:
+            button = child(ui, QPushButton, name)
+            button.setIcon(style.standardIcon(icon))
+            button.setIconSize(QSize(20, 20))
+            button.setProperty("action", True)
+            button.clicked.connect(lambda checked=False, s=signal: s.emit())
         self.btn_protection.clicked.connect(lambda checked=False: self.toggle_protection.emit())
-        child(ui, QPushButton, "btnCheckUpdates").clicked.connect(
-            lambda checked=False: self.check_updates.emit())
-        child(ui, QPushButton, "btnOpenProcesses").clicked.connect(
-            lambda checked=False: self.open_processes.emit())
+
+    def _hero(self, color: str, icon, title: str, text: str) -> None:
+        c = QColor(color)
+        rgba = f"rgba({c.red()}, {c.green()}, {c.blue()}"
+        self.hero.setStyleSheet(f"QFrame#frameHero {{ background: {rgba}, 0.13); "
+                                f"border: 1px solid {rgba}, 0.55); border-radius: 10px; }}")
+        self.hero_icon.setPixmap(self.style().standardIcon(icon).pixmap(48, 48))
+        self.hero_title.setText(title)
+        self.hero_title.setStyleSheet(f"font-size: 15pt; font-weight: 600; color: {color};"
+                                      " background: transparent;")
+        self.hero_text.setText(text)
 
     def refresh(self, info: dict) -> None:
         def state(label: QLabel, on: bool) -> None:
             label.setText("включена" if on else "выключена")
-            label.setStyleSheet("color: #2e9e4f; font-weight: 600;" if on
-                                else "color: #c0392b; font-weight: 600;")
+            label.setStyleSheet(f"font-size: 13pt; font-weight: 600; "
+                                f"color: {self.GOOD if on else self.BAD};")
 
         state(self.labels["protection"], info["protection"])
         state(self.labels["network"], info["network"])
@@ -92,43 +144,148 @@ class DashboardPage(_UiPage):
         self.btn_protection.setText(
             "Выключить защиту" if info["protection"] else "Включить защиту")
 
+        updated = info.get("db_updated") or 0
+        stale = not updated or time.time() - updated > 3 * 86400
+        if info.get("db_updating"):
+            db_text = "обновляются..."
+        elif updated:
+            db_text = time.strftime("обновлены %d.%m.%Y %H:%M", time.localtime(updated))
+        else:
+            db_text = "ещё не обновлялись"
+        self.labels["databases"].setText(db_text)
+        self.labels["databases"].setStyleSheet(
+            "font-size: 11pt; font-weight: 600;" + (f" color: {self.WARN};" if stale else ""))
+
+        icons = QStyle.StandardPixmap
+        if not info["protection"]:
+            self._hero(self.BAD, icons.SP_MessageBoxCritical, "Защита выключена",
+                       "Новые и изменённые файлы не проверяются. Включите защиту, чтобы "
+                       "следить за загрузками, автозагрузкой и системными папками.")
+        elif stale and not info.get("db_updating"):
+            self._hero(self.WARN, icons.SP_MessageBoxWarning, "Компьютер под защитой",
+                       "Базы сигнатур давно не обновлялись: они обновятся автоматически, "
+                       "как только будет доступна сеть.")
+        else:
+            details = info.get("protection_text") or "Файлы проверяются при появлении."
+            self._hero(self.GOOD, icons.SP_DialogApplyButton, "Компьютер под защитой", details)
+
+        self.events.clear()
+        events = info.get("events") or []
+        if not events:
+            self.events.addItem("Событий пока нет")
+        for when, text, level in events:
+            item = QListWidgetItem(f"{when}  {text}")
+            if level == "threat":
+                item.setForeground(QBrush(QColor(self.BAD)))
+            self.events.addItem(item)
+
+
 
 class ToolsPage(_UiPage):
     UI_NAME = "tools_page"
+
+    # группа: цвет значков; кнопка: значок и короткое описание на плитке
+    GROUPS = {"groupDetect": "#d9534f", "groupAnalysis": "#2f7ed8", "groupRecovery": "#2e9e4f"}
+    TILES = {
+        "btnAutoruns": ("🚀", "Программы, которые запускаются вместе с Windows"),
+        "btnMemoryDeep": ("🧠", "Внедрённый код в памяти процессов"),
+        "btnFileAnalyzer": ("🔍", "Проверка файла или папки всеми слоями"),
+        "btnProcessManager": ("⚙️", "Процессы, их подписи, сеть и память"),
+        "btnRestorePoint": ("💾", "Снимок системы перед изменениями"),
+        "btnSfcDism": ("🩹", "Восстановление системных файлов Windows"),
+        "btnSystemChecks": ("🛡️", "Настройки, которые меняют вредоносы, с исправлением"),
+        "btnUndoJournal": ("↩️", "Что сделала программа, и отмена действий"),
+        "btnUsb": ("🔌", "Вирус-ярлык на флешке: найти и вернуть файлы"),
+        "btnLinkCheck": ("🔗", "Ссылка и файл по ней — до того, как открыть"),
+        "btnPasswordLeak": ("🔑", "Не утёк ли пароль — без отправки самого пароля"),
+    }
+    STYLE = """
+        QGroupBox { background: palette(base); border: 1px solid palette(mid);
+                    border-radius: 10px; margin-top: 16px; padding: 14px 8px 8px 8px;
+                    font-size: 11pt; font-weight: 600; }
+        QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 4px; }
+        QPushButton[tile="true"] { border: 1px solid palette(mid); border-radius: 8px;
+                                   background: palette(window); }
+        QPushButton[tile="true"]:hover { border: 1px solid palette(highlight); }
+        QPushButton[tile="true"]:pressed { background: palette(alternate-base); }
+        QLabel { background: transparent; border: none; }
+        QLabel[role="title"] { font-size: 10.5pt; font-weight: 600; }
+        QLabel[role="desc"] { font-size: 9pt; font-weight: 400;
+                              color: palette(placeholder-text); }
+    """
 
     def __init__(self, window):
         super().__init__()
         self.window_ref = window
         bind_features(self, self.ui, window)
+        self.ui.setStyleSheet(self.STYLE)
+        self._titles: dict[str, tuple[QLabel, str]] = {}
+        for group_name, color in self.GROUPS.items():
+            group = child(self.ui, QGroupBox, group_name)
+            for button in group.findChildren(QPushButton):
+                self._make_tile(button, color)
+            if isinstance(group.layout(), QVBoxLayout):
+                group.layout().addStretch()  # плитки прижаты к верху группы
         self.btn_admin = child(self.ui, QPushButton, "btnRelaunchAdmin")
         self.btn_admin.setVisible(not is_admin())  # с правами администратора кнопка не нужна
         if window is not None:
             self.btn_admin.clicked.connect(lambda checked=False: window.restart_as_admin())
-        for button_id, feature in FEATURES.items():
-            button = self.ui.findChild(QPushButton, button_id)
-            if button is None:  # кнопку убрали в Designer
-                continue
-            # handler = HANDLERS.get(button_id)
-            # if handler is None:
-            #     button.setText(f"{button.text()}   (скоро)")
-            # button.setToolTip(feature.plan)
-            # button.clicked.connect(
-            #     lambda checked=False, f=feature, h=handler: self._run(f, h))
+        self.apply_access()
 
-    def _run(self, feature, handler) -> None:
-        if handler is None:
-            QMessageBox.information(
-                self, feature.title, f"Функция в разработке.\n\nПлан:\n{feature.plan}")
-            return
-        try:
-            handler(self.window_ref)
-        except Exception as e:  # ошибка в функции не должна ронять программу
-            QMessageBox.critical(self, feature.title, f"Ошибка: {e}")
+    def _make_tile(self, button: QPushButton, color: str) -> None:
+        """Плитка вместо плоской кнопки: значок в цветном квадрате, название, описание."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QHBoxLayout
+        icon, desc = self.TILES.get(button.objectName(), ("•", ""))
+        title = button.text()
+        button.setText("")
+        button.setAccessibleName(title)
+        button.setProperty("tile", True)
+        button.setMinimumHeight(66)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(button)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(12)
+        badge = QLabel(icon)
+        badge.setFixedSize(42, 42)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        c = QColor(color)
+        badge.setStyleSheet(f"background: rgba({c.red()}, {c.green()}, {c.blue()}, 0.18); "
+                            f"border: 1px solid rgba({c.red()}, {c.green()}, {c.blue()}, 0.5); "
+                            "border-radius: 9px; font-size: 17pt;")
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        name = QLabel(title)
+        name.setProperty("role", "title")
+        about = QLabel(desc)
+        about.setProperty("role", "desc")
+        about.setWordWrap(True)
+        text.addWidget(name)
+        text.addWidget(about)
+        row.addWidget(badge)
+        row.addLayout(text, 1)
+        for label in (badge, name, about):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._titles[button.objectName()] = (name, title)
+
+    def apply_access(self) -> None:
+        """Запрещённые инструменты неактивны, подсказка — где снять запрет."""
+        from ui import access
+        for button_id in access.TOOL_LOCKS:
+            button = self.ui.findChild(QPushButton, button_id)
+            if button is not None:
+                allowed = access.allowed(button_id)
+                button.setEnabled(allowed)
+                button.setToolTip(FEATURES[button_id].plan if allowed else access.LOCKED_TIP)
+                if button_id in self._titles:
+                    label, title = self._titles[button_id]
+                    label.setText(title if allowed else f"{title}   🔒")
 
 
 class SettingsPage(_UiPage):
     UI_NAME = "settings_page"
     changed = Signal(str, object)  # ключ, новое значение
+    advanced_requested = Signal()  # кнопка «Открыть дополнительные настройки и отладку»
 
     def __init__(self):
         super().__init__()
@@ -143,26 +300,73 @@ class SettingsPage(_UiPage):
         self.spn_threshold = child(ui, QSpinBox, "spnThreshold")
         self.spn_workers = child(ui, QSpinBox, "spnWorkers")
         self.spn_interval = child(ui, QSpinBox, "spnInterval")
-        self.chk_tray = child(ui, QCheckBox, "chkTray")
         self.chk_explorer = child(ui, QCheckBox, "chkExplorerMenu")
+        self.chk_decoys = child(ui, QCheckBox, "chkDecoys")
+        self.group_scan = child(ui, QGroupBox, "groupScan")
+        self.group_scan.setVisible(False)  # открывается паролем режима отладки
+        self.group_locks = child(ui, QGroupBox, "groupLocks")
+        self.group_locks.setVisible(False)
+        from scanner import cpucores
+        from scanner.pool import MODES
+        self.cmb_scan_mode = child(ui, QComboBox, "cmbScanMode")
+        self.cmb_scan_mode.clear()
+        self._modes = list(MODES)
+        for key in self._modes:
+            count, title, _ = MODES[key]
+            self.cmb_scan_mode.addItem(f"{title} ({count} процесса)" if count < 5
+                                       else f"{title} ({count} процессов)")
+        self.lbl_scan_mode = child(ui, QLabel, "lblScanModeHint")
+        self.chk_ecores = child(ui, QCheckBox, "chkEcoresOnly")
+        self.lbl_ecores = child(ui, QLabel, "lblEcoresHint")
+        ecore_text = ("Если испытываете проблемы с производительностью, включите данный "
+                      "параметр, чтобы все процессы проверки работали только на "
+                      "энергоэффективных ядрах и не отнимали производительные у игр, "
+                      "браузера и других программ. Проверка станет медленнее.")
+        if cpucores.efficiency_cpus():
+            self.lbl_ecores.setText(ecore_text + " " + cpucores.describe().capitalize() + ".")
+        else:
+            self.chk_ecores.setEnabled(False)
+            self.lbl_ecores.setText("Недоступно: в этом процессоре нет энергоэффективных "
+                                    "ядер (" + cpucores.describe() + ").")
+        self.chk_ecores.setToolTip(ecore_text)
+        self.chk_revocation = child(ui, QCheckBox, "chkRevocation")
+        self.locks = {key: child(ui, QCheckBox, name) for key, name in (
+            ("lock/protection", "chkLockProtection"), ("lock/network", "chkLockNetwork"),
+            ("lock/restore_point", "chkLockRestorePoint"), ("lock/sfc_dism", "chkLockSfcDism"),
+            ("lock/memory", "chkLockMemory"), ("lock/usb", "chkLockUsb"))}
+        self.btn_advanced = child(ui, QPushButton, "btnAdvanced")
+        self.btn_advanced.clicked.connect(lambda checked=False: self.advanced_requested.emit())
         self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_block_exit,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
-                     self.spn_workers, self.spn_interval, self.chk_tray,
-                     self.chk_explorer,)
+                     self.spn_workers, self.spn_interval,
+                     self.chk_explorer, self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
+                     self.chk_revocation, *self.locks.values())
         self.load_values()
 
         self.chk_autostart.toggled.connect(self._on_autostart)
         self.chk_ask_admin.toggled.connect(lambda v: self._save("startup/ask_admin", v))
         self.chk_block_exit.toggled.connect(lambda v: self._save("general/block_exit", v))
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
-        self.chk_tray.toggled.connect(lambda v: self._save("general/close_to_tray", v))
         self.chk_explorer.toggled.connect(self._on_explorer_menu)
+        self.chk_decoys.toggled.connect(lambda v: self._save("protect/decoys", v))
         self.cmb_theme.currentIndexChanged.connect(
             lambda i: self._save("general/theme", THEMES[i]))
         self.spn_threshold.valueChanged.connect(lambda v: self._save("scan/threshold", v))
         self.spn_workers.valueChanged.connect(lambda v: self._save("scan/workers", v))
         self.spn_interval.valueChanged.connect(lambda v: self._save("process/interval", v))
+        self.cmb_scan_mode.currentIndexChanged.connect(self._on_scan_mode)
+        self.chk_ecores.toggled.connect(lambda v: self._save("scan/ecores_only", v))
+        self.chk_revocation.toggled.connect(lambda v: self._save("scan/revocation", v))
+        for key, box in self.locks.items():
+            box.toggled.connect(lambda v, k=key: self._save(k, v))
         child(ui, QPushButton, "btnReset").clicked.connect(lambda checked=False: self._reset())
+
+    def set_debug(self, on: bool) -> None:
+        """Разделы «Проверка» и «Запреты» видны только в режиме отладки."""
+        self.group_scan.setVisible(on)
+        self.group_locks.setVisible(on)
+        self.btn_advanced.setText("Скрыть дополнительные настройки и отладку" if on
+                                  else "Открыть дополнительные настройки и отладку")
 
     def load_values(self) -> None:
         for widget in self._all:
@@ -171,15 +375,33 @@ class SettingsPage(_UiPage):
         self.chk_ask_admin.setChecked(cfg.get("startup/ask_admin"))
         self.chk_block_exit.setChecked(cfg.get("general/block_exit"))
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
-        self.chk_tray.setChecked(cfg.get("general/close_to_tray"))
         self.chk_explorer.setChecked(cfg.explorer_menu_enabled())
+        self.chk_decoys.setChecked(cfg.get("protect/decoys"))
         theme = cfg.get("general/theme")
         self.cmb_theme.setCurrentIndex(THEMES.index(theme) if theme in THEMES else 0)
         self.spn_threshold.setValue(cfg.get("scan/threshold"))
         self.spn_workers.setValue(cfg.get("scan/workers"))
         self.spn_interval.setValue(cfg.get("process/interval"))
+        mode = cfg.get("scan/mode")
+        self.cmb_scan_mode.setCurrentIndex(self._modes.index(mode) if mode in self._modes else 1)
+        self._show_mode_hint()
+        self.chk_ecores.setChecked(cfg.get("scan/ecores_only") and self.chk_ecores.isEnabled())
+        self.chk_revocation.setChecked(cfg.get("scan/revocation"))
+        for key, box in self.locks.items():
+            box.setChecked(cfg.get(key))
         for widget in self._all:
             widget.blockSignals(False)
+
+    def _show_mode_hint(self) -> None:
+        from scanner.pool import MODES
+        key = self._modes[max(0, self.cmb_scan_mode.currentIndex())]
+        count, title, hint = MODES[key]
+        self.lbl_scan_mode.setText(f"{title}: {hint[0].lower() + hint[1:]}. Каждый процесс "
+                                   f"занимает одно ядро и около 70 МБ памяти на время проверки.")
+
+    def _on_scan_mode(self, index: int) -> None:
+        self._show_mode_hint()
+        self._save("scan/mode", self._modes[index])
 
     def _save(self, key: str, value) -> None:
         cfg.set_(key, value)
@@ -204,7 +426,8 @@ class SettingsPage(_UiPage):
         except OSError:
             pass
         self.load_values()
-        for key in ("general/on_top", "general/theme", "scan/threshold"):
+        for key in ("general/on_top", "general/theme", "scan/threshold", "scan/mode",
+                    "protect/decoys", *self.locks):
             self.changed.emit(key, cfg.get(key))
 
     def _on_explorer_menu(self, checked: bool) -> None:
@@ -246,7 +469,6 @@ class AboutPage(_UiPage):
 class DebugPage(_UiPage):
     """Служебная страница: видна только в режиме отладки."""
     UI_NAME = "debug_page"
-    update_databases = Signal()
     password_changed = Signal(bool)  # True: пароль задан
 
     def __init__(self, window, gate: PasswordGate | None = None):
@@ -254,26 +476,94 @@ class DebugPage(_UiPage):
         self.gate = gate
         self.lbl_hashes = child(self.ui, QLabel, "lblHashes")
         self.lbl_rules = child(self.ui, QLabel, "lblRules")
+        self.lbl_c2 = child(self.ui, QLabel, "lblC2")
+        self.lbl_updated = child(self.ui, QLabel, "lblUpdated")
         self.lbl_password = child(self.ui, QLabel, "lblPasswordState")
         self.btn_set_password = child(self.ui, QPushButton, "btnSetPassword")
         self.btn_remove_password = child(self.ui, QPushButton, "btnRemovePassword")
-        child(self.ui, QPushButton, "btnUpdateDatabases").clicked.connect(
-            lambda checked=False: self.update_databases.emit())
+        self.btn_default_password = child(self.ui, QPushButton, "btnDefaultPassword")
         self.btn_set_password.clicked.connect(lambda checked=False: self.set_password())
         self.btn_remove_password.clicked.connect(lambda checked=False: self.remove_password())
+        self.btn_default_password.clicked.connect(lambda checked=False: self.toggle_default())
         bind_features(self, self.ui, window)
         self.update_password_state()
+        self.lbl_activity = child(self.ui, QLabel, "lblActivityState")
+        child(self.ui, QPushButton, "btnOpenActivity").clicked.connect(
+            lambda checked=False: self.open_activity())
+        child(self.ui, QPushButton, "btnActivityInfo").clicked.connect(
+            lambda checked=False: self.show_activity_info())
+        child(self.ui, QPushButton, "btnActivityFolder").clicked.connect(
+            lambda checked=False: self._open_path(self._activity_dir()))
+
+    @staticmethod
+    def _activity_dir():
+        from recovery import activity
+        activity.ACTIVITY_DIR.mkdir(parents=True, exist_ok=True)
+        return activity.ACTIVITY_DIR
+
+    def _open_path(self, path) -> None:
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.warning(self, "Отчёт", f"Не удалось открыть {path}")
+
+    def open_activity(self) -> None:
+        from recovery import activity
+        try:
+            path = activity.write_report()
+        except OSError as e:
+            QMessageBox.warning(self, "Отчёт", f"Не удалось составить отчёт: {e}")
+            return
+        self._open_path(path)
+
+    def show_activity_info(self) -> None:
+        from recovery import activity
+        from toolbox.windows import info_dialog
+        info_dialog(self, "Какие данные собираются", activity.description(), 660)
+
+    def set_activity_state(self, first_run: float, last_end: float) -> None:
+        from recovery import activity
+        period = activity.PERIOD_DAYS * activity.DAY
+        ends = activity.due_periods(first_run, last_end, time.time() + period)
+        next_end = ends[-1][1] if ends else time.time()
+        events = len(activity.read_events())
+        self.lbl_activity.setText(
+            f"Программа записывает свои действия и находки в отчёт (событий сейчас: "
+            f"{events}). Раз в {activity.PERIOD_DAYS} дня готовится отчёт за период для "
+            f"отправки автору; следующий — {time.strftime('%d.%m.%Y %H:%M', time.localtime(next_end))}. "
+            "Отправка пока не включена: отчёты остаются в папке reports\\activity\\outbox.")
 
     def update_password_state(self) -> None:
-        has = self.gate is not None and self.gate.has_password()
-        self.btn_set_password.setText("Сменить пароль" if has else "Установить пароль")
+        own = self.gate is not None and self.gate.has_own_password()
+        default = self.gate is not None and self.gate.has_default()
+        self.btn_set_password.setText("Сменить свой пароль" if own else "Добавить свой пароль")
         self.btn_set_password.setEnabled(self.gate is not None)
-        self.btn_remove_password.setEnabled(has)
-        self.lbl_password.setText(
-            "Пароль задан. Чтобы скрыть или открыть вкладку «Отладка», наберите его на "
-            "клавиатуре в любом окне программы." if has else
-            "Пароль не задан, поэтому режим отладки включён всегда. Задайте пароль, чтобы "
-            "скрыть вкладку: после этого она открывается только набором пароля на клавиатуре.")
+        self.btn_remove_password.setText("Убрать свой пароль")
+        self.btn_remove_password.setEnabled(own and default)
+        self.btn_default_password.setText("Убрать пароль по умолчанию" if default
+                                          else "Вернуть пароль по умолчанию")
+        self.btn_default_password.setEnabled(own or not default)
+        text = ("Дополнительные настройки и эта вкладка открываются кнопкой на странице "
+                "«Настройки» после ввода пароля. ")
+        text += ("Пароль по умолчанию действует и показывается подсказкой в окне ввода. "
+                 if default else "Пароль по умолчанию убран: подсказки в окне ввода нет. ")
+        if own:
+            text += ("Свой пароль задан: он хранится только на этом компьютере и в релизную "
+                     "версию не попадает.")
+        else:
+            text += "Чтобы убрать пароль по умолчанию, сначала задайте свой."
+        self.lbl_password.setText(text)
+
+    def toggle_default(self) -> None:
+        enable = not self.gate.has_default()
+        if not enable and QMessageBox.question(
+                self, "Пароль", "Убрать пароль по умолчанию? Останется только ваш пароль, "
+                "подсказки в окне ввода не будет.") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.gate.set_default_enabled(enable)
+        except (ValueError, OSError) as e:
+            QMessageBox.warning(self, "Пароль", str(e))
+            return
+        self.update_password_state()
 
     def set_password(self) -> None:
         dialog = QDialog(self)
@@ -302,23 +592,31 @@ class DebugPage(_UiPage):
                 continue
             self.update_password_state()
             self.password_changed.emit(True)
-            QMessageBox.information(
-                self, "Пароль", "Пароль сохранён. Вкладка остаётся открытой до тех пор, "
-                "пока вы не наберёте пароль ещё раз или не перезапустите программу.")
+            also = " Пароль по умолчанию тоже продолжает действовать." \
+                if self.gate.has_default() else ""
+            QMessageBox.information(self, "Пароль", "Пароль сохранён." + also)
             return
 
     def remove_password(self) -> None:
         answer = QMessageBox.question(
-            self, "Пароль", "Убрать пароль? Режим отладки будет включён всегда.")
+            self, "Пароль", "Убрать свой пароль? Останется пароль по умолчанию.")
         if answer == QMessageBox.StandardButton.Yes:
             try:
                 self.gate.remove_password()
-            except OSError as e:
-                QMessageBox.warning(self, "Пароль", f"Не удалось удалить файл пароля: {e}")
+            except (OSError, ValueError) as e:
+                QMessageBox.warning(self, "Пароль", f"Не удалось убрать пароль: {e}")
                 return
             self.update_password_state()
             self.password_changed.emit(False)
 
-    def refresh(self, hashes: int, rules: int, rule_files: int) -> None:
-        self.lbl_hashes.setText(f"{hashes:,}".replace(",", " "))
+    def refresh(self, hashes: int, rules: int, rule_files: int, c2: int = 0,
+                updated: float = 0, md5: int = 0) -> None:
+        text = f"{hashes:,}".replace(",", " ")
+        if md5:
+            text += f" (из них MD5 VirusShare: {md5:,})".replace(",", " ")
+        self.lbl_hashes.setText(text)
         self.lbl_rules.setText(f"{rules:,} (в {rule_files} файлах)".replace(",", " "))
+        self.lbl_c2.setText(f"{c2:,}".replace(",", " "))
+        self.lbl_updated.setText(
+            time.strftime("%d.%m.%Y %H:%M:%S", time.localtime(updated)) if updated else
+            "ещё не обновлялись (обновятся при первом запуске с доступом к сети)")

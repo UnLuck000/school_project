@@ -6,15 +6,15 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel,
-    QMenu, QPlainTextEdit, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMenu, QPlainTextEdit, QPushButton,
+    QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer.code import hexdump
 from processmanager import memdeep
 from processmanager.colors import text_color
 from processmanager.system import open_in_explorer
+from ui.widgets import SortItem, make_tree
 
 LEVEL_COLORS = {"suspicious": (255, 160, 110), "check": (255, 235, 150)}
 LEVEL_TEXT = {"suspicious": "Подозрительно", "check": "На проверку", "normal": ""}
@@ -22,29 +22,14 @@ NUM_ROLE = Qt.ItemDataRole.UserRole + 1
 FILTERS = ["Подозрительные и на проверку", "Все исполняемые", "Все регионы"]
 
 
-class _Item(QTreeWidgetItem):
+class _Item(SortItem):
     """Строка с числовой сортировкой по колонкам, где задано NUM_ROLE."""
-    def __lt__(self, other):
-        tree = self.treeWidget()
-        col = tree.sortColumn() if tree else 0
-        a, b = self.data(col, NUM_ROLE), other.data(col, NUM_ROLE)
-        if a is not None and b is not None:
-            return a < b
-        return self.text(col).lower() < other.text(col).lower()
+    SORT_ROLE = NUM_ROLE
 
 
 def _tree(columns: list[str], widths: list[int]) -> QTreeWidget:
-    tree = QTreeWidget()
-    tree.setHeaderLabels(columns)
-    tree.setRootIsDecorated(False)
-    tree.setUniformRowHeights(True)
+    tree = make_tree(columns, widths)
     tree.setSortingEnabled(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-    header = tree.header()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setStretchLastSection(True)
-    for i, w in enumerate(widths):
-        tree.setColumnWidth(i, w)
     tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     tree.customContextMenuRequested.connect(lambda pos, t=tree: _copy_menu(t, pos))
     return tree

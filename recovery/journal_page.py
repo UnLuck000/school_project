@@ -6,7 +6,11 @@ from PySide6.QtWidgets import (
 )
 
 import autoruns.actions  # noqa: F401  (регистрирует откат действий автозапуска)
+import scanner.overrides  # noqa: F401  (откат исключений хэшей и правил)
+import networkmonitor.firewall  # noqa: F401  (регистрирует откат блокировок)
 import recovery.actions  # noqa: F401  (регистрирует откат исправлений системы)
+import usbguard.repair  # noqa: F401  (откат восстановления флешки)
+import toolbox.decoys  # noqa: F401  (откат создания и удаления ловушек)
 from recovery import journal
 
 ID_ROLE = Qt.ItemDataRole.UserRole + 1

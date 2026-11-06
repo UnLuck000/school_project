@@ -68,7 +68,7 @@ def _run_sources():
     ]
 
 
-def _disabled_names(hive, subkey) -> set[str]:
+def disabled_names(hive, subkey) -> set[str]:
     """Записи автозапуска, отключённые пользователем в «Автозагрузке» диспетчера задач."""
     names: set[str] = set()
     try:
@@ -87,7 +87,7 @@ def _disabled_names(hive, subkey) -> set[str]:
     return names
 
 
-def _command_exe(command: str) -> str:
+def command_exe(command: str) -> str:
     """Путь к exe из строки запуска вида: "C:\\Program Files\\X\\x.exe" --flag"""
     command = os.path.expandvars(command.strip())
     if command.startswith('"'):
@@ -110,7 +110,7 @@ def load_autostart() -> tuple[set[str], set[str]]:
         return exes, names
 
     for hive, path, approved in _run_sources():
-        disabled = _disabled_names(hive, approved) if approved else set()
+        disabled = disabled_names(hive, approved) if approved else set()
         try:
             with winreg.OpenKey(hive, path) as key:
                 i = 0
@@ -122,7 +122,7 @@ def load_autostart() -> tuple[set[str], set[str]]:
                     i += 1
                     if name in disabled or not isinstance(value, str):
                         continue
-                    exe = _command_exe(value)
+                    exe = command_exe(value)
                     if exe:
                         exes.add(os.path.normcase(os.path.normpath(exe)))
         except OSError:

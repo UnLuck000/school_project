@@ -7,12 +7,11 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import psutil
-
 from autoruns.model import Entry, raise_level
-from processmanager.origin import _command_exe, _disabled_names
+from processmanager.origin import command_exe, disabled_names
 from scanner.engine import check_file
-from scanner.signature import describe, inspect_signature
+from scanner.engine import revocation_enabled
+from scanner.signature import check_revocation, describe, inspect_signature
 
 try:
     import winreg
@@ -109,7 +108,7 @@ def collect_registry() -> list[Entry]:
             approved = APPROVED + r"\Run32"
         elif path.endswith(r"CurrentVersion\Run"):
             approved = APPROVED + r"\Run"
-        disabled = _disabled_names(hive, approved) if approved else set()
+        disabled = disabled_names(hive, approved) if approved else set()
         try:
             key = winreg.OpenKey(hive, path)
         except OSError:
@@ -127,7 +126,7 @@ def collect_registry() -> list[Entry]:
                 entries.append(Entry(
                     kind="run", name=name or "(по умолчанию)",
                     location=f"{hive_name}\\{path}", command=data,
-                    exe=_resolve_exe(_command_exe(data)), enabled=name not in disabled,
+                    exe=_resolve_exe(command_exe(data)), enabled=name not in disabled,
                     extra={"hive": hive_name, "path": path, "value": name}))
     return entries
 
@@ -151,7 +150,7 @@ def collect_winlogon() -> list[Entry]:
             flags = [] if parts == [default] else ["значение отличается от стандартного"]
             entries.append(Entry(
                 kind="winlogon", name=value, location=f"HKLM\\{path}", command=str(data),
-                exe=_resolve_exe(_command_exe(str(data).split(",")[0])), flags=flags))
+                exe=_resolve_exe(command_exe(str(data).split(",")[0])), flags=flags))
     return entries
 
 
@@ -241,7 +240,7 @@ def collect_services() -> list[Entry]:
         display = str(_reg_value(base, "DisplayName") or name)
         if display.startswith("@"):  # строка-ссылка на ресурс: показываем имя службы
             display = name
-        host = _resolve_exe(_command_exe(image))
+        host = _resolve_exe(command_exe(image))
         dll, _, delayed = _service_values(name)
         entries.append(Entry(
             kind="service", name=name, location=f"Служба: {display}", command=image,
@@ -280,7 +279,7 @@ def _collect_tasks_xml() -> tuple[list[Entry], list[str]]:
                 where += f" ({', '.join(triggers)})"
             entries.append(Entry(
                 kind="task", name=name, location=where, command=f"{command} {args}".strip(),
-                exe=_resolve_exe(_command_exe(command)), enabled=enabled,
+                exe=_resolve_exe(command_exe(command)), enabled=enabled,
                 extra={"task": name}))
             break  # одна запись на задачу
     notes = ([f"Не удалось прочитать задач планировщика: {unreadable} (нужны права администратора)"]
@@ -312,7 +311,7 @@ def collect_tasks() -> tuple[list[Entry], list[str]]:
         entries.append(Entry(
             kind="task", name=name, location=where,
             command=f"{execute} {d.get('g') or ''}".strip(),
-            exe=_resolve_exe(_command_exe(execute)), enabled=d.get("s") != "Disabled",
+            exe=_resolve_exe(command_exe(execute)), enabled=d.get("s") != "Disabled",
             extra={"task": name}))
     notes = ([f"Задач без исполняемого файла (системные COM-обработчики) пропущено: {without_exe}"]
              if without_exe else [])
@@ -338,7 +337,7 @@ def collect_wmi() -> list[Entry]:
         command = d.get("cmd") or (d.get("script") or "")[:300]
         entries.append(Entry(kind="wmi", name=d.get("name") or "?",
                              location=f"WMI ({d.get('cls')})", command=command,
-                             exe=_resolve_exe(_command_exe(command)) if d.get("cmd") else ""))
+                             exe=_resolve_exe(command_exe(command)) if d.get("cmd") else ""))
     return entries
 
 
@@ -366,6 +365,7 @@ class Context:
     rules: object
     whitelist: set
     cache: dict = field(default_factory=dict)  # путь -> (подпись, статус, вердикт)
+    verdicts: dict = field(default_factory=dict)  # путь -> вердикт, посчитанный заранее (scanner.pool)
 
 
 def assess(e: Entry, ctx: Context) -> None:
@@ -383,15 +383,22 @@ def assess(e: Entry, ctx: Context) -> None:
         cached = ctx.cache.get(exe)
         if cached is None:
             sig = inspect_signature(Path(exe))
-            try:
-                verdict = check_file(Path(exe), ctx.signatures, ctx.rules, ctx.whitelist) or ""
-            except OSError:
-                verdict = ""
+            if revocation_enabled():
+                sig = check_revocation(Path(exe), sig)
+            verdict = ctx.verdicts.get(exe)
+            if verdict is None:
+                try:
+                    verdict = check_file(Path(exe), ctx.signatures, ctx.rules, ctx.whitelist) or ""
+                except OSError:
+                    verdict = ""
             cached = ctx.cache[exe] = (describe(sig), sig.status, verdict)
         e.sig, e.sig_status, e.verdict = cached
         if e.verdict:
             level = raise_level(level, "threat")
             flags.append(f"обнаружено: {e.verdict}")
+        elif e.sig_status == "revoked":
+            level = raise_level(level, "threat")
+            flags.append("сертификат подписи отозван")
         elif e.sig_status == "invalid":
             level = raise_level(level, "suspicious")
             flags.append("подпись недействительна")

@@ -2,6 +2,7 @@
 проверка каждого файла движком, действия по правой кнопке и свойства папки."""
 import os
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QObject, Qt, QUrl, Signal
@@ -14,9 +15,10 @@ from PySide6.QtWidgets import (
 from analyzer import fileops
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
-from scanner.engine import check_file
+from scanner import pool as scan_pool
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
+from ui.widgets import item_less
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -27,7 +29,7 @@ COLUMNS = ["Имя", "Тип", "Размер", "Изменён", "Проверк
 
 
 class _Bridge(QObject):
-    checked = Signal(int, str, str, str)    # номер запроса, путь, уровень, текст
+    checked = Signal(int, object)           # номер запроса, [(путь, уровень, текст)]
     finished = Signal(int, int, int)        # номер запроса, угроз, подозрительных
     props = Signal(int, object)             # номер запроса, свойства папки
     item_props = Signal(str, object)        # заголовок окна, свойства файла или папки
@@ -37,18 +39,14 @@ class _Item(QTreeWidgetItem):
     """Папки всегда выше файлов, размер сортируется как число."""
     def __lt__(self, other):
         tree = self.treeWidget()
-        col = tree.sortColumn() if tree else 0
         a_dir, b_dir = self.data(0, IS_DIR_ROLE), other.data(0, IS_DIR_ROLE)
         if a_dir != b_dir:
             ascending = tree is None or tree.header().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
             return a_dir if ascending else b_dir
-        a, b = self.data(col, SORT_ROLE), other.data(col, SORT_ROLE)
-        if a is not None and b is not None:
-            return a < b
-        return self.text(col).lower() < other.text(col).lower()
+        return item_less(self, other, SORT_ROLE)
 
 
-def _rules_and_bases():
+def rules_and_bases():
     """Базы загружаются один раз за запуск (правила кэширует memscan)."""
     global _bases
     if _bases is None:
@@ -57,6 +55,14 @@ def _rules_and_bases():
 
 
 _bases = None
+SCAN_WORKERS = max(2, min(8, (os.cpu_count() or 4)))  # потоков для разбора срабатываний
+BATCH_SECONDS = 0.15  # результаты уходят в интерфейс пачками: таблица не дёргается на каждом файле
+
+
+def reset_bases() -> None:
+    """Базы обновились: при следующей проверке загрузить их заново."""
+    global _bases
+    _bases = None
 
 
 def classify(reason: str | None) -> tuple[str, str]:
@@ -65,8 +71,8 @@ def classify(reason: str | None) -> tuple[str, str]:
         return "clean", "Чисто"
     if reason.startswith("Heuristic"):
         return "suspicious", "Подозрительно: " + reason.removeprefix("Heuristic: ")
-    if reason == "hash match":
-        return "threat", "Угроза: хэш в базе сигнатур"
+    if reason.startswith("hash match"):
+        return "threat", "Угроза: хэш в базе сигнатур" + reason.removeprefix("hash match")
     return "threat", "Угроза: " + reason
 
 
@@ -150,6 +156,7 @@ class FolderView(QWidget):
         self._cancel = cancel = threading.Event()
         self._request += 1
         request = self._request
+        self._found: list[str] = []  # угрозы и подозрительные — для отчёта о работе
         self.folder = os.path.abspath(folder)
         self.tree.setSortingEnabled(False)
         self.tree.clear()
@@ -194,23 +201,32 @@ class FolderView(QWidget):
     def _scan_job(self, request: int, files: list[str], cancel: threading.Event) -> None:
         threats = suspicious = 0
         try:
-            signatures, rules, whitelist = _rules_and_bases()
+            signatures, rules, whitelist = rules_and_bases()
         except OSError as e:
-            for path in files:
-                self.bridge.checked.emit(request, path, "error", f"Базы не загружены: {e}")
+            self.bridge.checked.emit(request, [(path, "error", f"Базы не загружены: {e}")
+                                               for path in files])
             self.bridge.finished.emit(request, 0, 0)
             return
-        for path in files:
-            if cancel.is_set():
-                return
-            try:
-                level, text = classify(check_file(Path(path), signatures, rules, whitelist))
-            except OSError as e:
-                level, text = "error", f"Не прочитан: {e.strerror or e}"
+
+        # проверка идёт в рабочих процессах (scanner.pool): интерфейс не делит с ней GIL;
+        # повторная проверка неизменённых файлов берёт ответ из кэша вердиктов
+        batch, sent = [], time.monotonic()
+        for path, reason, error in scan_pool.check_files(files, signatures, rules, whitelist,
+                                                         cancel=cancel):
+            if error is not None:
+                level, text = "error", f"Не прочитан: {error.strerror or error}"
+            else:
+                level, text = classify(reason)
             threats += level == "threat"
             suspicious += level == "suspicious"
-            self.bridge.checked.emit(request, path, level, text)
-        self.bridge.finished.emit(request, threats, suspicious)
+            batch.append((path, level, text))
+            if time.monotonic() - sent >= BATCH_SECONDS:
+                self.bridge.checked.emit(request, batch)
+                batch, sent = [], time.monotonic()
+        if batch:
+            self.bridge.checked.emit(request, batch)
+        if not cancel.is_set():
+            self.bridge.finished.emit(request, threats, suspicious)
 
     def _props_job(self, request: int, folder: str, cancel: threading.Event) -> None:
         try:
@@ -220,17 +236,22 @@ class FolderView(QWidget):
         if not cancel.is_set():
             self.bridge.props.emit(request, rows)
 
-    def _on_checked(self, request: int, path: str, level: str, text: str) -> None:
-        item = self._items.get(path)
-        if request != self._request or item is None:
+    def _on_checked(self, request: int, batch) -> None:
+        if request != self._request:
             return
-        item.setText(4, text)
-        item.setToolTip(4, text)
-        rgb = COLORS.get(level)
-        if rgb:
-            for col in range(len(COLUMNS)):
-                item.setBackground(col, QBrush(QColor(*rgb)))
-                item.setForeground(col, QBrush(text_color(rgb)))
+        for path, level, text in batch:
+            item = self._items.get(path)
+            if item is None:
+                continue
+            item.setText(4, text)
+            item.setToolTip(4, text)
+            if level in ("threat", "suspicious"):
+                self._found.append(f"{path}: {text}")
+            rgb = COLORS.get(level)
+            if rgb:
+                for col in range(len(COLUMNS)):
+                    item.setBackground(col, QBrush(QColor(*rgb)))
+                    item.setForeground(col, QBrush(text_color(rgb)))
 
     def _on_finished(self, request: int, threats: int, suspicious: int) -> None:
         if request != self._request:
@@ -245,6 +266,9 @@ class FolderView(QWidget):
             f"padding: 8px; border-radius: 6px; font-size: 11pt; font-weight: 600; "
             f"background: rgb{rgb}; color: {text_color(rgb).name()};")
         self.summary.setText(f"{self.folder}: {text}. Вложенные папки не проверялись.")
+        from recovery import activity
+        activity.record("scan_folder", f"{self.folder}: {text}", found=list(self._found))
+        self.summary.setToolTip("Ядра для проверки: " + scan_pool.get_pool().cores_text())
         self.status.emit(f"Проверка папки завершена. {text}", 10000)
         self.scan_done.emit()
 

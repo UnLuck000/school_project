@@ -8,20 +8,114 @@
   в проекте много относительных путей, `quarantine.py` вычисляет путь при импорте).
 - Тесты: `pytest` (pytest.ini задаёт pythonpath). Часть тестов работает с реестром Windows
   во временных ветках HKCU\Software\StudyAVTest.
-- Нативный модуль (энтропия на C++): `python setup.py build_ext --inplace`; без него
-  работает запасной вариант на Python (`scanner/features.py`).
+- Нативный модуль на C++ (энтропия; read_regions: чтение приватной памяти процесса для YARA;
+  pe_info в native/src/pe.cpp: разбор PE для эвристики — секции с энтропией, точка входа,
+  импорт; в 7-8 раз быстрее pefile, результаты совпадают, сверяет tests/test_native_pe.py):
+  `python setup.py build_ext --inplace`; без него работает запасной вариант на Python/ctypes
+  и pefile.
+  Visual Studio 18 setuptools сам не находит: сборка из cmd после
+  `vcvars64.bat` (VC\Auxiliary\Build) с `set DISTUTILS_USE_SDK=1`.
+- Базы: `python updater.py [all|hashes|rules|ips|domains]`; в программе только автообновление раз в
+  сутки, без сообщений (cfg `db/last_update`, отсчёт от 1970 года: первый запуск обновляет
+  сразу). Кнопки ручного обновления нет.
 
 ## Структура
-- scanner/: hashing, engine (check_file: белый список → хэш → YARA → эвристика PE), yara_engine,
-  heuristics, signature (WinVerifyTrust, каталоги, издатель), whitelist, exclusions
-- processmanager/: диспетчер процессов (отдельное окно), colors, origin, memscan (YARA по памяти),
+- scanner/: hashing (HashDB: текстовые базы в памяти, VirusShare — отсортированные MD5 в
+  feeds/*.md5.bin, поиск двоичным поиском через mmap; source() — из какого файла хэш),
+  engine (check_file: белый список → SHA-256/MD5 → YARA → эвристика PE; пустые файлы по хэшу
+  не судятся; YARA и эвристика не считаются угрозой при действительной подписи; кэш вердиктов
+  verdict_cache — SQLite cache/verdicts.sqlite по пути+размеру+mtime и версии баз, повторная
+  проверка без чтения файла), overrides (signatures/overrides.json: хэши, убранные из базы, и
+  отключённые правила YARA, с откатом через журнал), fpcheck (разбор срабатываний по слоям),
+  relations (неподписанная библиотека рядом с подписанным файлом: импорт или упоминание имени
+  в любую сторону; снимает только слабые срабатывания — эвристику и правила PUA/HackTool/
+  score < 70, хэш и правила вредоносов остаются), pool + worker (проверка многих файлов в
+  рабочих процессах: python -m scanner.worker, в собранной программе gui.py --scan-worker;
+  обмен pickle-кадрами через stdin/stdout; файл от 8 МБ — две задачи: хэши и остальные слои;
+  процессы с пониженным приоритетом, закрываются после 15 с простоя; движок разделён на
+  hash_verdict (в главном процессе) и analyze (в рабочем); режимы scan/mode: slow 2 процесса
+  + фоновый режим Windows, balanced 4, fast 6 — pool.MODES), cpucores (P/E-ядра через
+  GetLogicalProcessorInformationEx; чужая нагрузка = общая минус своя; P-ядра заняты — рабочие
+  процессы на E-ядрах с EcoQoS, потоки проверки памяти — тоже; настройка scan/ecores_only —
+  всегда только E-ядра),
+  yara_engine (внешние переменные filename/filepath/...,
+  автоисправление правил: неизвестный идентификатор → внешняя переменная, битое правило и
+  правила category="INFO" отключаются по одному; filter_rules при загрузке убирает правила
+  для Linux/macOS/Android (meta os, имя правила или файла, ELF/Mach-O в условии без проверки
+  PE), только для памяти (scan_context = "memory", кроме наборов для памяти), дубли и
+  REDUNDANT_FILES; итог отбора — первой строкой в logs/yara_errors.log; кэш скомпилированных правил в cache/; отчёт
+  в logs/yara_errors.log), heuristics, signature (WinVerifyTrust, каталоги, издатель;
+  check_revocation — отзыв сертификата через CRL/OCSP в отдельном потоке с таймаутом 15 с,
+  кэш на сутки, без связи revocation=unknown и статус не меняется; движок проверяет отзыв,
+  прежде чем по подписи снять срабатывание, настройка scan/revocation),
+  whitelist, exclusions
+- updater.py: домены (ThreatFox; URLhaus — выгрузка online.csv по ключу, старые ссылки
+  без ключа отвечают 410) и JA3 (SSLBL) → signatures/netfeeds/domains, netfeeds/ja3;
+  хэши (MalwareBazaar и ThreatFox по ключу abuse.ch, VirusShare без ключа),
+  правила (signature-base, ReversingLabs, Elastic, bartblaze → rules/community/<источник>/),
+  C2 (Feodo, SSLBL, C2IntelFeeds, ThreatFox → signatures/netfeeds/*.txt)
+- processmanager/: диспетчер процессов (отдельное окно), colors, origin, memscan (YARA по памяти:
+  по умолчанию только приватная память и RWX-образы, чтение порциями по 16 МБ (read_portion),
+  мелкие регионы склеиваются; совпадение у процесса с действительной подписью — статус
+  «signed» (проверить), не угроза; shared_rules — одна копия правил для защиты и сети; наборы правил
+  memory = свои + Elastic, memory_all = все, кроме уязвимых драйверов и веб-шеллов; флажок
+  «Вся память» — старый rules.match(pid)),
   enrich (фоновая проверка подписей с кэшем на диске), ntsnap (снимок процессов одним вызовом
   NtQuerySystemInformation; psutil.process_iter не использовать: O(n²) и держит GIL, интерфейс лагает),
   memdeep + memview (карта памяти через VirtualQueryEx: приватные исполняемые и RWX-регионы,
   MZ в приватной памяти, образы вне списка модулей; модули с подписями; поиск по всем процессам;
   программы с JIT — .NET, Java, браузеры — определяются по модулям и оцениваются мягче)
-- networkmonitor/: мониторинг соединений; monitor.py (корень): мониторинг папок (watchdog)
-- autoruns/: сканер автозапуска (вкладки Всё, Реестр{Run,RunOnce,Winlogon}, Папка автозагрузки,
+- networkmonitor/: мониторинг соединений (netmon) и вкладки страницы «Сеть» (panels):
+  dns_etw (DNS-запросы с PID через ETW Microsoft-Windows-DNS-Client, события 3006/3008;
+  сеанс «myav-dns»; запасной вариант — DnsGetCacheDataTable без процессов), domains (списки
+  netfeeds/domains, проверка родительских доменов, признаки DGA, отпечатки JA3 из
+  netfeeds/ja3), tls (ClientHello: SNI и JA3 через WinDivert.dll в режиме SNIFF|RECV_ONLY,
+  нужны права администратора; DLL ищется в настройке net/windivert_dir, native/windivert,
+  C:\zapret*\bin), beacon (маячки: >= 6 событий, период 5 с — 2 ч, разброс < 15%;
+  оповещение только для неподписанных программ), netmon.quiet_reason (без оповещений по
+  адресам, доменам и DGA для самой программы и её рабочих процессов и для программ с
+  действительной подписью, кроме LOLBins и распознанных файлов; в таблицах — серым),
+  domains.SHARED_SERVICES (GitHub, Discord, облака: по домену не судим, опасна ссылка), firewall (блокировка адреса или программы
+  через New-NetFirewallRule в группе «myav», с откатом через журнал); monitor.py (корень): мониторинг папок (watchdog):
+  папки пользователя (все файлы) + system_folders() (Windows, System32, автозагрузка, Tasks,
+  Temp, AppData, ProgramData, Program Files; там только EXECUTABLE_EXTS). Автокарантин
+  ВРЕМЕННО ЗАКОММЕНТИРОВАН в RealtimeMonitor._handle (угрозы помещаются в карантин вручную
+  из журнала защиты, правый клик)
+- usbguard/: scan (съёмные диски, вирус-ярлык: ярлыки с cmd/wscript — разбор .lnk по
+  MS-SHLLINK, autorun.inf, скрипты, папки без имени и скрытые; программы — scanner.pool),
+  repair (карантин, снять «скрытый», вернуть файлы из папки без имени, «прививка» —
+  папка autorun.inf; всё с откатом usb_*), window (окно «USB-накопители», auto_fixes).
+  Защита флешек работает, пока включена защита файлов: gui.start_usb_watch опрашивает диски
+  раз в 2 с; при угрозах (вирус-ярлык) сразу лечит — угрозы в карантин, файлы из папки без
+  имени обратно (с откатом), подозрительное только показывает. Инструмент «USB-накопители»
+  по умолчанию запрещён (lock/usb), пункт в трее скрыт вместе с ним
+- toolbox/: linkcheck (адрес по netfeeds, IP по C2, DGA, punycode, «@»; скачивание в
+  cache/downloads с Zone.Identifier и проверкой сканером), pwned (Have I Been Pwned,
+  k-анонимность: уходят 5 символов SHA-1, Add-Padding), decoys (файлы-ловушки в «Документах»
+  и «Изображениях» через SHGetKnownFolderPath; создаются сами вместе с защитой — ensure,
+  настройка protect/decoys в разделе «Проверка»; папка — защищённая системная (скрытый +
+  системный), файлы внутри обычные; сведения и «Открыть папку» — на странице «Защита»;
+  манифест journal/decoys.json; DecoyWatcher (mute — не тревожить при пересоздании): watchdog +
+  снимки ntsnap раз в секунду, виновник — неподписанный процесс с наибольшей записью
+  (RawProc.written = WriteTransferCount), приостанавливается psutil), windows (окна: ширина постоянная, высота по содержимому —
+  fit_height; info_dialog — длинный текст абзацами вместо QMessageBox). Кнопки «Сеть: поиск
+  пульса бота» и ловушек на «Инструментах» больше нет (маячки — вкладка страницы «Сеть»).
+  Страница «Настройки» — в QScrollArea, чтобы разделы под паролем не сжимали текст.
+  Страница «Защита» — ui/protection_page.py (только вид: карточка состояния с кнопкой,
+  «Папки под наблюдением», «Также под защитой» — системные папки, ловушки, флешки; «Журнал
+  защиты»); логика и виджеты-атрибуты (watch_list, protect_btn, protect_log...) — в gui.py
+- recovery/activity.py: отчёт о работе — события record(kind, ...) в
+  reports/activity/events.jsonl (90 дней), build_report: события по разделам KINDS + журнал
+  за период + текущие карантин, белый список, исключения. Отчёт проходит anonymize: папки профиля →
+  %USERPROFILE%/%APPDATA%/..., имена учётной записи и компьютера → %USERNAME%/%COMPUTERNAME%,
+  чужие профили → %OTHERUSER%; затем hide_names: имена файлов и папок
+  пользователя → случайные 8 символов [a-z0-9] (одно имя — один код в пределах отчёта,
+  расширение остаётся; системные места и стандартные папки — как есть). В events.jsonl
+  пути остаются настоящими. Периоды по 3 дня от
+  report/first_run, готовые — в reports/activity/outbox (report/last_end); send_report —
+  заглушка, способ отправки не выбран. DATA_DESCRIPTION — что собирается (кнопка на
+  «Отладке»). Новые действия и находки — тоже record()
+- autoruns/: сканер автозапуска (вкладки Всё, Реестр{Run, RunOnce, Winlogon}, Папка автозагрузки,
   Планировщик, Службы), действия с откатом
 - recovery/: journal (общий журнал и откат через @undo_op), checks (hosts, прокси, WinHTTP,
   обновления, брандмауэр, BCD), policies (ограничения реестра), actions, panels, window,
@@ -36,18 +130,44 @@
   Отдельного окна анализатора больше нет: open_analyzer(path) открывает эту страницу
 - ui/: боковая навигация (shell), страницы из Qt Designer (ui/designer/*.ui, загружаются
   QUiLoader), settings, theme (все темы на стиле Fusion: стиль windows11 не перекрашивается на
-  лету; список тем в theme.THEMES), tray, single_instance, registry+handlers (кнопки-заглушки)
-- ui/debug_mode.py: PasswordGate (соль + SHA-256 в debug_mode/passwords.txt, папка в .gitignore).
-  Пароля нет — режим отладки включён всегда; пароль задаётся на вкладке «Отладка». Страница
-  «Настройки» (и пункт в трее) видна только в режиме отладки
+  лету; список тем в theme.THEMES), tray, single_instance, registry+handlers (кнопки-заглушки),
+  widgets (общие make_tree, make_table, SortItem/item_less, ElidedTooltipDelegate — новые
+  деревья и таблицы создавать через них, не копировать настройки)
+- dictionaries/myav.dic — словарь проекта для проверки орфографии PyCharm (технические слова)
+- ui/debug_mode.py: PasswordGate и ask_password. Клавиатура не отслеживается: пароль
+  вводится в окне по кнопке «Открыть дополнительные настройки и отладку» (btnAdvanced на
+  странице «Настройки»). Пароль по умолчанию (он же в релизе) зашит хэшем
+  (DEFAULT_SALT/DEFAULT_HASH) и показывается подсказкой (DEFAULT_HINT); его можно убрать на
+  вкладке «Отладка», только если задан свой (строка default:off в debug_mode/passwords.txt;
+  папка в .gitignore, в релиз не попадает). При запуске режим отладки выключен. Страница
+  «Настройки» видна всем, её раздел «Проверка» (groupScan) — только в режиме отладки
+- ui/access.py: запреты (раздел groupLocks настроек, виден только после пароля). TOOL_LOCKS —
+  по галочке на инструмент (lock/restore_point, lock/sfc_dism, lock/memory; по умолчанию
+  запрещены): кнопка «Инструментов» неактивна с подсказкой LOCKED_TIP и значком замка, другие
+  пути скрыты (RecoveryWindow.set_allowed — вкладки 0-1, ProcessWindow.set_memory_allowed —
+  memdeep/inject). lock/protection и lock/network (по умолчанию выключены) запрещают
+  выключать защиту и сеть: кнопки выключения неактивны, при включении запрета выключенное
+  запускается; замер ресурсов возвращает состояние через toggle_*(force=True). Остальные
+  инструменты доступны всем
+- Страница «Инструменты» (ToolsPage): кнопки из .ui превращаются в плитки (_make_tile:
+  значок, название, описание из TILES; текст кнопки очищается, название в accessibleName)
+- Вкладка «Отладка»: «Отчёт и графики» (bench/: resources — замер своего процесса по
+  сценариям нагрузки, reportwindow — таблица, графики QtCharts, CSV и PNG в reports/; на время
+  замера включаются защита и мониторинг сети; учитываются дочерние процессы; графики
+  сглажены скользящим средним), «Ложные срабатывания» (analyzer/fpwindow)
+- ui/textutil: elide; install_message_box_limits обрезает строки QMessageBox до 300 символов
 - Главное меню: Главная, Сканирование папки/файла, Защита, Сеть, Журнал действий (вкладки
   Действия, Карантин, Белый список, Исключения), Инструменты, Настройки, О программе, Отладка.
-  Защита файлов включается при запуске всегда; general/block_exit запрещает выход (кроме
-  перезапуска от администратора и конца сеанса Windows)
+  Защита файлов и мониторинг сети включаются при запуске всегда; закрытие окна всегда
+  сворачивает в трей (настройки нет), выход — через меню значка; general/block_exit
+  запрещает выход (кроме перезапуска от администратора и конца сеанса Windows)
 - Заголовки окон Windows перекрашиваются через DWM (theme.set_title_bar): Qt сам не меняет их
   при смене темы на ходу и даже возвращает прежний цвет, поэтому установка повторяется по таймеру
 
 ## Соглашения
+- Массовую проверку файлов вести через scanner.pool.check_files, не потоками в главном
+  процессе: Python-код проверки под GIL замораживает интерфейс. Результаты отдавать в
+  интерфейс пачками.
 - Каждое изменяющее систему действие пишется в журнал (`recovery/journal.log_action`) вместе с
   данными для отмены; откат регистрируется декоратором `@undo_op`.
 - Действия без возможности отката (завершение процесса, включение защиты) в журнал не пишутся.
@@ -60,6 +180,7 @@
 - Кнопки и поля из .ui нельзя переименовывать (имена используются в коде); `pytest` проверяет XML.
 - Проверки Microsoft Defender из программы убраны намеренно (у части пользователей он вырезан).
 - Не хранить в Git: signatures/whitelist.json, signatures/exclusions.json, signatures/feeds/,
+  signatures/overrides.json, reports/,
   signatures/rules/community/, signatures/.abusech_key, journal/, cache/, logs/, debug_mode/.
 
 ## Состояние

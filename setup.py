@@ -3,6 +3,6 @@ from setuptools import setup
 
 setup(
     name="myav-native",
-    ext_modules=[Pybind11Extension("scanner._native", ["native/src/module.cpp"], cxx_std=17)],
+    ext_modules=[Pybind11Extension("scanner._native", ["native/src/module.cpp", "native/src/pe.cpp"], cxx_std=17)],
     cmdclass={"build_ext": build_ext},
 )

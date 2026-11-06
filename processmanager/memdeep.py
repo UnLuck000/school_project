@@ -58,7 +58,7 @@ class Region:
     type: int
     mapped_file: str = ""
     has_pe_header: bool = False
-    level: str = "normal"            # normal | check | suspicious
+    level: str = "normal"  # normal | check | suspicious
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -105,29 +105,32 @@ class MemoryReport:
 if sys.platform == "win32":
     from ctypes import wintypes
 
+
     class MEMORY_BASIC_INFORMATION(ctypes.Structure):
         _fields_ = [("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
                     ("AllocationProtect", wintypes.DWORD), ("PartitionId", wintypes.WORD),
                     ("RegionSize", ctypes.c_size_t), ("State", wintypes.DWORD),
                     ("Protect", wintypes.DWORD), ("Type", wintypes.DWORD)]
 
+
     class MODULEINFO(ctypes.Structure):
         _fields_ = [("lpBaseOfDll", ctypes.c_void_p), ("SizeOfImage", wintypes.DWORD),
                     ("EntryPoint", ctypes.c_void_p)]
 
-    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    _k32.OpenProcess.restype = ctypes.c_void_p
-    _k32.CloseHandle.argtypes = [ctypes.c_void_p]
-    _k32.VirtualQueryEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                    ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t]
-    _k32.VirtualQueryEx.restype = ctypes.c_size_t
-    _k32.ReadProcessMemory.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                                       ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-    _k32.ReadProcessMemory.restype = wintypes.BOOL
-    _k32.IsWow64Process.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)]
-    _k32.IsWow64Process.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.VirtualQueryEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t]
+    kernel32.VirtualQueryEx.restype = ctypes.c_size_t
+    kernel32.ReadProcessMemory.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                           ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    kernel32.ReadProcessMemory.restype = wintypes.BOOL
+    kernel32.IsWow64Process.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.IsWow64Process.restype = wintypes.BOOL
     _psapi.GetMappedFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.LPWSTR,
                                           wintypes.DWORD]
     _psapi.GetMappedFileNameW.restype = wintypes.DWORD
@@ -152,15 +155,15 @@ def _device_to_dos(path: str) -> str:
     return path
 
 
-def _read(handle, address: int, size: int) -> bytes:
+def read_memory(handle, address: int, size: int) -> bytes:
     buf = ctypes.create_string_buffer(size)
     read = ctypes.c_size_t()
-    if _k32.ReadProcessMemory(handle, ctypes.c_void_p(address), buf, size, ctypes.byref(read)):
+    if kernel32.ReadProcessMemory(handle, ctypes.c_void_p(address), buf, size, ctypes.byref(read)):
         return buf.raw[:read.value]
     return b""
 
 
-def _regions(handle) -> list[Region]:
+def list_regions(handle) -> list[Region]:
     result: list[Region] = []
     mbi = MEMORY_BASIC_INFORMATION()
     address = 0
@@ -168,8 +171,8 @@ def _regions(handle) -> list[Region]:
     name = ctypes.create_unicode_buffer(1024)
     mapped_cache: dict[int, str] = {}
     while address < limit:
-        if not _k32.VirtualQueryEx(handle, ctypes.c_void_p(address), ctypes.byref(mbi),
-                                   ctypes.sizeof(mbi)):
+        if not kernel32.VirtualQueryEx(handle, ctypes.c_void_p(address), ctypes.byref(mbi),
+                                       ctypes.sizeof(mbi)):
             break
         base = mbi.BaseAddress or 0
         size = mbi.RegionSize
@@ -183,7 +186,7 @@ def _regions(handle) -> list[Region]:
                     mapped_cache[alloc] = _device_to_dos(name.value[:n]) if n else ""
                 region.mapped_file = mapped_cache[alloc]
             if region.executable and mbi.Type == MEM_PRIVATE and base == region.allocation_base:
-                region.has_pe_header = _read(handle, base, 2) == b"MZ"
+                region.has_pe_header = read_memory(handle, base, 2) == b"MZ"
             result.append(region)
         if size == 0:
             break
@@ -301,13 +304,13 @@ def read_region(pid: int, address: int, size: int) -> tuple[bytes, str]:
     """(байты, ошибка): начало региона памяти процесса для просмотра."""
     if sys.platform != "win32":
         return b"", "Доступно только в Windows"
-    handle = _k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+    handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
     if not handle:
         return b"", "Нет доступа к памяти процесса (нужны права администратора)"
     try:
-        data = _read(handle, address, size)
+        data = read_memory(handle, address, size)
     finally:
-        _k32.CloseHandle(handle)
+        kernel32.CloseHandle(handle)
     return data, "" if data else "Память не читается (страница защищена или освобождена)"
 
 
@@ -320,22 +323,22 @@ def inspect_process(pid: int, name: str = "", with_modules: bool = True) -> Memo
     if pid in (0, 4):
         report.error = "У системных процессов System и Idle нет пользовательской памяти"
         return report
-    handle = _k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+    handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
     if not handle:
-        handle = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             report.error = ("Нет доступа к процессу (нужны права администратора, "
                             "или это защищённый процесс)")
             return report
     try:
         flag = wintypes.BOOL()
-        report.wow64 = bool(_k32.IsWow64Process(handle, ctypes.byref(flag)) and flag.value)
-        report.regions = _regions(handle)
+        report.wow64 = bool(kernel32.IsWow64Process(handle, ctypes.byref(flag)) and flag.value)
+        report.regions = list_regions(handle)
         if with_modules:
             report.modules = _modules(handle)
         if not report.regions:
             report.error = "Не удалось прочитать карту памяти (процесс защищён или завершился)"
     finally:
-        _k32.CloseHandle(handle)
+        kernel32.CloseHandle(handle)
     _assess(report)
     return report

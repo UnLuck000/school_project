@@ -19,3 +19,8 @@ journal/
 debug_mode/passwords.txt
 cache/
 signatures/exclusions.json
+signatures/overrides.json
+reports/
+
+# выгрузка проверок PyCharm
+inspections/

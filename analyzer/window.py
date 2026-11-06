@@ -4,9 +4,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-    QMessageBox, QPushButton, QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QApplication, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter,
+    QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer.report import (
@@ -19,6 +18,7 @@ from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
 
 from analyzer import fileops
+from ui.widgets import make_tree
 from analyzer.codeview import CodeTab
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
@@ -38,17 +38,10 @@ class Bridge(QObject):
     failed = Signal(str)
 
 
-def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
-    tree = QTreeWidget()
-    tree.setHeaderLabels(columns)
-    tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-    header = tree.header()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setStretchLastSection(True)
-    for i, width in enumerate(widths):
-        tree.setColumnWidth(i, width)
-    return tree
+
+def _file_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
+    """Деревья вкладок файла: одна выбранная строка, с ветками."""
+    return make_tree(columns, widths, multi=False, decorated=True)
 
 
 def _paint(item: QTreeWidgetItem, rgb: tuple[int, int, int], columns: int) -> None:
@@ -109,10 +102,10 @@ class FileView(QWidget):
         layout.addWidget(self.banner)
 
         self.tabs = QTabWidget()
-        self.general_tree = _make_tree(["Параметр", "Значение"], [220, 800])
-        self.sig_tree = _make_tree(["Параметр", "Значение"], [220, 800])
-        self.checks_tree = _make_tree(["Слой проверки", "Результат", "Подробности"], [260, 260, 600])
-        self.pe_tree = _make_tree(["Элемент", "Значение", "Размер на диске", "Энтропия", "Права"],
+        self.general_tree = _file_tree(["Параметр", "Значение"], [220, 800])
+        self.sig_tree = _file_tree(["Параметр", "Значение"], [220, 800])
+        self.checks_tree = _file_tree(["Слой проверки", "Результат", "Подробности"], [260, 260, 600])
+        self.pe_tree = _file_tree(["Элемент", "Значение", "Размер на диске", "Энтропия", "Права"],
                                   [320, 260, 130, 90, 80])
         self.code_tab = CodeTab()
         self.tabs.addTab(_split(_section("Общие сведения", self.general_tree),
@@ -191,6 +184,8 @@ class FileView(QWidget):
             f"padding: 10px; border-radius: 6px; font-size: 12pt; font-weight: 600; "
             f"background: rgb{rgb}; color: {text_color(rgb).name()};")
         self.banner.setText(report.verdict)
+        from recovery import activity
+        activity.record("scan_file", f"{report.path}: {report.verdict}", level=report.level)
         self._fill_general(report)
         self._fill_signature(report)
         self._fill_checks(report)

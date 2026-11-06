@@ -119,7 +119,7 @@ def list_restore_points() -> list[RestorePoint]:
     if isinstance(data, dict):
         data = [data]
     points = [RestorePoint(int(d["n"]), d.get("d") or "", _parse_wmi_time(d.get("t")),
-                           RESTORE_TYPES.get(d.get("k"), str(d.get("k"))))
+                           RESTORE_TYPES.get(d.get("k"), f"{d.get('k')}"))
               for d in data]
     return sorted(points, key=lambda p: p.number, reverse=True)
 

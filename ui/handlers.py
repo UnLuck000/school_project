@@ -51,3 +51,27 @@ def system_checks(window):
 # @implements("btnAutoruns")
 # def scan_autoruns(window):
 #     ...  # window - главное окно программы
+
+@implements("btnReport")
+def open_resource_report(window):
+    window.open_resource_report()
+
+
+@implements("btnFalsePositives")
+def open_false_positives(window):
+    window.open_false_positives()
+
+
+@implements("btnUsb")
+def open_usb(window):
+    window.open_usb()
+
+
+@implements("btnLinkCheck")
+def open_link_check(window):
+    window.open_tool("link")
+
+
+@implements("btnPasswordLeak")
+def open_password_leak(window):
+    window.open_tool("password")

@@ -113,8 +113,8 @@ def _type_by_ext(ext: str) -> str:
     if not ext:
         return "Файл"
     try:
-        from recovery.assoc import ASSOCSTR_FRIENDLYDOCNAME, _query
-        return _query(ext, ASSOCSTR_FRIENDLYDOCNAME) or f"Файл «{ext[1:].upper()}»"
+        from recovery.assoc import ASSOCSTR_FRIENDLYDOCNAME, query_assoc
+        return query_assoc(ext, ASSOCSTR_FRIENDLYDOCNAME) or f"Файл «{ext[1:].upper()}»"
     except Exception:
         return f"Файл «{ext[1:].upper()}»"
 

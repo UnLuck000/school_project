@@ -73,6 +73,7 @@ class StringsModel(QAbstractTableModel):
 class StringsTab(QWidget):
     """Строки файла: весь файл (до 256 МБ), категории, фильтры, экспорт."""
     offset_activated = Signal(int)  # двойной щелчок по строке: её смещение в файле
+
     def __init__(self):
         super().__init__()
         self._path: Path | None = None
@@ -80,8 +81,7 @@ class StringsTab(QWidget):
         self._cancel = threading.Event()
         self._bridge = _Bridge()
         self._bridge.done.connect(self._on_done)
-        self._bridge.progress.connect(
-            lambda req, text: self.status.setText(text) if req == self._request else None)
+        self._bridge.progress.connect(self._on_progress)
         self._note = ""
 
         layout = QVBoxLayout(self)
@@ -143,6 +143,10 @@ class StringsTab(QWidget):
         self.min_len.editingFinished.connect(self._restart)
 
     # ---------- загрузка ----------
+    def _on_progress(self, request: int, text: str) -> None:
+        if request == self._request:  # ход устаревшего поиска не показываем
+            self.status.setText(text)
+
     def set_file(self, path: Path | None) -> None:
         self._path = path
         self.model.all = []

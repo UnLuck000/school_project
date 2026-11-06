@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dc_field
 from datetime import datetime
 from pathlib import Path
 
@@ -29,7 +29,7 @@ VERBS = ("open", "runas")
 REG_SZ = 1
 
 # расширение: (ожидаемый ProgID, допустимые команды open; пустой список = команды быть не должно)
-CRITICAL = {
+CRITICAL: dict[str, tuple[str, list[str]]] = {  # расширение → (ProgID, допустимые команды)
     ".exe": ("exefile", ['"%1" %*']),
     ".com": ("comfile", ['"%1" %*']),
     ".bat": ("batfile", ['"%1" %*', '"%systemroot%\\system32\\cmd.exe" /c "%1" %*']),
@@ -133,7 +133,7 @@ ASSOCSTR_FRIENDLYDOCNAME, ASSOCSTR_FRIENDLYAPPNAME = 3, 4
 _assoc_query = None
 
 
-def _query(ext: str, what: int) -> str:
+def query_assoc(ext: str, what: int) -> str:
     """Что Проводник сделает с файлом (AssocQueryStringW учитывает HKCU, HKLM и UserChoice)."""
     global _assoc_query
     if _assoc_query is None:
@@ -189,10 +189,10 @@ def list_all(progress=None) -> list[ExtInfo]:
                 if exists and value:
                     progid, source = str(value), label
                     break
-        exe = _query(ext, ASSOCSTR_EXECUTABLE)
-        command = _query(ext, ASSOCSTR_COMMAND)
-        app = _query(ext, ASSOCSTR_FRIENDLYAPPNAME)
-        info = ExtInfo(ext, _query(ext, ASSOCSTR_FRIENDLYDOCNAME), progid, source or "—",
+        exe = query_assoc(ext, ASSOCSTR_EXECUTABLE)
+        command = query_assoc(ext, ASSOCSTR_COMMAND)
+        app = query_assoc(ext, ASSOCSTR_FRIENDLYAPPNAME)
+        info = ExtInfo(ext, query_assoc(ext, ASSOCSTR_FRIENDLYDOCNAME), progid, source or "—",
                        app, exe, command)
         if exe.strip('"') in ("%1", ""):
             info.exe = "запускается сам файл" if exe else ""
@@ -332,7 +332,7 @@ class AssocDiff:
     field: str
     before: str
     now: str
-    ops: list[Op] = field(default_factory=list)
+    ops: list[Op] = dc_field(default_factory=list)
     note: str = ""      # почему нельзя восстановить автоматически
 
     @property
@@ -400,7 +400,7 @@ class AssocIssue:
     title: str
     detail: str
     level: str          # ok | warning | bad
-    ops: list[Op] = field(default_factory=list)
+    ops: list[Op] = dc_field(default_factory=list)
 
     @property
     def key(self) -> str:

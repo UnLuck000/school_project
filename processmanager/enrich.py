@@ -15,6 +15,9 @@ MAX_CACHE = 4000
 EMIT_INTERVAL = 0.4  # не чаще: интерфейсу не нужно обновляться на каждую программу
 
 
+_save_lock = threading.Lock()
+
+
 class Enricher(QObject):
     """Фоновая проверка подписей и упаковки программ запущенных процессов.
     Результат: (подпись, статус, упакован, .NET). Хранится в памяти и на диске."""
@@ -91,15 +94,18 @@ class Enricher(QObject):
             self._results = {}
 
     def save(self) -> None:
-        try:
-            with self._lock:
-                items = list(self._results.items())[-MAX_CACHE:]
-            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = CACHE_FILE.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(dict(items), ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, CACHE_FILE)
-        except OSError:
-            pass  # кэш не критичен
+        # сохраняют и рабочий поток, и shutdown: без блокировки они пишут один временный
+        # файл одновременно, и замена срывается у обоих
+        with _save_lock:
+            try:
+                with self._lock:
+                    items = list(self._results.items())[-MAX_CACHE:]
+                CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                tmp = CACHE_FILE.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(dict(items), ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, CACHE_FILE)
+            except OSError:
+                pass  # кэш не критичен
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)

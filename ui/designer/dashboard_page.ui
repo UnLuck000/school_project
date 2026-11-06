@@ -3,6 +3,7 @@
  <class>DashboardPage</class>
  <widget class="QWidget" name="DashboardPage">
   <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>12</number></property>
    <item>
     <widget class="QLabel" name="lblTitle">
      <property name="styleSheet"><string notr="true">font-size: 20pt; font-weight: 600;</string></property>
@@ -10,35 +11,112 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="groupState">
-     <property name="title"><string>Сводка</string></property>
-     <layout class="QFormLayout" name="formState">
-      <item row="0" column="0"><widget class="QLabel" name="captionProtection"><property name="text"><string>Защита файлов в реальном времени:</string></property></widget></item>
-      <item row="0" column="1"><widget class="QLabel" name="lblProtection"><property name="text"><string>—</string></property></widget></item>
-      <item row="1" column="0"><widget class="QLabel" name="captionNetwork"><property name="text"><string>Мониторинг сети:</string></property></widget></item>
-      <item row="1" column="1"><widget class="QLabel" name="lblNetwork"><property name="text"><string>—</string></property></widget></item>
-      <item row="2" column="0"><widget class="QLabel" name="captionQuarantine"><property name="text"><string>Файлов в карантине:</string></property></widget></item>
-      <item row="2" column="1"><widget class="QLabel" name="lblQuarantine"><property name="text"><string>—</string></property></widget></item>
-      <item row="3" column="0"><widget class="QLabel" name="captionWhitelist"><property name="text"><string>Записей в белом списке:</string></property></widget></item>
-      <item row="3" column="1"><widget class="QLabel" name="lblWhitelist"><property name="text"><string>—</string></property></widget></item>
-      <item row="4" column="0"><widget class="QLabel" name="captionLastScan"><property name="text"><string>Последняя проверка:</string></property></widget></item>
-      <item row="4" column="1"><widget class="QLabel" name="lblLastScan"><property name="text"><string>—</string></property></widget></item>
+    <widget class="QFrame" name="frameHero">
+     <layout class="QHBoxLayout" name="layoutHero" stretch="0,1,0">
+      <property name="spacing"><number>16</number></property>
+      <property name="leftMargin"><number>18</number></property>
+      <property name="topMargin"><number>14</number></property>
+      <property name="rightMargin"><number>18</number></property>
+      <property name="bottomMargin"><number>14</number></property>
+      <item><widget class="QLabel" name="lblHeroIcon"><property name="minimumSize"><size><width>56</width><height>56</height></size></property><property name="text"><string/></property></widget></item>
+      <item>
+       <layout class="QVBoxLayout" name="layoutHeroText">
+        <property name="spacing"><number>4</number></property>
+        <item><widget class="QLabel" name="lblHeroTitle"><property name="styleSheet"><string notr="true">font-size: 15pt; font-weight: 600; background: transparent;</string></property><property name="text"><string>—</string></property></widget></item>
+        <item><widget class="QLabel" name="lblHeroText"><property name="styleSheet"><string notr="true">background: transparent;</string></property><property name="wordWrap"><bool>true</bool></property><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </item>
+      <item><widget class="QPushButton" name="btnStartProtection"><property name="minimumSize"><size><width>190</width><height>40</height></size></property><property name="text"><string>Включить защиту</string></property></widget></item>
      </layout>
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="groupQuick">
-     <property name="title"><string>Быстрые действия</string></property>
-     <layout class="QGridLayout" name="gridQuick">
-      <item row="0" column="0"><widget class="QPushButton" name="btnQuickScan"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Быстрая проверка папки «Загрузки»</string></property></widget></item>
-      <item row="0" column="1"><widget class="QPushButton" name="btnStartProtection"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Включить защиту</string></property></widget></item>
-      <item row="1" column="0"><widget class="QPushButton" name="btnCheckUpdates"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="toolTip"><string>Откроет страницу релизов программы на GitHub</string></property><property name="text"><string>Проверить на наличие обновлений</string></property></widget></item>
-      <item row="1" column="1"><widget class="QPushButton" name="btnOpenProcesses"><property name="minimumSize"><size><width>0</width><height>40</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
-     </layout>
-    </widget>
+    <layout class="QGridLayout" name="gridCards">
+     <property name="horizontalSpacing"><number>10</number></property>
+     <property name="verticalSpacing"><number>10</number></property>
+     <item row="0" column="0">
+      <widget class="QFrame" name="cardProtection">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutCardProtection">
+        <item><widget class="QLabel" name="captionProtection"><property name="text"><string>Защита файлов в реальном времени</string></property></widget></item>
+        <item><widget class="QLabel" name="lblProtection"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QFrame" name="cardNetwork">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutCardNetwork">
+        <item><widget class="QLabel" name="captionNetwork"><property name="text"><string>Мониторинг сети</string></property></widget></item>
+        <item><widget class="QLabel" name="lblNetwork"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="0" column="2">
+      <widget class="QFrame" name="cardDatabases">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutCardDatabases">
+        <item><widget class="QLabel" name="captionDatabases"><property name="text"><string>Базы сигнатур</string></property></widget></item>
+        <item><widget class="QLabel" name="lblDatabases"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QFrame" name="cardQuarantine">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutCardQuarantine">
+        <item><widget class="QLabel" name="captionQuarantine"><property name="text"><string>Файлов в карантине</string></property></widget></item>
+        <item><widget class="QLabel" name="lblQuarantine"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QFrame" name="cardWhitelist">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutCardWhitelist">
+        <item><widget class="QLabel" name="captionWhitelist"><property name="text"><string>Записей в белом списке</string></property></widget></item>
+        <item><widget class="QLabel" name="lblWhitelist"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item row="1" column="2">
+      <widget class="QFrame" name="cardLastScan">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutCardLastScan">
+        <item><widget class="QLabel" name="captionLastScan"><property name="text"><string>Последняя проверка</string></property></widget></item>
+        <item><widget class="QLabel" name="lblLastScan"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+    </layout>
    </item>
    <item>
-    <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+    <layout class="QHBoxLayout" name="layoutBottom">
+     <property name="spacing"><number>12</number></property>
+     <item>
+      <widget class="QGroupBox" name="groupQuick">
+       <property name="title"><string>Быстрые действия</string></property>
+       <layout class="QGridLayout" name="gridQuick">
+        <item row="0" column="0"><widget class="QPushButton" name="btnQuickScan"><property name="minimumSize"><size><width>0</width><height>44</height></size></property><property name="text"><string>Быстрая проверка папки «Загрузки»</string></property></widget></item>
+        <item row="0" column="1"><widget class="QPushButton" name="btnScanPath"><property name="minimumSize"><size><width>0</width><height>44</height></size></property><property name="text"><string>Сканирование папки/файла</string></property></widget></item>
+        <item row="1" column="0"><widget class="QPushButton" name="btnOpenProcesses"><property name="minimumSize"><size><width>0</width><height>44</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
+        <item row="1" column="1"><widget class="QPushButton" name="btnOpenJournal"><property name="minimumSize"><size><width>0</width><height>44</height></size></property><property name="text"><string>Журнал действий</string></property></widget></item>
+        <item row="2" column="0" colspan="2"><widget class="QPushButton" name="btnCheckUpdates"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="toolTip"><string>Откроет страницу релизов программы на GitHub</string></property><property name="text"><string>Проверить на наличие обновлений</string></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="groupEvents">
+       <property name="title"><string>Последние события</string></property>
+       <layout class="QVBoxLayout" name="layoutEvents">
+        <item><widget class="QListWidget" name="listEvents"><property name="minimumSize"><size><width>0</width><height>120</height></size></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>10</height></size></property></spacer>
    </item>
   </layout>
  </widget>

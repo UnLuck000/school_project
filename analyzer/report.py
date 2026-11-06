@@ -10,8 +10,11 @@ import pefile
 
 from scanner.features import entropy
 from scanner.heuristics import API_GROUPS, PEReport, analyze_pe, get_threshold
-from scanner.signature import SignatureInfo, inspect_signature
-from scanner.yara_engine import MAX_FILE_SIZE, match_file
+from scanner.signature import SignatureInfo, check_revocation, inspect_signature
+from scanner import overrides
+from scanner.engine import revocation_enabled
+from scanner.relations import signed_partner, weak_match
+from scanner.yara_engine import MAX_FILE_SIZE, match_details
 
 from analyzer.code import CodeView, build_code_view
 
@@ -294,18 +297,35 @@ def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -
     notes, masquerade = _name_notes(path.name, ext, key, title)
 
     signature = inspect_signature(path)
+    if revocation_enabled():
+        signature = check_revocation(path, signature)  # отозванный сертификат — не доверяем
     whitelisted = sha256 in whitelist
-    hash_match = sha256 in signatures
+    hash_match = stat.st_size > 0 and any(  # VirusShare: только MD5
+        h in signatures and not overrides.hash_ignored(h) for h in (sha256, md5))
     yara_skipped = stat.st_size > MAX_FILE_SIZE
-    yara_names = [] if (rules is None or yara_skipped) else match_file(rules, path)
+    matches = [] if (rules is None or yara_skipped) else match_details(rules, path)
+    yara_names = [m.rule for m in matches]
     heuristics = analyze_pe(path)
     threshold = get_threshold()
+    partner = None  # подписанный файл из той же папки, частью которого выглядит этот
+    if signature.status != "valid" and ((matches and all(weak_match(m) for m in matches))
+                                        or (not matches and heuristics.score >= threshold)):
+        partner = signed_partner(path)
     pe = read_pe(path, stat.st_size) if key == "pe" else None
 
     if whitelisted:
         verdict, level = "В белом списке: файл восстановлен пользователем, проверки пропускаются", "info"
     elif hash_match:
         verdict, level = "Угроза: хэш файла найден в базе сигнатур", "threat"
+    elif yara_names and signature.status == "valid":
+        verdict = ("Сработали правила YARA (" + ", ".join(yara_names) + "), но подпись "
+                   "действительна: срабатывание считается ложным")
+        level = "info"
+    elif yara_names and partner:
+        verdict = ("Сработали правила YARA (" + ", ".join(yara_names) + ") класса «потенциально "
+                   f"нежелательное», но файл — часть подписанной программы ({partner[1]}): "
+                   "угрозой не считается")
+        level = "info"
     elif yara_names:
         verdict, level = "Угроза: сработали правила YARA: " + ", ".join(yara_names), "threat"
     elif heuristics.score >= threshold:
@@ -313,12 +333,19 @@ def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -
             verdict = (f"Эвристика сработала ({heuristics.score} баллов), но подпись действительна: "
                        "файл пропускается")
             level = "info"
+        elif partner:
+            verdict = (f"Эвристика сработала ({heuristics.score} баллов), но файл — часть "
+                       f"подписанной программы ({partner[1]}): файл пропускается")
+            level = "info"
         else:
             verdict = (f"Подозрительно: эвристика PE, {heuristics.score} баллов "
                        f"при пороге {threshold}")
             level = "suspicious"
     else:
         verdict, level = "Угроз не найдено", "clean"
+    if level == "clean" and signature.status == "revoked":
+        verdict, level = ("Подозрительно: сертификат подписи отозван центром сертификации "
+                          "(ключ мог быть украден)"), "suspicious"
     if level == "clean" and masquerade:
         verdict, level = "Подозрительно: " + notes[0], "suspicious"
 

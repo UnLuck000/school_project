@@ -11,7 +11,7 @@
    </item>
    <item>
     <widget class="QLabel" name="lblHint">
-     <property name="text"><string>Кнопки с пометкой «скоро» — заготовки будущих функций. Нажмите на такую кнопку или наведите на неё курсор, чтобы увидеть, что она будет делать.</string></property>
+     <property name="text"><string>Наведите курсор на кнопку, чтобы увидеть, что делает инструмент. Серые инструменты запрещены в дополнительных настройках.</string></property>
      <property name="wordWrap"><bool>true</bool></property>
     </widget>
    </item>
@@ -23,7 +23,7 @@
        <layout class="QVBoxLayout" name="layoutDetect">
         <item><widget class="QPushButton" name="btnAutoruns"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сканер автозапуска</string></property></widget></item>
         <item><widget class="QPushButton" name="btnMemoryDeep"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Память: RWX-регионы и модули</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnNetBeacon"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сеть: поиск «пульса» бота</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnUsb"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>USB-накопители</string></property></widget></item>
        </layout>
       </widget>
      </item>
@@ -33,17 +33,19 @@
        <layout class="QVBoxLayout" name="layoutAnalysis">
         <item><widget class="QPushButton" name="btnFileAnalyzer"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сканирование папки/файла</string></property></widget></item>
         <item><widget class="QPushButton" name="btnProcessManager"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnLinkCheck"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка ссылки и файла</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnPasswordLeak"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка пароля по утечкам</string></property></widget></item>
        </layout>
       </widget>
      </item>
-     <item row="1" column="0">
+     <item row="1" column="0" colspan="2">
       <widget class="QGroupBox" name="groupRecovery">
        <property name="title"><string>Восстановление</string></property>
-       <layout class="QVBoxLayout" name="layoutRecovery">
-        <item><widget class="QPushButton" name="btnRestorePoint"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Создать точку восстановления</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnSfcDism"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка целостности (SFC/DISM)</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnSystemChecks"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка системы (hosts, прокси, политики...)</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnUndoJournal"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Журнал действий и откат</string></property></widget></item>
+       <layout class="QGridLayout" name="layoutRecovery">
+        <item row="0" column="0"><widget class="QPushButton" name="btnRestorePoint"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Создать точку восстановления</string></property></widget></item>
+        <item row="0" column="1"><widget class="QPushButton" name="btnSfcDism"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка целостности (SFC/DISM)</string></property></widget></item>
+        <item row="1" column="0"><widget class="QPushButton" name="btnSystemChecks"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка системы (hosts, прокси, политики...)</string></property></widget></item>
+        <item row="1" column="1"><widget class="QPushButton" name="btnUndoJournal"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Журнал действий и откат</string></property></widget></item>
        </layout>
       </widget>
      </item>

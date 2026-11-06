@@ -20,12 +20,25 @@ DEFAULTS = {
     "startup/ask_admin": True,      # предлагать запуск от администратора
     "general/block_exit": False,    # запрет выхода из программы (кроме диспетчера задач)
     "general/on_top": False,        # окна поверх остальных
+    "lock/restore_point": True,     # запреты из дополнительных настроек (ui/access.py)
+    "lock/sfc_dism": True,
+    "lock/memory": True,
+    "lock/usb": True,               # инструмент «USB-накопители» (защита флешек работает всегда)
+    "protect/decoys": True,         # ловушки для шифровальщиков вместе с защитой файлов
+    "lock/protection": False,       # запрет выключать защиту файлов
+    "lock/network": False,          # запрет выключать мониторинг сети
     "general/theme": "system",      # system | light | dark
     "scan/threshold": 7,            # порог эвристики PE (баллы)
     "scan/workers": 4,              # потоков при сканировании памяти
+    "scan/mode": "balanced",        # режим проверки файлов: slow | balanced | fast
+    "scan/ecores_only": False,      # проверка только на энергоэффективных ядрах
+    "scan/revocation": True,        # проверять отзыв сертификатов подписи (нужен интернет)
+    "net/windivert_dir": "",        # папка с WinDivert.dll (пусто — искать самостоятельно)
     "process/interval": 2,          # обновление диспетчера процессов, сек
     "stats/last_scan": "",
-    "general/close_to_tray": True,
+    "db/last_update": 0.0,          # время последнего обновления баз (секунды с 1970 года)
+    "report/first_run": 0.0,        # первый запуск: от него считаются периоды отчёта
+    "report/last_end": 0.0,         # конец последнего периода, отчёт за который готов
 }
 
 
@@ -45,7 +58,8 @@ def set_(key: str, value) -> None:
 def reset() -> None:
     store = _store()
     for key in DEFAULTS:
-        if key != "stats/last_scan":
+        if key not in ("stats/last_scan", "db/last_update", "report/first_run",
+                       "report/last_end"):
             store.remove(key)
 
 

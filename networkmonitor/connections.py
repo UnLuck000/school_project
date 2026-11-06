@@ -23,6 +23,7 @@ class Conn:
     rip: str
     rport: int
     inbound: bool
+    lport: int = 0
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ def snapshot() -> list[Conn]:
             pid=c.pid, name=name, exe=exe, create_time=created,
             rip=_normalize(c.raddr.ip), rport=c.raddr.port,
             inbound=c.laddr.port in listening.get(c.pid, ()),
+            lport=c.laddr.port,
         ))
     return result
 

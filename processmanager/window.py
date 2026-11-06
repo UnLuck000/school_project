@@ -7,12 +7,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal, QEvent
 from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDockWidget,
-    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDockWidget, QHeaderView, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QTextEdit, QTreeWidget, QVBoxLayout,
 )
 
 from processmanager.colors import BY_ID, CATEGORIES, classify, text_color
+from scanner import cpucores
+from scanner.signature import VALID, inspect_signature
 from processmanager.memscan import MemResult, get_rules, scan_process
 from processmanager.memview import InjectionScanDialog, MemoryDialog
 from processmanager.origin import FILTERS, HELP, ORIGINS
@@ -23,6 +25,7 @@ from processmanager.system import (
 from processmanager.enrich import Enricher
 
 from ui import settings as cfg
+from ui.widgets import SortItem
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 COLUMNS = ["Процесс", "PID", "CPU, %", "Память, МБ", "Пользователь", "Запуск",
@@ -52,15 +55,11 @@ class Bridge(QObject):
     task_done = Signal(str, str)
 
 
-class ProcItem(QTreeWidgetItem):
-    """Строка дерева с числовой сортировкой."""
-    def __lt__(self, other):
-        tree = self.treeWidget()
-        col = tree.sortColumn() if tree else 0
-        a, b = self.data(col, SORT_ROLE), other.data(col, SORT_ROLE)
-        if a is not None and b is not None:
-            return a < b
-        return self.text(col).lower() < other.text(col).lower()
+class ProcItem(SortItem):
+    """Строка дерева с числовой сортировкой (роль SORT_ROLE модуля — та же, что у SortItem)."""
+
+
+assert ProcItem.SORT_ROLE == SORT_ROLE
 
 
 class TextDialog(QDialog):
@@ -149,8 +148,15 @@ class ProcessWindow(QMainWindow):
             self.actions[action_id] = action
 
         self.community_cb = QCheckBox("Все правила (медленнее)")
-        self.community_cb.setToolTip("Кроме правил для памяти использовать и правила для файлов")
+        self.community_cb.setToolTip(
+            "Кроме правил для памяти (свои и Elastic) использовать и правила для файлов")
         toolbar.addWidget(self.community_cb)
+        self.full_memory_cb = QCheckBox("Вся память (медленно)")
+        self.full_memory_cb.setToolTip(
+            "Проверять и модули, и отображённые файлы. По умолчанию проверяется только "
+            "приватная память (кучи, стеки, внедрённый код) и модули с правами RWX: "
+            "содержимое DLL лежит на диске и проверяется сканером файлов")
+        toolbar.addWidget(self.full_memory_cb)
 
         self.origin_combo = QComboBox()
         for title, _ in FILTERS:
@@ -613,6 +619,11 @@ class ProcessWindow(QMainWindow):
         if p:
             MemoryDialog(p.pid, p.name, self).show()
 
+    def set_memory_allowed(self, on: bool) -> None:
+        """Карта памяти и поиск внедрения кода (запрет «Память» в ui/access.py)."""
+        for action_id in ("memdeep", "inject"):
+            self.actions[action_id].setVisible(on)
+
     def find_injections(self):
         procs = [(p.pid, p.name, p.exe) for p in self.procs.values()
                  if p.pid not in (0, 4, os.getpid())]
@@ -643,13 +654,15 @@ class ProcessWindow(QMainWindow):
             return
         self._scan_cancel.clear()
         self._scan_matches = []
+        self._scan_signed = []
         self._scan_started = time.monotonic()
-        kind = "all" if self.community_cb.isChecked() else "memory"
+        kind = "memory_all" if self.community_cb.isChecked() else "memory"
+        full = self.full_memory_cb.isChecked()
         self._scan_thread = threading.Thread(
-            target=self._mem_scan_loop, args=(list(procs), kind), daemon=True)
+            target=self._mem_scan_loop, args=(list(procs), kind, full), daemon=True)
         self._scan_thread.start()
 
-    def _mem_scan_loop(self, procs: list[ProcInfo], kind: str):
+    def _mem_scan_loop(self, procs: list[ProcInfo], kind: str, full: bool = False):
         self.bridge.mem_progress.emit("Загружаю правила...")
         try:
             rules = get_rules(kind)
@@ -667,12 +680,25 @@ class ProcessWindow(QMainWindow):
         def work(p: ProcInfo):
             if self._scan_cancel.is_set():
                 return p, None
-            return p, scan_process(rules, p.pid)
+            res = scan_process(rules, p.pid, full=full)
+            if res.status == "match" and p.exe:
+                # в памяти подписанных программ (IDE, браузеры, мессенджеры) бывают любые
+                # строки, вплоть до текста правил: такое совпадение — повод проверить, а не угроза
+                try:
+                    if inspect_signature(Path(p.exe)).status == VALID:
+                        res.status = "signed"
+                except OSError:
+                    pass
+            return p, res
 
         done = 0
         workers = int(cfg.get("scan/workers"))
         self._scan_workers = workers
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        # производительные ядра заняты (игра и т. п.) — потоки проверки идут на энергоэффективные
+        chooser = cpucores.choose_now()
+        self._scan_cores = chooser.text()
+        with ThreadPoolExecutor(max_workers=workers, initializer=cpucores.pin_current_thread,
+                                initargs=(chooser.cpus(),)) as pool:
             futures = [pool.submit(work, p) for p in procs]
             for future in as_completed(futures):
                 p, res = future.result()
@@ -690,14 +716,20 @@ class ProcessWindow(QMainWindow):
             self._fill(item, p)
             if res.status == "match":
                 self._scan_matches.append(f"{p.name} (PID {p.pid}): {', '.join(res.matches)}")
+            elif res.status == "signed":
+                self._scan_signed.append(f"{p.name} (PID {p.pid}): {', '.join(res.matches)}")
 
     def on_mem_done(self, cancelled: bool):
         elapsed = time.monotonic() - self._scan_started
         prefix = "Остановлено. " if cancelled else "Готово. "
         self.statusBar().showMessage(
-            f"{prefix}Совпадений в памяти: {len(self._scan_matches)}. "
-            f"Время: {elapsed:.1f} с (потоков: {self._scan_workers})")
+            f"{prefix}Совпадений в памяти: {len(self._scan_matches)}"
+            f" (у подписанных программ: {len(self._scan_signed)}). "
+            f"Время: {elapsed:.1f} с (потоков: {self._scan_workers}; "
+            f"{getattr(self, '_scan_cores', 'все ядра')})")
         if self._scan_matches:
-            QMessageBox.warning(
-                self, "Сканирование памяти",
-                "Найдены совпадения:\n\n" + "\n".join(self._scan_matches[:15]))
+            text = "Найдены совпадения:\n\n" + "\n".join(self._scan_matches[:15])
+            if self._scan_signed:
+                text += ("\n\nЕщё совпадения у подписанных программ (скорее ложные, "
+                         "подробности в столбце памяти): " + str(len(self._scan_signed)))
+            QMessageBox.warning(self, "Сканирование памяти", text)

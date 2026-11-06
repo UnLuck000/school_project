@@ -1,12 +1,21 @@
 import ctypes
+import os
 import sys
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 VALID = "valid"              # подпись действительна
 UNSIGNED = "unsigned"        # подписи нет
 INVALID = "invalid"          # подпись есть, но файл изменён или издатель не доверенный
 UNAVAILABLE = "unavailable"  # проверка не удалась (не Windows, ошибка вызова)
+REVOKED = "revoked"          # подпись была бы действительна, но сертификат отозван
+
+# результат проверки отзыва (SignatureInfo.revocation)
+REV_OK, REV_REVOKED, REV_UNKNOWN = "ok", "revoked", "unknown"
+REVOCATION_TIMEOUT = 15      # секунд на обращение к серверам CRL/OCSP
+REVOCATION_CACHE = 24 * 3600  # ответ о неотозванном сертификате хранится сутки
 
 WTD_UI_NONE = 2
 WTD_REVOKE_NONE = 0
@@ -14,8 +23,14 @@ WTD_CHOICE_FILE = 1
 WTD_CHOICE_CATALOG = 2
 WTD_STATEACTION_VERIFY = 1
 WTD_STATEACTION_CLOSE = 2
+WTD_REVOKE_WHOLECHAIN = 1
 WTD_REVOCATION_CHECK_NONE = 0x10
+WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT = 0x80
 WTD_CACHE_ONLY_URL_RETRIEVAL = 0x1000  # без обращений в сеть
+
+CERT_E_REVOKED = 0x800B010C
+# сервер отзыва недоступен или не ответил: результат неизвестен, это не «отозван»
+REVOCATION_UNKNOWN_CODES = {0x80092013, 0x80092012, 0x800B010E}
 
 # TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN, TRUST_E_SUBJECT_FORM_UNKNOWN
 UNSIGNED_CODES = {0x800B0100, 0x800B0001, 0x800B0003}
@@ -33,18 +48,23 @@ class SignatureInfo:
     status: str
     publisher: str | None = None
     source: str | None = None  # "embedded" | "catalog"
+    revocation: str | None = None  # None — отзыв не проверялся; ok | revoked | unknown
 
 
 def describe(info: SignatureInfo) -> str:
     """Короткий текст для интерфейса. Для неизвестного состояния пустая строка."""
     label = {VALID: "Действительна", UNSIGNED: "Нет подписи",
-             INVALID: "Недействительна"}.get(info.status)
+             INVALID: "Недействительна", REVOKED: "Сертификат отозван"}.get(info.status)
     if label is None:
         return ""
     if info.publisher:
         label += f" ({info.publisher})"
     if info.source == "catalog":
         label += ", каталог"
+    if info.revocation == REV_OK:
+        label += ", не отозван"
+    elif info.revocation == REV_UNKNOWN:
+        label += ", отзыв не проверен (нет связи с сервером)"
     return label
 
 
@@ -174,16 +194,22 @@ if sys.platform == "win32":
 
     _INVALID_HANDLE = ctypes.c_void_p(-1).value
 
-    def _win_verify(choice: int, info_struct) -> int:
-        """Вызывает WinVerifyTrust для файла или каталога, возвращает код результата."""
+    def _win_verify(choice: int, info_struct, online: bool = False) -> int:
+        """Вызывает WinVerifyTrust для файла или каталога, возвращает код результата.
+        online: проверить отзыв сертификатов всей цепочки (кроме корневого) через сеть:
+        Windows скачивает списки отзыва (CRL) или спрашивает сервер OCSP и кэширует ответ."""
         data = WINTRUST_DATA()
         data.cbStruct = ctypes.sizeof(WINTRUST_DATA)
         data.dwUIChoice = WTD_UI_NONE
-        data.fdwRevocationChecks = WTD_REVOKE_NONE
         data.dwUnionChoice = choice
         data.pUnion = ctypes.addressof(info_struct)
         data.dwStateAction = WTD_STATEACTION_VERIFY
-        data.dwProvFlags = WTD_REVOCATION_CHECK_NONE | WTD_CACHE_ONLY_URL_RETRIEVAL
+        if online:
+            data.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN
+            data.dwProvFlags = WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
+        else:
+            data.fdwRevocationChecks = WTD_REVOKE_NONE
+            data.dwProvFlags = WTD_REVOCATION_CHECK_NONE | WTD_CACHE_ONLY_URL_RETRIEVAL
 
         hwnd = wintypes.HWND(-1)  # INVALID_HANDLE_VALUE: без окон и диалогов
         status = _wintrust.WinVerifyTrust(hwnd, ctypes.byref(_ACTION), ctypes.byref(data))
@@ -191,11 +217,11 @@ if sys.platform == "win32":
         _wintrust.WinVerifyTrust(hwnd, ctypes.byref(_ACTION), ctypes.byref(data))
         return status & 0xFFFFFFFF
 
-    def _verify_embedded(path: Path) -> int:
+    def _verify_embedded(path: Path, online: bool = False) -> int:
         info = WINTRUST_FILE_INFO(ctypes.sizeof(WINTRUST_FILE_INFO), str(path), None, None)
-        return _win_verify(WTD_CHOICE_FILE, info)
+        return _win_verify(WTD_CHOICE_FILE, info, online)
 
-    def _catalog_lookup(path: Path):
+    def _catalog_lookup(path: Path, online: bool = False):
         """Ищет файл в каталогах Windows по хэшу.
         Возвращает (код проверки, путь к .cat) или None, если файла нет ни в одном."""
         handle = _kernel32.CreateFileW(str(path), 0x80000000, 0x3, None, 3, 0x80, None)
@@ -237,7 +263,7 @@ if sys.platform == "win32":
                             digest, ctypes.POINTER(ctypes.c_ubyte))
                         member.cbCalculatedFileHash = size.value
                         member.hCatAdmin = admin
-                        status = _win_verify(WTD_CHOICE_CATALOG, member)
+                        status = _win_verify(WTD_CHOICE_CATALOG, member, online)
                         return status, cat_info.wszCatalogFile
                     finally:
                         _wintrust.CryptCATAdminReleaseCatalogContext(admin, cat, 0)
@@ -314,6 +340,57 @@ def inspect_signature(path: Path) -> SignatureInfo:
         return SignatureInfo(UNAVAILABLE)
 
 
+_rev_lock = threading.Lock()
+_rev_cache: dict[tuple, tuple[float, str]] = {}  # (путь, размер, mtime) -> (время, результат)
+
+
+def _revocation_code(path: Path, source: str | None) -> int | None:
+    if source == "catalog":
+        found = _catalog_lookup(path, online=True)
+        return None if found is None else found[0]
+    return _verify_embedded(path, online=True)
+
+
+def check_revocation(path: Path, info: SignatureInfo | None = None,
+                     timeout: float = REVOCATION_TIMEOUT) -> SignatureInfo:
+    """Проверяет, не отозван ли сертификат подписи (нужен интернет).
+    Имеет смысл только для действительной подписи; остальное возвращается как есть.
+    Нет ответа за timeout секунд или сервер недоступен — revocation = unknown, статус
+    подписи не меняется: «не удалось проверить» не значит «отозван»."""
+    info = info or inspect_signature(path)
+    if info.status != VALID or sys.platform != "win32":
+        return info
+    try:
+        st = path.stat()
+    except OSError:
+        return info
+    key = (os.path.normcase(str(path)), st.st_size, st.st_mtime_ns)
+    with _rev_lock:
+        cached = _rev_cache.get(key)
+    if cached and (cached[1] == REV_REVOKED or time.time() - cached[0] < REVOCATION_CACHE):
+        result = cached[1]
+    else:
+        box: list = []
+        # WinVerifyTrust нельзя прервать: ждём ответ в отдельном потоке не дольше timeout
+        worker = threading.Thread(target=lambda: box.append(_revocation_code(path, info.source)),
+                                  daemon=True)
+        worker.start()
+        worker.join(timeout)
+        code = box[0] if box else None
+        if code == 0:
+            result = REV_OK
+        elif code == CERT_E_REVOKED:
+            result = REV_REVOKED
+        else:
+            result = REV_UNKNOWN
+        if result != REV_UNKNOWN:
+            with _rev_lock:
+                _rev_cache[key] = (time.time(), result)
+    if result == REV_REVOKED:
+        return replace(info, status=REVOKED, revocation=REV_REVOKED)
+    return replace(info, revocation=result)
+
+
 def verify_signature(path: Path) -> str:
     return inspect_signature(path).status
 
@@ -321,5 +398,6 @@ def verify_signature(path: Path) -> str:
 if __name__ == "__main__":
     # python -m scanner.signature путь1 путь2 ...
     for arg in sys.argv[1:]:
-        info = inspect_signature(Path(arg))
-        print(f"{arg}\n  {info.status}  издатель: {info.publisher}  источник: {info.source}")
+        info = check_revocation(Path(arg))
+        print(f"{arg}\n  {info.status}  издатель: {info.publisher}  источник: {info.source}"
+              f"  отзыв: {info.revocation}")

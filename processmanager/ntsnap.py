@@ -34,6 +34,7 @@ class RawProc:
     cpu_time: float   # секунды (пользователь + ядро)
     rss: int          # рабочий набор, байт
     suspended: bool
+    written: int = 0  # байт записано за жизнь процесса (WriteTransferCount)
 
 
 if sys.platform == "win32" and struct.calcsize("P") == 8:
@@ -41,7 +42,7 @@ if sys.platform == "win32" and struct.calcsize("P") == 8:
 
     _ntdll = ctypes.WinDLL("ntdll")
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    from processmanager.winapi import advapi32 as _adv  # общие объявления
     _ntdll.NtQuerySystemInformation.argtypes = [
         wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
     _ntdll.NtQuerySystemInformation.restype = ctypes.c_ulong
@@ -53,12 +54,6 @@ if sys.platform == "win32" and struct.calcsize("P") == 8:
     _k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
     _k32.QueryDosDeviceW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
     _k32.QueryDosDeviceW.restype = wintypes.DWORD
-    _adv.OpenProcessToken.argtypes = [ctypes.c_void_p, wintypes.DWORD,
-                                      ctypes.POINTER(ctypes.c_void_p)]
-    _adv.OpenProcessToken.restype = wintypes.BOOL
-    _adv.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
-                                         wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
-    _adv.GetTokenInformation.restype = wintypes.BOOL
     _adv.LookupAccountSidW.argtypes = [
         wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
         wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
@@ -109,6 +104,7 @@ def list_processes() -> list[RawProc]:
         name_ptr, = struct.unpack_from("<Q", data, offset + 64)
         pid, ppid = struct.unpack_from("<QQ", data, offset + 80)
         working_set, = struct.unpack_from("<Q", data, offset + 144)
+        written, = struct.unpack_from("<Q", data, offset + 0xF0)
         if name_ptr and name_len:
             name = data[name_ptr - base:name_ptr - base + name_len].decode("utf-16-le", "replace")
         else:
@@ -127,7 +123,7 @@ def list_processes() -> list[RawProc]:
             pid=pid, ppid=ppid, name=name, threads=threads,
             created=create / 1e7 - EPOCH_DIFF if create else 0.0,
             cpu_time=(user + kernel) / 1e7, rss=working_set,
-            suspended=suspended and pid not in (0, 4)))
+            suspended=suspended and pid not in (0, 4), written=written))
         if not next_offset:
             break
         offset += next_offset

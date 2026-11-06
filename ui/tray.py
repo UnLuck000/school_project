@@ -64,8 +64,10 @@ class TrayIcon(QSystemTrayIcon):
         for text, handler in items:
             tools.addAction(text).triggered.connect(
                 lambda checked=False, h=handler: h())
+        self.usb_action = tools.addAction("USB-накопители")
+        self.usb_action.triggered.connect(lambda checked=False: window.run_feature("btnUsb"))
 
-        self.settings_action = menu.addAction("Настройки")  # виден только в режиме отладки
+        self.settings_action = menu.addAction("Настройки")
         self.settings_action.triggered.connect(
             lambda checked=False: window.show_main("Настройки"))
         menu.addSeparator()

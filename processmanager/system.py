@@ -86,7 +86,7 @@ if sys.platform == "win32":
     from ctypes import wintypes
 
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    from processmanager.winapi import advapi32 as _adv  # общие объявления
     _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _k32.OpenProcess.restype = ctypes.c_void_p
     _k32.CloseHandle.argtypes = [ctypes.c_void_p]
@@ -94,12 +94,6 @@ if sys.platform == "win32":
     _k32.IsWow64Process.restype = wintypes.BOOL
     _k32.IsProcessCritical.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)]
     _k32.IsProcessCritical.restype = wintypes.BOOL
-    _adv.OpenProcessToken.argtypes = [ctypes.c_void_p, wintypes.DWORD,
-                                      ctypes.POINTER(ctypes.c_void_p)]
-    _adv.OpenProcessToken.restype = wintypes.BOOL
-    _adv.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
-                                         wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
-    _adv.GetTokenInformation.restype = wintypes.BOOL
 
 
 def query_flags(pid: int) -> tuple[bool | None, bool, bool]:

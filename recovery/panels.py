@@ -1,30 +1,18 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTabWidget,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QLabel, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from processmanager.colors import text_color
 from recovery import policies
+from ui.widgets import make_tree
 
 LEVEL_COLORS = {"ok": (170, 230, 170), "info": (170, 204, 255),
                 "warning": (255, 190, 110), "bad": (255, 128, 128)}
 INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
 
-
-def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
-    tree = QTreeWidget()
-    tree.setHeaderLabels(columns)
-    tree.setRootIsDecorated(False)
-    tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl и Shift
-    header = tree.header()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setStretchLastSection(True)
-    for i, width in enumerate(widths):
-        tree.setColumnWidth(i, width)
-    return tree
 
 
 def _paint(item: QTreeWidgetItem, rgb, columns: int) -> None:
@@ -88,7 +76,7 @@ class FindingsPanel(QWidget):
         row.addWidget(self.btn_trust)
         row.addWidget(self.btn_fix)
         layout.addLayout(row)
-        self.tree = _make_tree(["Проверка", "Состояние", "Подробности"], [380, 300, 520])
+        self.tree = make_tree(["Проверка", "Состояние", "Подробности"], [380, 300, 520])
         self.tree.itemSelectionChanged.connect(self._update_buttons)
         layout.addWidget(self.tree, 1)
 
@@ -157,7 +145,7 @@ class PolicyPanel(QWidget):
     def _build_scan_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        self.scan_tree = _make_tree(["№", "Ограничение", "Значение", "Путь"], [50, 520, 110, 560])
+        self.scan_tree = make_tree(["№", "Ограничение", "Значение", "Путь"], [50, 520, 110, 560])
         link_checks(self.scan_tree)
         layout.addWidget(self.scan_tree, 1)
 
@@ -214,7 +202,7 @@ class PolicyPanel(QWidget):
     def _build_manual_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        self.manual_tree = _make_tree(["Ограничение", "Описание", "Состояние"], [260, 560, 160])
+        self.manual_tree = make_tree(["Ограничение", "Описание", "Состояние"], [260, 560, 160])
         link_checks(self.manual_tree)
         self._manual_items: dict[str, QTreeWidgetItem] = {}
         for restriction in policies.CATALOG:

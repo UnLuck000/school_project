@@ -5,9 +5,8 @@ from datetime import datetime
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QTabWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 import appinfo
@@ -22,6 +21,7 @@ from recovery.assoc_panel import AssocPanel
 from recovery.panels import FindingsPanel, PolicyPanel
 
 from scanner import exclusions
+from ui.widgets import make_tree
 
 
 COMMANDS = {
@@ -49,19 +49,6 @@ class Bridge(QObject):
     output = Signal(str)
     command_done = Signal(int)
 
-
-def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
-    tree = QTreeWidget()
-    tree.setHeaderLabels(columns)
-    tree.setRootIsDecorated(False)
-    tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl и Shift
-    header = tree.header()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setStretchLastSection(True)
-    for i, width in enumerate(widths):
-        tree.setColumnWidth(i, width)
-    return tree
 
 
 class RecoveryWindow(QMainWindow):
@@ -114,7 +101,15 @@ class RecoveryWindow(QMainWindow):
         return banner
 
     def show_tab(self, index: int) -> None:
-        self.tabs.setCurrentIndex(index)
+        if self.tabs.isTabVisible(index):
+            self.tabs.setCurrentIndex(index)
+
+    def set_allowed(self, restore_point: bool, sfc_dism: bool) -> None:
+        """Запреты из дополнительных настроек (ui/access.py): вкладки запрещённых скрыты."""
+        for index, on in ((0, restore_point), (1, sfc_dism)):
+            self.tabs.setTabVisible(index, on)
+        if not self.tabs.isTabVisible(self.tabs.currentIndex()):
+            self.tabs.setCurrentIndex(2)
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._busy = busy
@@ -215,7 +210,7 @@ class RecoveryWindow(QMainWindow):
         layout.addLayout(row)
         self._busy_buttons += [create, refresh, enable]
 
-        self.points_tree = _make_tree(["№", "Создана", "Описание", "Тип"], [70, 170, 520, 200])
+        self.points_tree = make_tree(["№", "Создана", "Описание", "Тип"], [70, 170, 520, 200])
         layout.addWidget(self.points_tree)
         return tab
 
@@ -285,6 +280,7 @@ class RecoveryWindow(QMainWindow):
             QMessageBox.information(self, "Целостность Windows", "Операция уже выполняется")
             return
         title, args, modifies = COMMANDS[key]
+        self._cmd_title = title
         if not is_admin():
             QMessageBox.warning(self, "Целостность Windows",
                                 "Для этой операции нужны права администратора.")
@@ -355,6 +351,10 @@ class RecoveryWindow(QMainWindow):
         meaning = {0: "завершено успешно", 3010: "завершено, нужна перезагрузка"}.get(
             code, "завершено с ошибкой или остановлено")
         self.output.appendPlainText(f"\nКод возврата: {code} ({meaning})")
+        from recovery import activity
+        lines = [l for l in self.output.toPlainText().splitlines() if l.strip()][-6:-1]
+        activity.record("integrity", f"{getattr(self, '_cmd_title', 'Команда')}: {meaning} "
+                                     f"(код {code})", output=lines)
         self.output.appendPlainText(r"Подробности sfc: C:\Windows\Logs\CBS\CBS.log")
         self.statusBar().showMessage(f"Команда {meaning}", 10000)
 
@@ -435,6 +435,11 @@ class RecoveryWindow(QMainWindow):
         self.policy_panel.set_hits(hits)
         problems += len(hits)
         message = f"Проверка завершена. Требуют внимания: {problems}"
+        from recovery import activity
+        found = [f"{f.category}: {f.title} — {f.status}"
+                 for fs in results.findings.values() for f in fs if f.level in ("warning", "bad")]
+        found += [f"политика: {h.title}" for h in hits]
+        activity.record("system_check", message, found=found)
         if hidden:
             message += f". Скрыто исключений: {hidden}"
         if results.policy_error:

@@ -6,8 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QMainWindow, QMenu, QMessageBox, QPushButton, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from autoruns import actions
@@ -16,9 +16,11 @@ from autoruns.scanner import Context, assess, collect_all
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from processmanager.system import is_admin, open_in_explorer
-from scanner import exclusions
+from scanner import exclusions, pool as scan_pool
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist
+from ui.textutil import elide
+from ui.widgets import SortItem, make_tree
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 COLUMNS = ["Риск", "Тип", "Имя", "Команда", "Подпись", "Место", "Замечания"]
@@ -57,29 +59,10 @@ class Bridge(QObject):
     done = Signal(object)
 
 
-class RankItem(QTreeWidgetItem):
+class RankItem(SortItem):
     """Строка с сортировкой по числовому рангу (риск)."""
-    def __lt__(self, other):
-        tree = self.treeWidget()
-        col = tree.sortColumn() if tree else 0
-        a, b = self.data(col, RANK_ROLE), other.data(col, RANK_ROLE)
-        if a is not None and b is not None:
-            return a < b
-        return self.text(col).lower() < other.text(col).lower()
+    SORT_ROLE = RANK_ROLE
 
-
-def _make_tree(columns: list[str], widths: list[int]) -> QTreeWidget:
-    tree = QTreeWidget()
-    tree.setHeaderLabels(columns)
-    tree.setRootIsDecorated(False)
-    tree.setUniformRowHeights(True)
-    tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl и Shift
-    header = tree.header()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setStretchLastSection(True)
-    for i, width in enumerate(widths):
-        tree.setColumnWidth(i, width)
-    return tree
 
 
 def fill_item(item: RankItem, e: Entry) -> None:
@@ -114,7 +97,7 @@ class EntryView(QWidget):
         self.items: dict[str, RankItem] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.tree = _make_tree(COLUMNS, [110, 150, 230, 380, 220, 220, 300])
+        self.tree = make_tree(COLUMNS, [110, 150, 230, 380, 220, 220, 300])
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(0, Qt.SortOrder.DescendingOrder)  # сначала самые опасные
         self.tree.itemSelectionChanged.connect(self.selection_changed.emit)
@@ -354,6 +337,11 @@ class AutorunsWindow(QMainWindow):
         self.bridge.entries.emit(entries)
         self.bridge.progress.emit(f"Найдено записей: {len(entries)}. Проверяю файлы и подписи...")
         ctx = Context(load_all_signatures(SIG_DIR), get_rules("all"), set(load_whitelist()))
+        # файлы проверяются в рабочих процессах (интерфейс не тормозит), подписи — здесь
+        exes = sorted({e.exe for e in entries if e.exe and os.path.isfile(e.exe)})
+        for path, reason, error in scan_pool.check_files(exes, ctx.signatures, ctx.rules,
+                                                         ctx.whitelist, cancel=self._stop):
+            ctx.verdicts[path] = "" if error is not None else reason or ""
 
         def work(e: Entry) -> None:
             if self._stop.is_set():
@@ -459,7 +447,7 @@ class AutorunsWindow(QMainWindow):
     # ---------- действия ----------
     @staticmethod
     def _names(entries: list[Entry], limit: int = 10) -> str:
-        lines = "\n".join(f"• {e.name}" for e in entries[:limit])
+        lines = "\n".join(f"• {elide(e.name)}" for e in entries[:limit])
         if len(entries) > limit:
             lines += f"\n...и ещё {len(entries) - limit}"
         return lines
@@ -558,7 +546,7 @@ class AutorunsWindow(QMainWindow):
         entries = [e for e in self.selected_entries() if e.assessed]
         if not entries:
             return
-        what = (f"{entries[0].name}\n{entries[0].command}" if len(entries) == 1
+        what = (f"{elide(entries[0].name)}\n{elide(entries[0].command)}" if len(entries) == 1
                 else f"Записей: {len(entries)}\n{self._names(entries)}")
         answer = QMessageBox.question(
             self, "Доверять записи",

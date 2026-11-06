@@ -4,7 +4,8 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from recovery.panels import LEVEL_COLORS, _hint, _make_tree, _paint, checked_or_selected, link_checks
+from recovery.panels import LEVEL_COLORS, _hint, _paint, checked_or_selected, link_checks
+from ui.widgets import make_tree
 
 INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
 LEVEL_TEXT = {"ok": "В порядке", "warning": "Внимание", "bad": "Перехват"}
@@ -52,7 +53,7 @@ class AssocPanel(QWidget):
         for b in (self.btn_trust, self.btn_fix, self.btn_fix_all):
             row.addWidget(b)
         top_layout.addLayout(row)
-        self.issues_tree = _make_tree(["Расширение", "Состояние", "Проверка", "Подробности"],
+        self.issues_tree = make_tree(["Расширение", "Состояние", "Проверка", "Подробности"],
                                       [100, 110, 330, 600])
         self.issues_tree.itemSelectionChanged.connect(self._update_buttons)
         top_layout.addWidget(self.issues_tree, 1)
@@ -78,7 +79,7 @@ class AssocPanel(QWidget):
         self.diff_summary = QLabel("Выберите снимок и нажмите «Сравнить с текущим»")
         self.diff_summary.setWordWrap(True)
         bottom_layout.addWidget(self.diff_summary)
-        self.diff_tree = _make_tree(["Расширение", "Что изменилось", "В снимке", "Сейчас"],
+        self.diff_tree = make_tree(["Расширение", "Что изменилось", "В снимке", "Сейчас"],
                                     [110, 330, 330, 330])
         link_checks(self.diff_tree)
         bottom_layout.addWidget(self.diff_tree, 1)
@@ -113,7 +114,7 @@ class AssocPanel(QWidget):
         self.ext_summary = QLabel("Список загружается при первом открытии вкладки")
         self.ext_summary.setWordWrap(True)
         box.addWidget(self.ext_summary)
-        self.ext_tree = _make_tree(
+        self.ext_tree = make_tree(
             ["Расширение", "Тип файла", "Программа", "Исполняемый файл", "Откуда",
              "Команда запуска", "Замечание"], [110, 220, 170, 360, 150, 380, 220])
         self.ext_tree.setSortingEnabled(True)
