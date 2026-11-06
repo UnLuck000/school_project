@@ -21,6 +21,7 @@ cache/
 signatures/exclusions.json
 signatures/overrides.json
 reports/
+vpn_profiles/
 
 # выгрузка проверок PyCharm
 inspections/

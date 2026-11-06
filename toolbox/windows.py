@@ -365,3 +365,47 @@ def _kill_and_quarantine(culprit: dict) -> str:
         return f"{culprit['name']} завершён, файл перемещён в карантин"
     except OSError as e:
         return f"{culprit['name']} завершён, но файл не перемещён в карантин: {e}"
+
+
+# ---------- защита от стилеров ----------
+def stealer_alarm(parent, info: dict, guard=None) -> None:
+    """Чужая программа открыла пароли или cookies: завершить, разрешить или отпустить.
+    В карантин файл сам не попадает: это можно сделать из журнала защиты (правый клик)."""
+    from toolbox import decoys, stealerguard
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Critical)
+    box.setWindowTitle("Похоже на похитителя паролей")
+    state = "приостановлена" if info.get("suspended") else "НЕ приостановлена (нет прав)"
+    box.setText(f"Программа {info['name']} (PID {info['pid']}) открыла {info['kind']} "
+                f"({info['owner']}) и {state}.\n\n{info['exe'] or 'путь неизвестен'}\n\n"
+                f"Файл: {info['path']}\n\nЕсли вы не запускали программу для переноса "
+                "паролей или резервного копирования, это может быть стилер: он отправит "
+                "пароли и сеансы входа на сайты злоумышленнику.")
+    kill = box.addButton("Завершить программу", QMessageBox.ButtonRole.DestructiveRole)
+    allow = box.addButton("Разрешить этой программе", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("Продолжить один раз", QMessageBox.ButtonRole.RejectRole)
+    allow.setEnabled(bool(info.get("exe")))
+    activity.record("stealer", f"{info['name']} ({info['exe']}) открыл {info['kind']}: "
+                               f"{info['path']}")
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is kill:
+        import psutil
+        try:
+            psutil.Process(info["pid"]).kill()
+            message = f"{info['name']} завершён. Файл можно отправить в карантин из журнала " \
+                      "защиты (правый клик)."
+        except Exception as e:
+            message = f"Не удалось завершить {info['name']}: {e}"
+        activity.record("stealer", message)
+        QMessageBox.information(parent, "Защита от стилеров", message)
+        return
+    if info.get("suspended"):
+        decoys.resume(info["pid"])
+    if clicked is allow:
+        stealerguard.trust(info["exe"])
+        if guard is not None:
+            guard.reload_trust()
+        activity.record("stealer", f"{info['name']}: пользователь разрешил доступ")
+    else:
+        activity.record("stealer", f"{info['name']}: пользователь отпустил один раз")

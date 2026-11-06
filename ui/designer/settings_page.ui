@@ -15,7 +15,6 @@
      <layout class="QVBoxLayout" name="layoutStartup">
       <item><widget class="QCheckBox" name="chkAutostart"><property name="text"><string>Запускать вместе с Windows</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkAskAdmin"><property name="text"><string>Предлагать запуск от имени администратора при старте</string></property></widget></item>
-      <item><widget class="QCheckBox" name="chkBlockExit"><property name="text"><string>Запретить закрытие программы (защита от случайного выхода)</string></property><property name="toolTip"><string>Кнопка «Выход» и закрытие окна не завершают программу. Завершить её можно только через диспетчер задач Windows.</string></property></widget></item>
      </layout>
     </widget>
    </item>
@@ -32,6 +31,21 @@
         <item><property name="text"><string>Тёмная</string></property></item>
        </widget>
       </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupSchedule">
+     <property name="title"><string>Плановая проверка</string></property>
+     <layout class="QFormLayout" name="formSchedule">
+      <item row="0" column="0" colspan="2"><widget class="QCheckBox" name="chkSchedule"><property name="toolTip"><string>За 10 минут до начала появится предупреждение: можно сохранить работу в игре или тяжёлой программе, отложить проверку на час или пропустить её.</string></property><property name="text"><string>Проверять компьютер по расписанию</string></property></widget></item>
+      <item row="1" column="0"><widget class="QLabel" name="captionScheduleKind"><property name="text"><string>Проверка:</string></property></widget></item>
+      <item row="1" column="1"><widget class="QComboBox" name="cmbScheduleKind"/></item>
+      <item row="2" column="0"><widget class="QLabel" name="captionSchedulePeriod"><property name="text"><string>Как часто:</string></property></widget></item>
+      <item row="2" column="1"><widget class="QComboBox" name="cmbSchedulePeriod"/></item>
+      <item row="3" column="0"><widget class="QLabel" name="captionScheduleTime"><property name="text"><string>Время (0:00–24:00):</string></property></widget></item>
+      <item row="3" column="1"><widget class="QTimeEdit" name="timeSchedule"><property name="displayFormat"><string>HH:mm</string></property></widget></item>
+      <item row="4" column="1"><widget class="QLabel" name="lblScheduleNext"><property name="wordWrap"><bool>true</bool></property><property name="text"><string/></property></widget></item>
      </layout>
     </widget>
    </item>
@@ -57,6 +71,8 @@
       <item row="5" column="1"><widget class="QCheckBox" name="chkEcoresOnly"><property name="text"><string>Только E-ядра</string></property></widget></item>
       <item row="7" column="1"><widget class="QCheckBox" name="chkRevocation"><property name="toolTip"><string>Прежде чем по подписи признать срабатывание ложным, программа спрашивает у центра сертификации (списки отзыва CRL или сервер OCSP), не отозван ли сертификат. Ответы кэшируются. Без интернета подпись проверяется как раньше, без отзыва.</string></property><property name="text"><string>Проверять отзыв сертификатов подписи (нужен интернет)</string></property></widget></item>
       <item row="8" column="1"><widget class="QCheckBox" name="chkDecoys"><property name="toolTip"><string>Вместе с защитой файлов в «Документах» и «Изображениях» создаются защищённые системные папки с файлами-приманками. Если программа начнёт их менять, она будет приостановлена как шифровальщик.</string></property><property name="text"><string>Ловушки для шифровальщиков</string></property></widget></item>
+      <item row="9" column="1"><widget class="QCheckBox" name="chkLaunchGuard"><property name="toolTip"><string>Каждая запущенная программа сразу проверяется; пока файл проверяется, процесс приостановлен. Работает вместе с защитой файлов.</string></property><property name="text"><string>Контроль запуска программ</string></property></widget></item>
+      <item row="10" column="1"><widget class="QCheckBox" name="chkStealerGuard"><property name="toolTip"><string>Следит, кто открывает пароли, cookies и ключи браузеров, сеанс Telegram, токены Discord и кошельки. Чужая неподписанная программа приостанавливается. Работает вместе с защитой файлов.</string></property><property name="text"><string>Защита от стилеров (похитителей паролей)</string></property></widget></item>
       <item row="6" column="1"><widget class="QLabel" name="lblEcoresHint"><property name="wordWrap"><bool>true</bool></property><property name="text"><string/></property></widget></item>
       <item row="2" column="1"><widget class="QSpinBox" name="spnInterval"><property name="minimum"><number>1</number></property><property name="maximum"><number>10</number></property><property name="value"><number>2</number></property></widget></item>
      </layout>
@@ -66,6 +82,7 @@
     <widget class="QGroupBox" name="groupLocks">
      <property name="title"><string>Запреты (снять можно только с паролем администратора)</string></property>
      <layout class="QVBoxLayout" name="layoutLocks">
+      <item><widget class="QCheckBox" name="chkBlockExit"><property name="text"><string>Запретить закрытие программы</string></property><property name="toolTip"><string>Пункт «Выход» в меню значка в трее неактивен, закрытие окна сворачивает программу в трей. Завершить её можно только через диспетчер задач Windows.</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockProtection"><property name="toolTip"><string>Кнопки «Выключить защиту» неактивны. Защита включается при каждом запуске программы.</string></property><property name="text"><string>Запретить выключать защиту файлов</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockNetwork"><property name="toolTip"><string>Кнопка «Выключить мониторинг сети» неактивна. Мониторинг включается при каждом запуске программы.</string></property><property name="text"><string>Запретить выключать мониторинг сети</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockAutoruns"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна, пункт в меню трея скрыт.</string></property><property name="text"><string>Запретить инструмент «Сканер автозапуска»</string></property></widget></item>
@@ -78,6 +95,9 @@
       <item><widget class="QCheckBox" name="chkLockRestorePoint"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна, вкладка «Точки восстановления» в окне проверки системы скрыта.</string></property><property name="text"><string>Запретить инструмент «Создать точку восстановления»</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockSfcDism"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна, вкладка «Целостность Windows» в окне проверки системы скрыта.</string></property><property name="text"><string>Запретить инструмент «Проверка целостности (SFC/DISM)»</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockSystemChecks"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна, пункт трея и вкладка «Проверка системы» в окне восстановления скрыты.</string></property><property name="text"><string>Запретить инструмент «Проверка системы»</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkLockDrivers"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна.</string></property><property name="text"><string>Запретить инструмент «Уязвимые драйверы»</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkLockExtensions"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна.</string></property><property name="text"><string>Запретить инструмент «Расширения браузеров»</string></property></widget></item>
+      <item><widget class="QCheckBox" name="chkLockVpn"><property name="toolTip"><string>Кнопка на странице «Инструменты» неактивна, окно VPN закрывается.</string></property><property name="text"><string>Запретить инструмент «VPN»</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockJournal"><property name="toolTip"><string>Вкладка «Действия» (журнал и отмена действий) и кнопка журнала на главной скрыты. Карантин, белый список и исключения остаются.</string></property><property name="text"><string>Запретить инструмент «Журнал действий и откат»</string></property></widget></item>
      </layout>
     </widget>

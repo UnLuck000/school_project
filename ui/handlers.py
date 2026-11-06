@@ -75,3 +75,18 @@ def open_link_check(window):
 @implements("btnPasswordLeak")
 def open_password_leak(window):
     window.open_tool("password")
+
+
+@implements("btnDrivers")
+def open_drivers(window):
+    window.open_tool("drivers")
+
+
+@implements("btnExtensions")
+def open_extensions(window):
+    window.open_tool("extensions")
+
+
+@implements("btnVpn")
+def open_vpn(window):
+    window.open_tool("vpn")

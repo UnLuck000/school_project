@@ -31,6 +31,17 @@ DEFAULTS = {
     "lock/password_leak": False,
     "lock/system_checks": False,
     "lock/journal": False,
+    "lock/drivers": False,
+    "lock/extensions": False,
+    "lock/vpn": False,
+    "protect/launch": True,         # контроль запуска программ (scanner/launchguard.py)
+    "protect/stealer": True,        # защита от стилеров (toolbox/stealerguard.py)
+    "schedule/enabled": False,      # плановая проверка (scanner/schedule.py)
+    "schedule/kind": "full",        # full | quick
+    "schedule/period": "1w",        # 1w | 2w | 1m | 3m
+    "schedule/time": "12:00",
+    "schedule/last_run": 0.0,       # когда была последняя плановая проверка
+    "schedule/postponed": 0.0,      # отложена до (секунды с 1970 года)
     "protect/decoys": True,         # ловушки для шифровальщиков вместе с защитой файлов
     "lock/protection": False,       # запрет выключать защиту файлов
     "lock/network": False,          # запрет выключать мониторинг сети
@@ -66,7 +77,7 @@ def reset() -> None:
     store = _store()
     for key in DEFAULTS:
         if key not in ("stats/last_scan", "db/last_update", "report/first_run",
-                       "report/last_end"):
+                       "report/last_end", "schedule/last_run"):
             store.remove(key)
 
 

@@ -3,23 +3,75 @@
  <class>AboutPage</class>
  <widget class="QWidget" name="AboutPage">
   <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>12</number></property>
    <item>
-    <widget class="QLabel" name="lblAppName">
-     <property name="styleSheet"><string notr="true">font-size: 24pt; font-weight: 700;</string></property>
-     <property name="text"><string>Название программы</string></property>
+    <layout class="QHBoxLayout" name="layoutHeader">
+     <property name="spacing"><number>16</number></property>
+     <item><widget class="QLabel" name="lblIcon"><property name="minimumSize"><size><width>72</width><height>72</height></size></property><property name="maximumSize"><size><width>72</width><height>72</height></size></property></widget></item>
+     <item>
+      <layout class="QVBoxLayout" name="layoutTitle">
+       <property name="spacing"><number>2</number></property>
+       <item>
+        <widget class="QLabel" name="lblAppName">
+         <property name="styleSheet"><string notr="true">font-size: 24pt; font-weight: 700;</string></property>
+         <property name="text"><string>Название программы</string></property>
+        </widget>
+       </item>
+       <item><widget class="QLabel" name="lblVersion"><property name="text"><string>Версия</string></property></widget></item>
+      </layout>
+     </item>
+     <item><spacer name="headerSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item>
+     <item>
+      <widget class="QPushButton" name="btnRepo">
+       <property name="minimumSize"><size><width>220</width><height>36</height></size></property>
+       <property name="text"><string>Открыть репозиторий на GitHub</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QFrame" name="cardAbout">
+     <property name="card" stdset="0"><bool>true</bool></property>
+     <layout class="QVBoxLayout" name="layoutAbout">
+      <item><widget class="QLabel" name="titleAbout"><property name="role" stdset="0"><string>cardTitle</string></property><property name="text"><string>О программе</string></property></widget></item>
+      <item><widget class="QLabel" name="lblDescription"><property name="text"><string>Описание</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+      <item><widget class="QLabel" name="lblFeatures"><property name="text"><string>Возможности</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+     </layout>
     </widget>
    </item>
-   <item><widget class="QLabel" name="lblVersion"><property name="text"><string>Версия</string></property></widget></item>
-   <item><widget class="QLabel" name="lblDescription"><property name="text"><string>Описание</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
-   <item><widget class="QLabel" name="lblThesis"><property name="text"><string>Тема</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
-   <item><widget class="QLabel" name="lblAuthor"><property name="text"><string>Автор</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
-   <item><widget class="QLabel" name="lblComponents"><property name="text"><string>Компоненты</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
-   <item><widget class="QLabel" name="lblLicenses"><property name="text"><string>Лицензии</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
-   <item><widget class="QLabel" name="lblDisclaimer"><property name="text"><string>Предупреждение</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
    <item>
-    <widget class="QPushButton" name="btnRepo">
-     <property name="minimumSize"><size><width>0</width><height>36</height></size></property>
-     <property name="text"><string>Открыть репозиторий на GitHub</string></property>
+    <layout class="QHBoxLayout" name="layoutCards">
+     <property name="spacing"><number>12</number></property>
+     <item>
+      <widget class="QFrame" name="cardWork">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutWork">
+        <item><widget class="QLabel" name="titleWork"><property name="role" stdset="0"><string>cardTitle</string></property><property name="text"><string>Учебная работа</string></property></widget></item>
+        <item><widget class="QLabel" name="lblThesis"><property name="text"><string>Тема</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+        <item><widget class="QLabel" name="lblAuthor"><property name="text"><string>Автор</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QFrame" name="cardTech">
+       <property name="card" stdset="0"><bool>true</bool></property>
+       <layout class="QVBoxLayout" name="layoutTech">
+        <item><widget class="QLabel" name="titleTech"><property name="role" stdset="0"><string>cardTitle</string></property><property name="text"><string>Технологии</string></property></widget></item>
+        <item><widget class="QLabel" name="lblComponents"><property name="text"><string>Компоненты</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+       </layout>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QFrame" name="cardNote">
+     <property name="card" stdset="0"><bool>true</bool></property>
+     <layout class="QHBoxLayout" name="layoutNote">
+      <property name="stretch"><string>0,1</string></property>
+      <property name="spacing"><number>12</number></property>
+      <item><widget class="QLabel" name="lblNoteIcon"><property name="maximumSize"><size><width>40</width><height>16777215</height></size></property><property name="text"><string notr="true">⚠</string></property><property name="styleSheet"><string notr="true">font-size: 18pt; color: #d68910;</string></property></widget></item>
+      <item><widget class="QLabel" name="lblDisclaimer"><property name="text"><string>Предупреждение</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+     </layout>
     </widget>
    </item>
    <item>

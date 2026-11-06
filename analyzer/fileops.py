@@ -170,6 +170,42 @@ def folder_stats(path: str, cancel=None) -> tuple[int, int, int, int]:
     return files, folders, size, on_disk
 
 
+def folder_files(path: str, limit: int, cancel=None) -> tuple[list[str] | None, int, int, bool]:
+    """Все файлы папки с вложенными: (список файлов или None, если папка весит больше limit,
+    размер, число файлов, открылась ли папка). Размер считается целиком и у крупной папки,
+    список файлов перестаёт копиться, как только превышен limit. Ссылки на папки
+    (junction, symlink) не раскрываются."""
+    files: list[str] | None = []
+    size = count = 0
+    stack = [path]
+    opened = True
+    while stack:
+        if cancel is not None and cancel.is_set():
+            break
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            opened = opened and current != path
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink() or entry.is_junction():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    count += 1
+                    size += entry.stat(follow_symlinks=False).st_size
+                    if files is not None:
+                        files.append(entry.path)
+                        if size > limit:
+                            files = None
+            except OSError:
+                continue
+    return files, size, count, opened
+
+
 def folder_properties(path: str, cancel=None) -> list[tuple[str, str]]:
     st = os.stat(path)
     files, folders, size, on_disk = folder_stats(path, cancel)

@@ -69,11 +69,17 @@ class TrayIcon(QSystemTrayIcon):
         self.settings_action.triggered.connect(
             lambda checked=False: window.show_main("Настройки"))
         menu.addSeparator()
-        menu.addAction("Выход").triggered.connect(lambda checked=False: window.quit_app())
+        self.exit_action = menu.addAction("Выход")
+        self.exit_action.triggered.connect(lambda checked=False: window.quit_app())
 
         self.setContextMenu(menu)
         self._menu = menu  # меню должно жить, пока жив значок
         self.activated.connect(self._on_activated)
+
+    def set_exit_allowed(self, allowed: bool) -> None:
+        """Запрет закрытия программы (general/block_exit): пункт «Выход» неактивен."""
+        self.exit_action.setEnabled(allowed)
+        self.exit_action.setText("Выход" if allowed else "Выход (запрещён в настройках)")
 
     def _on_activated(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,

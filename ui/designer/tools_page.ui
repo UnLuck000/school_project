@@ -24,6 +24,8 @@
         <item><widget class="QPushButton" name="btnAutoruns"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Сканер автозапуска</string></property></widget></item>
         <item><widget class="QPushButton" name="btnMemoryDeep"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Память: RWX-регионы и модули</string></property></widget></item>
         <item><widget class="QPushButton" name="btnUsb"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>USB-накопители</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnDrivers"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Уязвимые драйверы</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnExtensions"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Расширения браузеров</string></property></widget></item>
        </layout>
       </widget>
      </item>
@@ -35,6 +37,7 @@
         <item><widget class="QPushButton" name="btnProcessManager"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Диспетчер процессов</string></property></widget></item>
         <item><widget class="QPushButton" name="btnLinkCheck"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка ссылки и файла</string></property></widget></item>
         <item><widget class="QPushButton" name="btnPasswordLeak"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Проверка пароля по утечкам</string></property></widget></item>
+        <item><widget class="QPushButton" name="btnVpn"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>VPN</string></property></widget></item>
        </layout>
       </widget>
      </item>

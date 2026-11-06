@@ -3,11 +3,11 @@
 Только внешний вид: запуск и остановка защиты, папки и журнал — в gui.MainWindow, которое
 берёт отсюда виджеты (watch_list, protect_btn, protect_status, protect_log, decoys_label...).
 """
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
-    QStyle, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget,
+    QProgressBar, QPushButton, QStyle, QVBoxLayout, QWidget,
 )
 
 GOOD, BAD = "#2e9e4f", "#c0392b"
@@ -76,6 +76,7 @@ class ProtectionPage(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(12)
+        self.grid = grid
 
         # ---------- свои папки ----------
         card, layout = _card("Папки под наблюдением")
@@ -104,8 +105,8 @@ class ProtectionPage(QWidget):
             system_folders)
         system_row, _, _ = self._item(
             "🖥️", f"Системные папки ({len(system_folders)})",
-            "Автозагрузка, Windows, временные папки, AppData, Program Files: программы, "
-            "библиотеки и скрипты. Список — при наведении.")
+            "Windows, автозагрузка, AppData, Program Files: программы и скрипты. Список — "
+            "при наведении.")
         system_row.setToolTip(system_tip)
         layout.addWidget(system_row)
         decoys_row, self.decoys_label, decoys_layout = self._item(
@@ -115,8 +116,62 @@ class ProtectionPage(QWidget):
         layout.addWidget(decoys_row)
         usb_row, self.usb_label, _ = self._item("🔌", "Флешки", "")
         layout.addWidget(usb_row)
+        launch_row, self.launch_label, _ = self._item("🚦", "Запуск программ", "")
+        layout.addWidget(launch_row)
+        stealer_row, self.stealer_label, _ = self._item("🔐", "Пароли и cookies браузеров", "")
+        layout.addWidget(stealer_row)
         layout.addStretch()
+        self.also_card = card
         grid.addWidget(card, 0, 1)
+
+        # ---------- полная проверка ----------
+        card, layout = _card("Проверка дисков")
+        layout.addWidget(_label(
+            "Полная — все папки и файлы выбранного диска; в папках игр (Steam, Epic, Unity, "
+            "Unreal) проверяются только программы и библиотеки, текстуры и архивы ресурсов "
+            "пропускаются. Быстрая — папки Windows и Users целиком, в остальных местах только "
+            ".exe, .dll и программы под другим расширением (до 16 МБ). Найденное появится в "
+            "журнале защиты. Расписание — в настройках.", "hint"))
+        row = QHBoxLayout()
+        self.full_drive = QComboBox()
+        self.full_drive.setMinimumWidth(320)
+        self.full_btn = QPushButton("Полная проверка")
+        self.full_btn.setMinimumHeight(32)
+        self.quick_btn = QPushButton("Быстрая проверка")
+        self.quick_btn.setMinimumHeight(32)
+        row.addWidget(QLabel("Диск:"))
+        row.addWidget(self.full_drive, 1)
+        row.addWidget(self.quick_btn)
+        row.addWidget(self.full_btn)
+        layout.addLayout(row)
+        self.full_progress = QProgressBar()
+        self.full_progress.setRange(0, 0)  # сколько всего файлов, заранее неизвестно
+        self.full_progress.setTextVisible(False)
+        self.full_progress.setMaximumHeight(6)
+        self.full_progress.setVisible(False)
+        layout.addWidget(self.full_progress)
+        self.full_status = _label("", "hint")
+        self.full_status.setVisible(False)
+        layout.addWidget(self.full_status)
+        # плановая проверка скоро начнётся: видно 10 минут до начала
+        self.schedule_bar = QFrame()
+        self.schedule_bar.setObjectName("scheduleBar")
+        self.schedule_bar.setStyleSheet(
+            "QFrame#scheduleBar { background: rgba(214, 137, 16, 0.12); "
+            "border: 1px solid rgba(214, 137, 16, 0.55); border-radius: 8px; }")
+        bar = QHBoxLayout(self.schedule_bar)
+        bar.setContentsMargins(12, 8, 12, 8)
+        self.schedule_label = _label("")
+        self.schedule_now_btn = QPushButton("Начать сейчас")
+        self.schedule_postpone_btn = QPushButton("Отложить на час")
+        self.schedule_skip_btn = QPushButton("Пропустить")
+        bar.addWidget(self.schedule_label, 1)
+        for button in (self.schedule_now_btn, self.schedule_postpone_btn,
+                       self.schedule_skip_btn):
+            bar.addWidget(button)
+        self.schedule_bar.setVisible(False)
+        layout.addWidget(self.schedule_bar)
+        grid.addWidget(card, 1, 0, 1, 2)
 
         # ---------- журнал ----------
         card, layout = _card("Журнал защиты")
@@ -135,16 +190,36 @@ class ProtectionPage(QWidget):
         self.protect_log.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.protect_log.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.protect_log.setAlternatingRowColors(True)
-        self.protect_log.setMinimumHeight(120)
+        self.protect_log.setMinimumHeight(160)
         layout.addWidget(self.protect_log, 1)
         self.clear_log_btn.clicked.connect(self.protect_log.clear)
-        grid.addWidget(card, 1, 0, 1, 2)
+        grid.addWidget(card, 2, 0, 1, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setRowStretch(1, 1)  # верхние карточки — по содержимому, остальное — журналу
+        grid.setRowStretch(2, 1)  # верхние карточки — по содержимому, остальное — журналу
         root.addLayout(grid, 1)
         self.set_running(False)
+
+    def refit(self) -> None:
+        """Высота карточки «Также под защитой» — по тексту с переносами: сетка сама не
+        учитывает перенос строк и обрезает пояснения. Вызывать после смены текстов."""
+        QTimer.singleShot(0, self._refit)
+
+    def _refit(self) -> None:
+        card = self.also_card
+        if card.width() > 0:
+            height = card.layout().totalHeightForWidth(card.width())
+            card.setMinimumHeight(height)
+            self.grid.setRowMinimumHeight(0, height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refit()
 
     @staticmethod
     def _item(icon: str, title: str, text: str) -> tuple[QWidget, QLabel, QHBoxLayout]:
@@ -181,5 +256,8 @@ class ProtectionPage(QWidget):
         self.protect_status.setStyleSheet("background: transparent;")
         self.protect_btn.setText("Выключить защиту" if running else "Включить защиту")
         self.usb_label.setText(
-            "Проверяются при подключении; вирус-ярлык обезвреживается сразу, файлы "
-            "возвращаются на место." if running else "Не проверяются: защита выключена.")
+            "Проверяются при подключении, вирус-ярлык лечится сразу." if running else "Не проверяются: защита выключена.")
+        if not running:
+            self.launch_label.setText("Не проверяется: защита выключена.")
+            self.stealer_label.setText("Не охраняются: защита выключена.")
+        self.refit()

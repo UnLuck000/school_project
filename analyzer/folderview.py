@@ -1,6 +1,8 @@
-"""Сканирование папки: файлы и папки только этого уровня (вложенные не затрагиваются),
-проверка каждого файла движком, действия по правой кнопке и свойства папки."""
+"""Сканирование папки: файлы и папки этого уровня, проверка каждого файла движком, действия
+по правой кнопке и свойства папки. Вложенная папка до 2 ГБ проверяется целиком (со всеми
+файлами внутри), крупнее — только считается её размер."""
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -26,19 +28,24 @@ SORT_ROLE = Qt.ItemDataRole.UserRole + 2
 IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 3
 COLORS = {"threat": (255, 128, 128), "suspicious": (255, 190, 110), "error": (255, 255, 170)}
 COLUMNS = ["Имя", "Тип", "Размер", "Изменён", "Проверка"]
+DIR_LIMIT = 2 * 1024 ** 3  # вложенная папка тяжелее — не проверяется
 
 
 class _Bridge(QObject):
     checked = Signal(int, object)           # номер запроса, [(путь, уровень, текст)]
+    dir_size = Signal(int, str, object, int, bool)  # запрос, папка, размер, файлов, открылась
+    dir_state = Signal(int, str, str, str, str)     # запрос, папка, уровень, текст, подсказка
     finished = Signal(int, int, int)        # номер запроса, угроз, подозрительных
     props = Signal(int, object)             # номер запроса, свойства папки
     item_props = Signal(str, object)        # заголовок окна, свойства файла или папки
 
 
 class _Item(QTreeWidgetItem):
-    """Папки всегда выше файлов, размер сортируется как число."""
+    """Папки выше файлов, размер сортируется как число (по размеру — вперемешку с файлами)."""
     def __lt__(self, other):
         tree = self.treeWidget()
+        if tree is not None and tree.sortColumn() == 2:
+            return item_less(self, other, SORT_ROLE)
         a_dir, b_dir = self.data(0, IS_DIR_ROLE), other.data(0, IS_DIR_ROLE)
         if a_dir != b_dir:
             ascending = tree is None or tree.header().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
@@ -113,6 +120,8 @@ class FolderView(QWidget):
         self._items: dict[str, _Item] = {}
         self.bridge = _Bridge()
         self.bridge.checked.connect(self._on_checked)
+        self.bridge.dir_size.connect(self._on_dir_size)
+        self.bridge.dir_state.connect(self._on_dir_state)
         self.bridge.finished.connect(self._on_finished)
         self.bridge.props.connect(self._on_props)
         self.bridge.item_props.connect(lambda title, rows: _props_dialog(self, title, rows))
@@ -157,11 +166,13 @@ class FolderView(QWidget):
         self._request += 1
         request = self._request
         self._found: list[str] = []  # угрозы и подозрительные — для отчёта о работе
+        self._found_extra: list[str] = []  # то же во вложенных папках (пишет поток проверки)
+        self._big = 0  # вложенных папок тяжелее DIR_LIMIT
         self.folder = os.path.abspath(folder)
         self.tree.setSortingEnabled(False)
         self.tree.clear()
         self._items = {}
-        files = []
+        files, dirs = [], []
         try:
             entries = sorted(os.scandir(self.folder), key=lambda e: e.name.lower())
         except OSError as e:
@@ -174,9 +185,9 @@ class FolderView(QWidget):
             except OSError:
                 continue
             item = _Item([entry.name, "Папка" if is_dir else fileops.file_type(entry.path),
-                          "" if is_dir else fileops.human_size(st.st_size),
+                          "считаю..." if is_dir else fileops.human_size(st.st_size),
                           fileops.fmt_time(st.st_mtime)[:16],
-                          "—" if is_dir else "Ожидает проверки"])
+                          "Считаю размер..." if is_dir else "Ожидает проверки"])
             item.setData(0, PATH_ROLE, entry.path)
             item.setData(0, IS_DIR_ROLE, is_dir)
             item.setData(2, SORT_ROLE, -1 if is_dir else st.st_size)
@@ -184,21 +195,47 @@ class FolderView(QWidget):
             item.setToolTip(0, entry.path)
             self.tree.addTopLevelItem(item)
             self._items[entry.path] = item
-            if not is_dir:
+            if is_dir:
+                if not entry.is_junction() and not entry.is_symlink():
+                    dirs.append(entry.path)
+                else:
+                    item.setText(2, "")
+                    item.setText(4, "Ссылка на другую папку, не проверяется")
+            else:
                 files.append(entry.path)
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         folders = len(entries) - len(files)
         self.summary.setStyleSheet("padding: 8px; border-radius: 6px; font-size: 11pt;")
         self.summary.setText(f"Папка {self.folder}: файлов {len(files)}, папок {folders}. "
-                             "Проверяю файлы (вложенные папки не сканируются)...")
+                             "Проверяю файлы и вложенные папки до 2 ГБ...")
         self.props_tree.clear()
         self.props_tree.addTopLevelItem(QTreeWidgetItem(["Считаю...", ""]))
-        threading.Thread(target=self._scan_job, args=(request, files, cancel), daemon=True).start()
+        sized: queue.Queue = queue.Queue()  # папки с посчитанным размером → проверка
+        threading.Thread(target=self._sizes_job, args=(request, dirs, sized, cancel),
+                         daemon=True).start()
+        threading.Thread(target=self._scan_job, args=(request, files, sized, cancel),
+                         daemon=True).start()
         threading.Thread(target=self._props_job, args=(request, self.folder, cancel),
                          daemon=True).start()
 
-    def _scan_job(self, request: int, files: list[str], cancel: threading.Event) -> None:
+    def _sizes_job(self, request: int, dirs: list[str], sized: queue.Queue,
+                   cancel: threading.Event) -> None:
+        """Размер каждой вложенной папки; папка до DIR_LIMIT уходит на проверку со списком
+        файлов. В конце — None: папок больше не будет."""
+        for folder in dirs:
+            if cancel.is_set():
+                break
+            files, size, count, opened = fileops.folder_files(folder, DIR_LIMIT, cancel)
+            if cancel.is_set():
+                break
+            self.bridge.dir_size.emit(request, folder, size, count, opened)
+            if opened and files:
+                sized.put((folder, files))
+        sized.put(None)
+
+    def _scan_job(self, request: int, files: list[str], sized: queue.Queue,
+                  cancel: threading.Event) -> None:
         threats = suspicious = 0
         try:
             signatures, rules, whitelist = rules_and_bases()
@@ -225,8 +262,53 @@ class FolderView(QWidget):
                 batch, sent = [], time.monotonic()
         if batch:
             self.bridge.checked.emit(request, batch)
+        while not cancel.is_set():
+            entry = sized.get()
+            if entry is None:
+                break
+            folder, folder_files = entry
+            found = self._scan_dir(request, folder, folder_files, signatures, rules,
+                                   whitelist, cancel)
+            threats += found[0]
+            suspicious += found[1]
         if not cancel.is_set():
             self.bridge.finished.emit(request, threats, suspicious)
+
+    def _scan_dir(self, request, folder, files, signatures, rules, whitelist,
+                  cancel) -> tuple[int, int]:
+        """Проверка вложенной папки целиком; в строке папки — ход и итог."""
+        threats = suspicious = done = 0
+        found: list[str] = []
+        sent = 0.0
+        total = len(files)
+        for path, reason, error in scan_pool.check_files(files, signatures, rules, whitelist,
+                                                         cancel=cancel):
+            done += 1
+            if error is None:
+                level, text = classify(reason)
+                if level in ("threat", "suspicious"):
+                    threats += level == "threat"
+                    suspicious += level == "suspicious"
+                    found.append(f"{path}: {text}")
+            if time.monotonic() - sent >= 0.5:
+                sent = time.monotonic()
+                self.bridge.dir_state.emit(request, folder, "", f"Проверяю: {done} из {total}",
+                                           "")
+        if cancel.is_set():
+            return threats, suspicious
+        tip = "\n".join(found[:30]) + (f"\n...и ещё {len(found) - 30}" if len(found) > 30
+                                        else "")
+        if threats:
+            state = ("threat", f"Угроз: {threats}, подозрительных: {suspicious}"
+                     f" (из {total} файлов)")
+        elif suspicious:
+            state = ("suspicious", f"Подозрительных: {suspicious} (из {total} файлов)")
+        else:
+            state = ("clean", f"Чисто (файлов: {total})")
+        self.bridge.dir_state.emit(request, folder, state[0], state[1], tip)
+        if request == self._request:
+            self._found_extra.extend(found)
+        return threats, suspicious
 
     def _props_job(self, request: int, folder: str, cancel: threading.Event) -> None:
         try:
@@ -235,6 +317,44 @@ class FolderView(QWidget):
             rows = [("Ошибка", str(e))]
         if not cancel.is_set():
             self.bridge.props.emit(request, rows)
+
+    def _paint(self, item, level: str) -> None:
+        rgb = COLORS.get(level)
+        if rgb:
+            for col in range(len(COLUMNS)):
+                item.setBackground(col, QBrush(QColor(*rgb)))
+                item.setForeground(col, QBrush(text_color(rgb)))
+
+    def _on_dir_size(self, request: int, folder: str, size: int, count: int,
+                     opened: bool) -> None:
+        item = self._items.get(folder)
+        if request != self._request or item is None:
+            return
+        if not opened:
+            item.setText(2, "")
+            item.setText(4, "Нет доступа")
+            return
+        item.setText(2, fileops.human_size(size))
+        item.setToolTip(2, f"{fileops.exact_size(size)}, файлов: {count}")
+        item.setData(2, SORT_ROLE, size)
+        if size > DIR_LIMIT:
+            self._big += 1
+            text = "Вес > 2 ГБ, не проверена"
+        elif count == 0:
+            text = "Пустая"
+        else:
+            text = "Ожидает проверки"
+        item.setText(4, text)
+        item.setToolTip(4, text)
+
+    def _on_dir_state(self, request: int, folder: str, level: str, text: str,
+                      tip: str) -> None:
+        item = self._items.get(folder)
+        if request != self._request or item is None:
+            return
+        item.setText(4, text)
+        item.setToolTip(4, tip or text)
+        self._paint(item, level)
 
     def _on_checked(self, request: int, batch) -> None:
         if request != self._request:
@@ -247,11 +367,7 @@ class FolderView(QWidget):
             item.setToolTip(4, text)
             if level in ("threat", "suspicious"):
                 self._found.append(f"{path}: {text}")
-            rgb = COLORS.get(level)
-            if rgb:
-                for col in range(len(COLUMNS)):
-                    item.setBackground(col, QBrush(QColor(*rgb)))
-                    item.setForeground(col, QBrush(text_color(rgb)))
+            self._paint(item, level)
 
     def _on_finished(self, request: int, threats: int, suspicious: int) -> None:
         if request != self._request:
@@ -265,9 +381,12 @@ class FolderView(QWidget):
         self.summary.setStyleSheet(
             f"padding: 8px; border-radius: 6px; font-size: 11pt; font-weight: 600; "
             f"background: rgb{rgb}; color: {text_color(rgb).name()};")
-        self.summary.setText(f"{self.folder}: {text}. Вложенные папки не проверялись.")
+        skipped = (f" Не проверены вложенные папки тяжелее 2 ГБ: {self._big}." if self._big
+                   else "")
+        self.summary.setText(f"{self.folder}: {text}.{skipped}")
         from recovery import activity
-        activity.record("scan_folder", f"{self.folder}: {text}", found=list(self._found))
+        activity.record("scan_folder", f"{self.folder}: {text}",
+                        found=self._found + self._found_extra)
         self.summary.setToolTip("Ядра для проверки: " + scan_pool.get_pool().cores_text())
         self.status.emit(f"Проверка папки завершена. {text}", 10000)
         self.scan_done.emit()

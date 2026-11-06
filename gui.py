@@ -98,6 +98,12 @@ class MainWindow(QMainWindow):
     update_progress = Signal(str)
     usb_checked = Signal(object, object)    # DriveReport автопроверки флешки, итог лечения
     decoy_alarm = Signal(object, object)    # изменённые ловушки, виновник
+    full_progress = Signal(object)          # fullscan.Stats во время полной проверки
+    full_found = Signal(str, str, str)      # путь, уровень, текст
+    full_done = Signal(object, bool)        # итог, остановлена ли вручную
+    launch_event = Signal(str, object)      # контроль запуска: вид, сведения
+    stealer_event = Signal(object)          # защита от стилеров: сведения о доступе
+    guard_status = Signal(str, str)         # launch | stealer, текст состояния
 
     def __init__(self):
         super().__init__()
@@ -129,6 +135,13 @@ class MainWindow(QMainWindow):
         self.decoy_watcher = DecoyWatcher(lambda changed, culprit:
                                           self.decoy_alarm.emit(changed, culprit))
         self.decoy_alarm.connect(self._on_decoy_alarm)
+        self.launch_guard = None   # scanner.launchguard.LaunchGuard, пока включена защита
+        self.stealer_guard = None  # toolbox.stealerguard.StealerGuard
+        self.launch_event.connect(self._on_launch_event)
+        self.stealer_event.connect(self._on_stealer_event)
+        self.guard_status.connect(self._on_guard_status)
+        self._tray_target = ""     # что открыть по щелчку на уведомлении: usb | schedule
+        self._schedule_due = 0.0   # когда начнётся объявленная плановая проверка
         self.recent_events: list[tuple[str, str, str]] = []  # для главной: время, текст, уровень
         self._db_stats: dict | None = None  # счётчики баз, пересчитываются после обновления
         self._updating = False
@@ -174,7 +187,12 @@ class MainWindow(QMainWindow):
         self.scan_page.journal_changed.connect(lambda: self.journal_page.refresh())
         self.scan_page.folder_scanned.connect(self._on_folder_scanned)
         self.shell.add_page(SCAN_PAGE, self.scan_page)
-        self.shell.add_page("Защита", self._build_protection_tab())
+        # карточек больше, чем помещается в низкое окно: прокрутка, а не наложение
+        protection_scroll = QScrollArea()
+        protection_scroll.setWidgetResizable(True)
+        protection_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        protection_scroll.setWidget(self._build_protection_tab())
+        self.shell.add_page("Защита", protection_scroll)
         self.shell.add_page("Сеть", self._build_network_tab())
         self.shell.add_page("Журнал действий", log_page)
         self.shell.add_page("Инструменты", self.tools_page)
@@ -213,6 +231,8 @@ class MainWindow(QMainWindow):
     def _on_page_changed(self, title: str):
         if title in ("Главная", "Отладка"):
             self.refresh_dashboard()
+        elif title == "Защита":
+            self.fill_drives()
         elif title == "Журнал действий":
             self._refresh_log_tab()
 
@@ -348,8 +368,7 @@ class MainWindow(QMainWindow):
         # пути к запрещённым инструментам скрываются, открытые окна закрываются
         scan_ok = access.allowed("btnFileAnalyzer")
         self.shell.set_page_visible(SCAN_PAGE, scan_ok)
-        for name, button_id in (("btnQuickScan", "btnFileAnalyzer"),
-                                ("btnScanPath", "btnFileAnalyzer"),
+        for name, button_id in (("btnScanPath", "btnFileAnalyzer"),
                                 ("btnOpenProcesses", "btnProcessManager"),
                                 ("btnOpenJournal", "btnUndoJournal")):
             self.dashboard.set_button_visible(name, access.allowed(button_id))
@@ -358,8 +377,8 @@ class MainWindow(QMainWindow):
         for window, button_id in ((self.usb_window, "btnUsb"),
                                   (self.autoruns_window, "btnAutoruns"),
                                   (self.proc_window, "btnProcessManager"),
-                                  (self.tool_windows.get("link"), "btnLinkCheck"),
-                                  (self.tool_windows.get("password"), "btnPasswordLeak")):
+                                  *((self.tool_windows.get(n), b)
+                                    for n, b in self.TOOL_BUTTONS.items())):
             if window is not None and not access.allowed(button_id):
                 window.hide()
 
@@ -401,6 +420,7 @@ class MainWindow(QMainWindow):
         self.tray = TrayIcon(self, icon)
         for button_id, action in self.tray.tool_actions.items():
             action.setVisible(access.allowed(button_id))
+        self.tray.set_exit_allowed(not cfg.get("general/block_exit"))
         self.tray.show()
 
     def show_main(self, page: str | None = None):
@@ -510,6 +530,10 @@ class MainWindow(QMainWindow):
                                   QSystemTrayIcon.MessageIcon.Warning, 10000)
 
     def _on_tray_message(self):
+        if self._tray_target == "schedule":
+            self._tray_target = ""
+            self.show_main("Защита")  # там кнопки «Начать сейчас», «Отложить», «Пропустить»
+            return
         if self._usb_pending:
             root, report = self._usb_pending
             self._usb_pending = None
@@ -519,8 +543,11 @@ class MainWindow(QMainWindow):
                 self.show_log("Действия")
 
     # ---------- проверка ссылки, пароля, ловушки ----------
+    TOOL_BUTTONS = {"link": "btnLinkCheck", "password": "btnPasswordLeak",
+                    "drivers": "btnDrivers", "extensions": "btnExtensions", "vpn": "btnVpn"}
+
     def open_tool(self, name: str):
-        if self.tool_blocked({"link": "btnLinkCheck", "password": "btnPasswordLeak"}[name]):
+        if self.tool_blocked(self.TOOL_BUTTONS[name]):
             return
         from toolbox import windows
         window = self.tool_windows.get(name)
@@ -528,8 +555,19 @@ class MainWindow(QMainWindow):
             if name == "link":
                 window = windows.LinkCheckWindow(self)
                 window.open_file.connect(self.open_analyzer)
-            else:
+            elif name == "password":
                 window = windows.PasswordLeakWindow(self)
+            elif name == "drivers":
+                from toolbox.driverswindow import DriversWindow
+                window = DriversWindow(self)
+                window.journal_changed.connect(self.journal_page.refresh)
+            elif name == "extensions":
+                from toolbox.extwindow import ExtensionsWindow
+                window = ExtensionsWindow(self)
+                window.journal_changed.connect(self.journal_page.refresh)
+            else:
+                from vpn.window import VpnWindow
+                window = VpnWindow(self)
             self.tool_windows[name] = window
         window.show()
         window.raise_()
@@ -560,13 +598,14 @@ class MainWindow(QMainWindow):
         else:
             state = "следят за изменениями" if self.decoy_watcher.running else \
                 "ждут включения защиты"
-            text = (f"{len(manifest)} файлов-приманок, {state}. Папки скрыты в Проводнике "
-                    "как защищённые системные.")
+            text = f"{len(manifest)} файлов-приманок, {state}. Папки скрыты в Проводнике."
             tip = "\n".join(str(d) for d in decoys.decoy_dirs(manifest))
         self.decoys_label.setText(text)
         self.decoys_label.setToolTip(tip)
         self.decoys_btn.setToolTip(tip)
         self.decoys_btn.setEnabled(bool(manifest))
+        if hasattr(self, "protection_page"):
+            self.protection_page.refit()
 
     def _open_decoys(self):
         from toolbox import decoys
@@ -731,11 +770,10 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(appinfo.RELEASES_URL))
 
     def quick_scan(self):
-        downloads = Path.home() / "Downloads"
-        if not downloads.is_dir():
-            QMessageBox.information(self, "Быстрая проверка", "Папка «Загрузки» не найдена")
-            return
-        self.open_analyzer(str(downloads))
+        """Кнопка главной: быстрая проверка (Windows, Users и программы на дисках)."""
+        self.shell.show_page("Защита")
+        if self._full_cancel is None:
+            self.toggle_full_scan("quick", all_drives=True)
 
     def start_auto_update(self):
         """Автообновление баз: при запуске и затем каждые полчаса проверяется, прошли ли
@@ -812,8 +850,14 @@ class MainWindow(QMainWindow):
             heuristics.set_threshold(int(value))
         elif key.startswith("lock/"):
             self.apply_access()
+        elif key == "general/block_exit" and self.tray is not None:
+            self.tray.set_exit_allowed(not value)
         elif key == "protect/decoys":
             self.apply_decoys()
+        elif key in ("protect/launch", "protect/stealer"):
+            self.apply_guards()
+        elif key.startswith("schedule/"):
+            self.check_schedule()
         elif key in ("scan/mode", "scan/ecores_only", "scan/revocation"):
             scan_pool.apply_settings()
 
@@ -1030,7 +1074,317 @@ class MainWindow(QMainWindow):
         self.protect_log = page.protect_log
         self.protect_log.customContextMenuRequested.connect(self._protect_log_menu)
         self._refresh_decoys_info()
+        self._full_cancel: threading.Event | None = None
+        self._full_mode = "full"
+        page.full_btn.clicked.connect(lambda checked=False: self.toggle_full_scan("full"))
+        page.quick_btn.clicked.connect(lambda checked=False: self.toggle_full_scan("quick"))
+        self.full_progress.connect(self._on_full_progress)
+        self.full_found.connect(self._on_full_found)
+        self.full_done.connect(self._on_full_done)
+        self.fill_drives()
         return page
+
+    # ---------- контроль запуска и защита от стилеров ----------
+    def apply_guards(self):
+        """Работают вместе с защитой файлов, каждый — если включён в настройках."""
+        on = self.monitor is not None
+        page = self.protection_page
+        want_launch = on and cfg.get("protect/launch")
+        if want_launch and self.launch_guard is None:
+            from scanner.launchguard import LaunchGuard
+            self.launch_guard = LaunchGuard(lambda k, i: self.launch_event.emit(k, i))
+            self.launch_guard.start()
+            page.launch_label.setText("Загружаю базы...")
+        elif not want_launch and self.launch_guard is not None:
+            guard, self.launch_guard = self.launch_guard, None
+            threading.Thread(target=guard.stop, daemon=True).start()
+        if not want_launch and on:
+            page.launch_label.setText("Выключен в дополнительных настройках.")
+        want_stealer = on and cfg.get("protect/stealer")
+        if want_stealer and self.stealer_guard is None:
+            from toolbox.stealerguard import StealerGuard
+            self.stealer_guard = StealerGuard(
+                lambda info: self.stealer_event.emit(info),
+                lambda text: self.guard_status.emit("stealer", text))
+            threading.Thread(target=self.stealer_guard.start, daemon=True).start()
+        elif not want_stealer and self.stealer_guard is not None:
+            guard, self.stealer_guard = self.stealer_guard, None
+            threading.Thread(target=guard.stop, daemon=True).start()
+        if not want_stealer and on:
+            page.stealer_label.setText("Выключена в дополнительных настройках.")
+        page.refit()
+
+    def _on_guard_status(self, which: str, text: str):
+        label = (self.protection_page.launch_label if which == "launch"
+                 else self.protection_page.stealer_label)
+        label.setText(text.split(": ", 1)[-1][:1].upper() + text.split(": ", 1)[-1][1:])
+        self.protection_page.refit()
+
+    def _protect_line(self, text: str, path: str, color: str):
+        item = QListWidgetItem(f"{time.strftime('%H:%M:%S')}  {text}")
+        if path:
+            item.setData(ID_ROLE, path)
+            item.setToolTip("Правый клик: в карантин, открыть в сканере, показать в проводнике")
+        item.setForeground(QBrush(QColor(color)))
+        self.protect_log.addItem(item)
+        self.protect_log.scrollToBottom()
+
+    def _on_launch_event(self, kind: str, info):
+        if kind == "status":
+            self._on_guard_status("launch", info)
+            return
+        if kind == "error":
+            self._protect_line(f"[Запуск] {info}", "", "darkorange")
+            return
+        name, exe, text = info["name"], info["exe"], info["text"]
+        if kind == "blocked":
+            what = "завершён" if info.get("killed") else \
+                "обнаружен (экстренное завершение отключено)"
+            line = f"[Запуск] {name}: {text}. Процесс {what}"
+            activity.record("launch", f"{exe}: {text}", killed=info.get("killed"),
+                            parent=info.get("parent", ""))
+            self.add_event(f"Угроза при запуске: {name}", "threat")
+            self._protect_line(line, exe, "red")
+            if self.tray is not None:
+                self.tray.showMessage(
+                    "Обнаружен вирус", f"{name}: {text}\nПравый клик в журнале защиты: "
+                    "«В карантин».", QSystemTrayIcon.MessageIcon.Critical, 10000)
+            self.refresh_dashboard()
+            return
+        level = "red" if kind == "threat" else "darkorange"
+        activity.record("launch", f"{exe}: {text}")
+        self._protect_line(f"[Запуск] {name}: {text}", exe, level)
+        if kind == "threat":
+            self.add_event(f"Угроза среди процессов: {name}", "threat")
+
+    def _on_stealer_event(self, info):
+        from toolbox.windows import stealer_alarm
+        self.add_event(f"Доступ к паролям браузеров: {info['name']}", "threat")
+        self._protect_line(f"[Стилер?] {info['name']} открыл {info['kind']} ({info['owner']})",
+                           info.get("exe", ""), "red")
+        self.show_main()
+        stealer_alarm(self, info, self.stealer_guard)
+
+    # ---------- плановая проверка ----------
+    def start_schedule(self):
+        page = self.protection_page
+        page.schedule_now_btn.clicked.connect(lambda checked=False: self._schedule_now())
+        page.schedule_postpone_btn.clicked.connect(lambda checked=False: self._schedule_postpone())
+        page.schedule_skip_btn.clicked.connect(lambda checked=False: self._schedule_skip())
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.timeout.connect(self.check_schedule)
+        self._schedule_timer.start(15 * 1000)
+        QTimer.singleShot(15000, self.check_schedule)  # при запуске: не пропущена ли
+
+    def check_schedule(self):
+        from scanner import schedule
+        now = time.time()
+        if not cfg.get("schedule/enabled"):
+            self.settings_page.set_schedule_text("Расписание выключено.")
+            if self._schedule_due:  # выключили, пока шёл отсчёт
+                self._schedule_due = 0.0
+                self._hide_schedule_bar()
+            return
+        due = schedule.next_run(cfg.get("schedule/last_run"), cfg.get("schedule/period"),
+                                cfg.get("schedule/time"), now, cfg.get("schedule/postponed"))
+        kind = schedule.KINDS.get(cfg.get("schedule/kind"), "Полная проверка")
+        self.settings_page.set_schedule_text(f"Следующая: {kind.lower()}, "
+                                             f"{schedule.describe(due, now)}.")
+        if self._full_cancel is not None:
+            return  # проверка уже идёт
+        if self._schedule_due:
+            if now >= self._schedule_due:
+                self._schedule_due = 0.0
+                self._run_scheduled()
+            else:
+                self._show_schedule_bar(kind)
+            return
+        if now >= due - schedule.WARN_SECONDS:
+            # пропущенная проверка (компьютер был выключен) тоже предупреждает за 10 минут
+            self._schedule_due = max(due, now + schedule.WARN_SECONDS)
+            self._remind(kind)
+
+    def _remind(self, title: str):
+        """Обычное уведомление Windows (через значок в трее); кнопки — на странице «Защита»,
+        щелчок по уведомлению открывает её."""
+        if self.tray is not None:
+            self._tray_target = "schedule"
+            self._usb_pending = None
+            self.tray.showMessage(
+                "Плановая проверка через 10 минут",
+                f"Скоро начнётся {title.lower()}: она нагружает процессор и диск. Если вы "
+                "играете или работаете в тяжёлой программе, сохраните работу. Нажмите, чтобы "
+                "отложить или пропустить.",
+                QSystemTrayIcon.MessageIcon.Information, 15000)
+        self._show_schedule_bar(title)
+        activity.record("schedule", f"Предупреждение: через 10 минут — {title.lower()}")
+
+    def _show_schedule_bar(self, title: str):
+        page = self.protection_page
+        minutes = max(1, round((self._schedule_due - time.time()) / 60))
+        page.schedule_label.setText(f"Через {minutes} мин начнётся плановая "
+                                    f"{title.lower()}.")
+        page.schedule_bar.setVisible(True)
+
+    def _hide_schedule_bar(self):
+        self.protection_page.schedule_bar.setVisible(False)
+        self._tray_target = ""
+
+    def _schedule_now(self):
+        self._schedule_due = 0.0
+        self._hide_schedule_bar()
+        self._run_scheduled()
+
+    def _schedule_postpone(self, seconds: int = 3600):
+        self._schedule_due = 0.0
+        self._hide_schedule_bar()
+        cfg.set_("schedule/postponed", time.time() + seconds)
+        activity.record("schedule", "Плановая проверка отложена на час")
+        self.check_schedule()
+
+    def _schedule_skip(self):
+        self._schedule_due = 0.0
+        self._hide_schedule_bar()
+        cfg.set_("schedule/last_run", time.time())  # следующая — через период
+        cfg.set_("schedule/postponed", 0.0)
+        activity.record("schedule", "Плановая проверка пропущена пользователем")
+        self.check_schedule()
+
+    def _run_scheduled(self):
+        self._hide_schedule_bar()
+        cfg.set_("schedule/last_run", time.time())
+        cfg.set_("schedule/postponed", 0.0)
+        kind = cfg.get("schedule/kind")
+        activity.record("schedule", f"Плановая проверка начата ({kind})")
+        self.add_event("Плановая проверка начата", "info")
+        if self._full_cancel is None:
+            self.toggle_full_scan("quick" if kind == "quick" else "full", all_drives=True)
+        self.check_schedule()
+
+    # ---------- полная проверка ----------
+    def fill_drives(self):
+        """Список дисков: заново при каждом показе страницы (флешку могли вставить)."""
+        if self._full_cancel is not None:
+            return
+        from scanner import fullscan
+        combo = self.protection_page.full_drive
+        previous = combo.currentData()
+        combo.clear()
+        found = fullscan.drives()
+        if len(found) > 1:
+            combo.addItem(f"Все диски ({len(found)})", [d.root for d in found])
+        for drive in found:
+            combo.addItem(drive.title(), [drive.root])
+        if not found:  # не Windows или диски не определились
+            combo.addItem(os.path.abspath(os.sep), [os.path.abspath(os.sep)])
+        index = combo.findData(previous)
+        combo.setCurrentIndex(max(0, index))
+
+    def toggle_full_scan(self, mode: str = "full", all_drives: bool = False):
+        """mode: full | quick. all_drives — все локальные диски (плановая, с главной)."""
+        page = self.protection_page
+        if self._full_cancel is not None:
+            self._full_cancel.set()
+            button = page.quick_btn if self._full_mode == "quick" else page.full_btn
+            button.setEnabled(False)
+            button.setText("Останавливаю...")
+            return
+        from scanner import fullscan
+        if all_drives:
+            roots = [d.root for d in fullscan.drives() if not d.removable] or \
+                [os.path.abspath(os.sep)]
+        else:
+            roots = page.full_drive.currentData() or []
+        self._full_mode = mode
+        cancel = self._full_cancel = threading.Event()
+        active, other = ((page.quick_btn, page.full_btn) if mode == "quick"
+                         else (page.full_btn, page.quick_btn))
+        active.setText("Остановить проверку")
+        other.setEnabled(False)
+        page.full_drive.setEnabled(False)
+        page.full_progress.setVisible(True)
+        page.full_status.setVisible(True)
+        page.full_status.setToolTip("")
+        page.full_status.setText("Загружаю базы...")
+        self._full_found_list: list[str] = []
+        title = "Быстрая проверка" if mode == "quick" else "Полная проверка"
+        activity.record("full_scan", f"{title} начата: " + ", ".join(roots))
+
+        def job():
+            try:
+                stats = fullscan.run(roots, self.full_progress.emit,
+                                     self.full_found.emit, cancel, mode)
+            except Exception as e:  # базы не загрузились и т.п.
+                stats = str(e)
+            self.full_done.emit(stats, cancel.is_set())
+
+        threading.Thread(target=job, daemon=True).start()
+
+    @staticmethod
+    def _full_text(stats) -> str:
+        from analyzer.fileops import human_size
+        text = (f"Проверено файлов: {stats.checked:,}. Пропущено (ресурсы игр, данные): "
+                f"{stats.skipped:,} ({human_size(stats.skipped_bytes)})"
+                ).replace(",", " ")
+        if stats.game_dirs:
+            text += f", папок игр: {len(stats.game_dirs)}"
+        text += f". Угроз: {stats.threats}, подозрительных: {stats.suspicious}."
+        return text
+
+    @staticmethod
+    def _duration(started: float) -> str:
+        seconds = int(time.time() - started)
+        if seconds < 60:
+            return f"{seconds} с"
+        if seconds < 3600:
+            return f"{seconds // 60} мин {seconds % 60} с"
+        return f"{seconds // 3600} ч {seconds // 60 % 60} мин"
+
+    def _on_full_progress(self, stats):
+        if self._full_cancel is None or self._full_cancel.is_set():
+            return
+        self.protection_page.full_status.setText(
+            f"{self._full_text(stats)} Идёт {self._duration(stats.started)}.\n"
+            f"Сейчас: {stats.current}")
+
+    def _on_full_found(self, path: str, level: str, text: str):
+        self._full_found_list.append(f"{path}: {text}")
+        title = "Быстрая проверка" if self._full_mode == "quick" else "Полная проверка"
+        item = QListWidgetItem(f"{time.strftime('%H:%M:%S')}  [{title}] {path}: {text}")
+        item.setData(ID_ROLE, path)
+        item.setToolTip("Правый клик: в карантин, открыть в сканере, показать в проводнике")
+        item.setForeground(QBrush(QColor("red" if level == "threat" else "darkorange")))
+        self.protect_log.addItem(item)
+        self.protect_log.scrollToBottom()
+        if level == "threat":
+            self.add_event(f"Угроза: {os.path.basename(path)} ({text})", "threat")
+
+    def _on_full_done(self, stats, stopped: bool):
+        page = self.protection_page
+        self._full_cancel = None
+        for button, text in ((page.full_btn, "Полная проверка"),
+                             (page.quick_btn, "Быстрая проверка")):
+            button.setEnabled(True)
+            button.setText(text)
+        page.full_drive.setEnabled(True)
+        page.full_progress.setVisible(False)
+        if isinstance(stats, str):
+            page.full_status.setText(f"Полная проверка не удалась: {stats}")
+            return
+        title = "Быстрая проверка" if self._full_mode == "quick" else "Полная проверка"
+        head = (f"{title} остановлена" if stopped else
+                f"{title} завершена за {self._duration(stats.started)}")
+        text = f"{head}. {self._full_text(stats)}"
+        page.full_status.setText(text)
+        if stats.game_dirs:
+            shown = stats.game_dirs[:30]
+            page.full_status.setToolTip(
+                "Папки игр (проверены только программы и библиотеки):\n" + "\n".join(shown)
+                + (f"\n...и ещё {len(stats.game_dirs) - 30}" if len(stats.game_dirs) > 30
+                   else ""))
+        activity.record("full_scan", text, found=list(self._full_found_list))
+        self.add_event(head, "threat" if stats.threats else "info")
+        self.statusBar().showMessage(text, 15000)
 
     def _threat_paths(self) -> list[str]:
         paths = []
@@ -1128,6 +1482,7 @@ class MainWindow(QMainWindow):
         self.monitor.start()
         self._set_protection_ui(True)
         self.apply_decoys()  # ловушки для шифровальщиков — часть защиты
+        self.apply_guards()  # контроль запуска и защита от стилеров — тоже
 
     def _set_protection_ui(self, running: bool):
         self.protect_btn.setEnabled(True)
@@ -1142,6 +1497,7 @@ class MainWindow(QMainWindow):
     def _protection_stopped(self):
         self.monitor = None
         self.decoy_watcher.stop()
+        self.apply_guards()
         self._refresh_decoys_info()
         self._set_protection_ui(False)
 
@@ -1339,6 +1695,8 @@ class MainWindow(QMainWindow):
 
     # ---------- закрытие окна ----------
     def _shutdown_all(self):
+        if self._full_cancel is not None:
+            self._full_cancel.set()
         verdict_cache.flush()
         scan_pool.shutdown()
         if self.recovery_window is not None:
@@ -1356,6 +1714,12 @@ class MainWindow(QMainWindow):
         if self.monitor is not None:
             self.monitor.stop()
         self.decoy_watcher.stop()
+        for guard in (self.launch_guard, self.stealer_guard):
+            if guard is not None:
+                guard.stop()
+        vpn_window = self.tool_windows.get("vpn")
+        if vpn_window is not None:
+            vpn_window.shutdown()  # туннель не остаётся висеть после выхода
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -1494,4 +1858,5 @@ if __name__ == "__main__":
     window.start_activity_report()
     window.start_usb_watch()
     window.start_auto_update()
+    window.start_schedule()
     sys.exit(app.exec())

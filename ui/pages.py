@@ -3,9 +3,10 @@ import time
 from PySide6.QtCore import QSize, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGroupBox, QLabel,
-    QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStyle, QVBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
+    QGroupBox, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QStyle,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -202,6 +203,9 @@ class ToolsPage(_UiPage):
         "btnUsb": ("🔌", "Вирус-ярлык на флешке: найти и вернуть файлы"),
         "btnLinkCheck": ("🔗", "Ссылка и файл по ней — до того, как открыть"),
         "btnPasswordLeak": ("🔑", "Не утёк ли пароль — без отправки самого пароля"),
+        "btnDrivers": ("🧩", "Уязвимые драйверы, через которые выключают защиту"),
+        "btnExtensions": ("🧭", "Расширения браузеров, их права и уведомления сайтов"),
+        "btnVpn": ("🌐", "Подключение к интернету через VPN-сервер"),
     }
     STYLE = """
         QGroupBox { background: palette(base); border: 1px solid palette(mid);
@@ -306,6 +310,18 @@ class SettingsPage(_UiPage):
         self.spn_interval = child(ui, QSpinBox, "spnInterval")
         self.chk_explorer = child(ui, QCheckBox, "chkExplorerMenu")
         self.chk_decoys = child(ui, QCheckBox, "chkDecoys")
+        self.chk_launch = child(ui, QCheckBox, "chkLaunchGuard")
+        self.chk_stealer = child(ui, QCheckBox, "chkStealerGuard")
+        from PySide6.QtWidgets import QTimeEdit
+        from scanner import schedule
+        self.chk_schedule = child(ui, QCheckBox, "chkSchedule")
+        self.cmb_schedule_kind = child(ui, QComboBox, "cmbScheduleKind")
+        self.cmb_schedule_period = child(ui, QComboBox, "cmbSchedulePeriod")
+        self.time_schedule = child(ui, QTimeEdit, "timeSchedule")
+        self.lbl_schedule_next = child(ui, QLabel, "lblScheduleNext")
+        self._kinds, self._periods = list(schedule.KINDS), list(schedule.PERIODS)
+        self.cmb_schedule_kind.addItems(list(schedule.KINDS.values()))
+        self.cmb_schedule_period.addItems(list(schedule.PERIODS.values()))
         self.group_scan = child(ui, QGroupBox, "groupScan")
         self.group_scan.setVisible(False)  # открывается паролем режима отладки
         self.group_locks = child(ui, QGroupBox, "groupLocks")
@@ -341,14 +357,18 @@ class SettingsPage(_UiPage):
             ("lock/autoruns", "chkLockAutoruns"), ("lock/file_analyzer", "chkLockFileAnalyzer"),
             ("lock/process_manager", "chkLockProcessManager"),
             ("lock/link_check", "chkLockLinkCheck"), ("lock/password_leak", "chkLockPasswordLeak"),
-            ("lock/system_checks", "chkLockSystemChecks"), ("lock/journal", "chkLockJournal"))}
+            ("lock/system_checks", "chkLockSystemChecks"), ("lock/journal", "chkLockJournal"),
+            ("lock/drivers", "chkLockDrivers"), ("lock/extensions", "chkLockExtensions"),
+            ("lock/vpn", "chkLockVpn"))}
         self.btn_advanced = child(ui, QPushButton, "btnAdvanced")
         self.btn_advanced.clicked.connect(lambda checked=False: self.advanced_requested.emit())
         self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_block_exit,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
                      self.spn_workers, self.spn_interval,
                      self.chk_explorer, self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
-                     self.chk_revocation, *self.locks.values())
+                     self.chk_revocation, self.chk_launch, self.chk_stealer,
+                     self.chk_schedule, self.cmb_schedule_kind, self.cmb_schedule_period,
+                     self.time_schedule, *self.locks.values())
         self.load_values()
 
         self.chk_autostart.toggled.connect(self._on_autostart)
@@ -357,6 +377,15 @@ class SettingsPage(_UiPage):
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
         self.chk_explorer.toggled.connect(self._on_explorer_menu)
         self.chk_decoys.toggled.connect(lambda v: self._save("protect/decoys", v))
+        self.chk_launch.toggled.connect(lambda v: self._save("protect/launch", v))
+        self.chk_stealer.toggled.connect(lambda v: self._save("protect/stealer", v))
+        self.chk_schedule.toggled.connect(self._on_schedule_enabled)
+        self.cmb_schedule_kind.currentIndexChanged.connect(
+            lambda i: self._save("schedule/kind", self._kinds[i]))
+        self.cmb_schedule_period.currentIndexChanged.connect(
+            lambda i: self._save("schedule/period", self._periods[i]))
+        self.time_schedule.timeChanged.connect(
+            lambda t: self._save("schedule/time", t.toString("HH:mm")))
         self.cmb_theme.currentIndexChanged.connect(
             lambda i: self._save("general/theme", THEMES[i]))
         self.spn_threshold.valueChanged.connect(lambda v: self._save("scan/threshold", v))
@@ -385,6 +414,19 @@ class SettingsPage(_UiPage):
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
         self.chk_explorer.setChecked(cfg.explorer_menu_enabled())
         self.chk_decoys.setChecked(cfg.get("protect/decoys"))
+        self.chk_launch.setChecked(cfg.get("protect/launch"))
+        self.chk_stealer.setChecked(cfg.get("protect/stealer"))
+        from PySide6.QtCore import QTime
+        from scanner import schedule
+        self.chk_schedule.setChecked(cfg.get("schedule/enabled"))
+        kind, period = cfg.get("schedule/kind"), cfg.get("schedule/period")
+        self.cmb_schedule_kind.setCurrentIndex(self._kinds.index(kind)
+                                               if kind in self._kinds else 0)
+        self.cmb_schedule_period.setCurrentIndex(self._periods.index(period)
+                                                 if period in self._periods else 0)
+        hours, minutes = schedule.parse_time(cfg.get("schedule/time"))
+        self.time_schedule.setTime(QTime(hours, minutes))
+        self._schedule_widgets(self.chk_schedule.isChecked())
         theme = cfg.get("general/theme")
         self.cmb_theme.setCurrentIndex(THEMES.index(theme) if theme in THEMES else 0)
         self.spn_threshold.setValue(cfg.get("scan/threshold"))
@@ -399,6 +441,20 @@ class SettingsPage(_UiPage):
             box.setChecked(cfg.get(key))
         for widget in self._all:
             widget.blockSignals(False)
+
+    def _schedule_widgets(self, on: bool) -> None:
+        for w in (self.cmb_schedule_kind, self.cmb_schedule_period, self.time_schedule):
+            w.setEnabled(on)
+
+    def _on_schedule_enabled(self, on: bool) -> None:
+        self._schedule_widgets(on)
+        if on:  # отсчёт — от включения: первая проверка в ближайшее выбранное время
+            cfg.set_("schedule/last_run", 0.0)
+            cfg.set_("schedule/postponed", 0.0)
+        self._save("schedule/enabled", on)
+
+    def set_schedule_text(self, text: str) -> None:
+        self.lbl_schedule_next.setText(text)
 
     def _show_mode_hint(self) -> None:
         from scanner.pool import MODES
@@ -451,24 +507,43 @@ class SettingsPage(_UiPage):
 class AboutPage(_UiPage):
     UI_NAME = "about_page"
 
+    STYLE = """
+        QFrame[card="true"] { background: palette(base); border: 1px solid palette(mid);
+                              border-radius: 10px; }
+        QFrame[card="true"] QLabel { background: transparent; border: none; }
+        QLabel[role="cardTitle"] { font-size: 11pt; font-weight: 600; }
+    """
+
     def __init__(self):
         super().__init__()
         ui = self.ui
+        ui.setStyleSheet(self.STYLE)
+        for name in ("cardAbout", "cardWork", "cardTech", "cardNote"):
+            card = child(ui, QFrame, name)
+            card.layout().setContentsMargins(14, 12, 14, 12)
+            # высота по содержимому: свободное место остаётся внизу страницы
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            if name in ("cardWork", "cardTech"):  # у соседней карточки текст выше
+                card.layout().addStretch()
+        icon = QApplication.windowIcon()
+        if not icon.isNull():
+            child(ui, QLabel, "lblIcon").setPixmap(icon.pixmap(72, 72))
         child(ui, QLabel, "lblAppName").setText(appinfo.APP_NAME)
-        child(ui, QLabel, "lblVersion").setText(f"Версия {appinfo.VERSION}")
+        child(ui, QLabel, "lblVersion").setText(f"Версия {appinfo.VERSION} · {appinfo.YEAR}")
         child(ui, QLabel, "lblDescription").setText(appinfo.DESCRIPTION)
-        child(ui, QLabel, "lblThesis").setText(f"<b>Тема работы:</b> {appinfo.THESIS}")
+        child(ui, QLabel, "lblFeatures").setText(
+            "<br>".join(f"✔&nbsp;&nbsp;{line}" for line in appinfo.FEATURES))
+        child(ui, QLabel, "lblThesis").setText(f"<b>Тема:</b> {appinfo.THESIS}")
 
         author = f"<b>Автор:</b> {appinfo.AUTHOR}"
         if appinfo.ORGANIZATION:
             author += f"<br>{appinfo.ORGANIZATION}"
         if appinfo.SUPERVISOR:
             author += f"<br><b>Руководитель:</b> {appinfo.SUPERVISOR}"
-        author += f"<br>{appinfo.YEAR} год"
+        author += f"<br><b>Год:</b> {appinfo.YEAR}"
         child(ui, QLabel, "lblAuthor").setText(author)
 
         child(ui, QLabel, "lblComponents").setText(appinfo.COMPONENTS)
-        child(ui, QLabel, "lblLicenses").setText(appinfo.LICENSES)
         child(ui, QLabel, "lblDisclaimer").setText(appinfo.DISCLAIMER)
         child(ui, QPushButton, "btnRepo").clicked.connect(
             lambda checked=False: QDesktopServices.openUrl(QUrl(appinfo.REPO_URL)))

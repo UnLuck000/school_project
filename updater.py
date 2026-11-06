@@ -403,11 +403,30 @@ def update_domains() -> bool:
     return ok
 
 
+# ---------- уязвимые драйверы ----------
+LOLDRIVERS_URL = "https://www.loldrivers.io/api/drivers.json"
+
+
+def update_drivers() -> bool:
+    """LOLDrivers: уязвимые и вредоносные драйверы (без ключа) → feeds/loldrivers.tsv."""
+    import json
+    from scanner.drivers import convert_loldrivers
+    try:
+        items = json.loads(_download(LOLDRIVERS_URL, timeout=300))
+    except Exception as e:
+        print(f"LOLDrivers: не удалось скачать: {_error(e)}")
+        return False
+    text = convert_loldrivers(items)
+    _write_atomic(FEEDS_DIR / "loldrivers.tsv", text)
+    print(f"LOLDrivers: драйверов {len(items)}, образцов {text.count(chr(10)) - 1}")
+    return True
+
+
 # ---------- всё сразу ----------
 def update_all(progress=None) -> bool:
     """Обновляет все базы. True, если удалось хоть что-то (иначе нет сети)."""
     steps = [("адреса C2", update_ips), ("домены и JA3", update_domains),
-             ("правила YARA", update_rules),
+             ("правила YARA", update_rules), ("уязвимые драйверы", update_drivers),
              ("MalwareBazaar", update_hashes), ("ThreatFox", update_threatfox),
              ("VirusShare", lambda: update_virusshare(progress=progress))]
     ok = False
@@ -445,3 +464,5 @@ if __name__ == "__main__":
         update_threatfox()
     if what == "domains":
         update_domains()
+    if what == "drivers":
+        update_drivers()
