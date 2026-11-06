@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (
 from processmanager.colors import BY_ID, CATEGORIES, classify, text_color
 from scanner import cpucores
 from scanner.signature import VALID, inspect_signature
-from processmanager.memscan import MemResult, get_rules, scan_process
+from processmanager import memcache
+from processmanager.memscan import MemResult, get_rules, kernel_process, scan_process
+from scanner.yara_engine import rules_version
 from processmanager.memview import InjectionScanDialog, MemoryDialog
 from processmanager.origin import FILTERS, HELP, ORIGINS
 from processmanager.system import (
@@ -633,7 +635,7 @@ class ProcessWindow(QMainWindow):
     def scan_selected_memory(self):
         p = self._selected()
         if p:
-            self._start_mem_scan([p])
+            self._start_mem_scan([p], force=True)  # выбран вручную: проверить в любом случае
 
     def scan_all_memory(self):
         procs = [p for p in self.procs.values() if p.pid not in (0, 4, os.getpid())]
@@ -648,21 +650,23 @@ class ProcessWindow(QMainWindow):
         self._scan_cancel.set()
         self.statusBar().showMessage("Останавливаю после текущих процессов...")
 
-    def _start_mem_scan(self, procs: list[ProcInfo]):
+    def _start_mem_scan(self, procs: list[ProcInfo], force: bool = False):
         if self._scan_thread is not None and self._scan_thread.is_alive():
             QMessageBox.information(self, "Сканирование памяти", "Сканирование уже идёт")
             return
         self._scan_cancel.clear()
         self._scan_matches = []
         self._scan_signed = []
+        self._scan_cached = 0  # системных процессов без изменений: не сканировались
         self._scan_started = time.monotonic()
         kind = "memory_all" if self.community_cb.isChecked() else "memory"
         full = self.full_memory_cb.isChecked()
         self._scan_thread = threading.Thread(
-            target=self._mem_scan_loop, args=(list(procs), kind, full), daemon=True)
+            target=self._mem_scan_loop, args=(list(procs), kind, full, force), daemon=True)
         self._scan_thread.start()
 
-    def _mem_scan_loop(self, procs: list[ProcInfo], kind: str, full: bool = False):
+    def _mem_scan_loop(self, procs: list[ProcInfo], kind: str, full: bool = False,
+                       force: bool = False):
         self.bridge.mem_progress.emit("Загружаю правила...")
         try:
             rules = get_rules(kind)
@@ -677,10 +681,19 @@ class ProcessWindow(QMainWindow):
             self.bridge.mem_done.emit(True)
             return
 
+        rules_key = f"{kind}|{full}|{rules_version(rules) or id(rules)}"
+
         def work(p: ProcInfo):
             if self._scan_cancel.is_set():
                 return p, None
+            if kernel_process(p.pid, p.ppid, p.exe):
+                return p, MemResult("kernel")
+            # системный процесс без изменений с прошлой проверки — не сканируется (memcache)
+            cached, fp = (None, None) if force else memcache.lookup(p, rules_key)
+            if cached is not None:
+                return p, cached
             res = scan_process(rules, p.pid, full=full)
+            memcache.store(p, rules_key, fp, res)
             if res.status == "match" and p.exe:
                 # в памяти подписанных программ (IDE, браузеры, мессенджеры) бывают любые
                 # строки, вплоть до текста правил: такое совпадение — повод проверить, а не угроза
@@ -711,6 +724,7 @@ class ProcessWindow(QMainWindow):
 
     def on_mem_result(self, key: str, res: MemResult):
         self.mem_results[key] = res
+        self._scan_cached += res.cached
         p, item = self.procs.get(key), self.items.get(key)
         if p and item:
             self._fill(item, p)
@@ -725,6 +739,8 @@ class ProcessWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{prefix}Совпадений в памяти: {len(self._scan_matches)}"
             f" (у подписанных программ: {len(self._scan_signed)}). "
+            + (f"Системных процессов без изменений, не сканировались: {self._scan_cached}. "
+               if self._scan_cached else "") +
             f"Время: {elapsed:.1f} с (потоков: {self._scan_workers}; "
             f"{getattr(self, '_scan_cores', 'все ядра')})")
         if self._scan_matches:

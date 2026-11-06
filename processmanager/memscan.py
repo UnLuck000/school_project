@@ -79,6 +79,8 @@ def shared_rules(rules_dir: Path):
 
 
 def reset_cache() -> None:
+    from processmanager import memcache
+    memcache.forget()  # правила обновились: запомненные результаты не годятся
     """Вызывать после обновления правил, чтобы они перекомпилировались."""
     with _lock:
         _cache.clear()
@@ -88,15 +90,29 @@ def backend() -> str:
     return "native (C++)" if _read_native is not None else "python (ctypes)"
 
 
+def kernel_process(pid: int, ppid: int, exe: str) -> bool:
+    """Процесс ядра без файла: System Idle (0), System (4) и его дети без файла — Secure
+    System, Registry, Memory Compression. Пользовательского кода в них нет (System — потоки
+    ядра, Registry — данные кустов реестра, Memory Compression — сжатые страницы других
+    процессов, Secure System — изолированная память VBS), поэтому YARA по их памяти ничего
+    не даст; угрозы уровня ядра — это драйверы. smss.exe (тоже ребёнок System) — с файлом,
+    проверяется как обычный системный процесс."""
+    return pid in (0, 4) or (ppid == 4 and not os.path.isabs(exe or ""))
+
+
 @dataclass
 class MemResult:
-    status: str  # clean | match | signed | denied | timeout | error
+    status: str  # clean | match | signed | denied | timeout | error | kernel
     # signed: совпадение в процессе с действительной подписью — скорее ложное
     matches: list[str] = field(default_factory=list)
     message: str = ""
     scanned: int = 0  # байт проверено
+    cached: bool = False      # не сканировался: системный процесс не изменился (memcache)
+    checked_at: float = 0.0   # когда проверен на самом деле (для cached)
 
     def text(self) -> str:
+        if self.status == "clean" and self.cached:
+            return time.strftime("Чисто (не изменился с %H:%M)", time.localtime(self.checked_at))
         if self.status == "clean":
             return "Чисто"
         if self.status == "match":
@@ -107,6 +123,8 @@ class MemResult:
             return "Таймаут" + (": " + ", ".join(self.matches) if self.matches else "")
         if self.status == "denied":
             return "Нет доступа"
+        if self.status == "kernel":
+            return "Не проверяется: процесс ядра без файла"
         return "Ошибка"
 
 
