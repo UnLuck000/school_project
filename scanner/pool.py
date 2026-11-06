@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from scanner import cpucores, verdict_cache
+from scanner import media
 from scanner.engine import cache_version, hash_verdict, revocation_enabled
 from scanner.heuristics import get_threshold
 from scanner.worker import read_frame, write_frame
@@ -321,6 +322,7 @@ class _Job:
     parts: dict = field(default_factory=dict)
     error: OSError | None = None
     waiting: int = 0
+    media: str = ""  # формат обычного медиафайла (scanner/media.py): без YARA и эвристики
 
 
 def check_files(paths, signatures, rules, whitelist: set[str] | None = None,
@@ -352,12 +354,22 @@ def check_files(paths, signatures, rules, whitelist: set[str] | None = None,
                 digest, reason = cached
                 yield str(path), None if whitelist and digest in whitelist else reason, None
                 continue
-        jobs.append(_Job(str(path), p, st))
+        job = _Job(str(path), p, st)
+        job.media = media.plain_media(p, st.st_size)  # видео и аудио: без YARA (media.py)
+        if job.media and st.st_size > media.MEDIA_HASH_LIMIT:
+            if version:
+                verdict_cache.put(p, st, version, "", None)
+            yield str(path), None, None  # крупный медиафайл целиком не читается
+            continue
+        jobs.append(job)
     # крупные файлы первыми: пока два процесса заняты ими, остальные берут мелкие
     jobs.sort(key=lambda j: j.st.st_size < SPLIT_SIZE)
     futures: list[Future] = []
     for job in jobs:
-        kinds = ("hash", "analyze") if job.st.st_size >= SPLIT_SIZE else ("full",)
+        if job.media:
+            kinds = ("hash",)
+        else:
+            kinds = ("hash", "analyze") if job.st.st_size >= SPLIT_SIZE else ("full",)
         job.waiting = len(kinds)
         for kind in kinds:
             future = pool.submit(kind, job.path, options)
@@ -387,6 +399,8 @@ def check_files(paths, signatures, rules, whitelist: set[str] | None = None,
                 continue
             if "full" in job.parts:
                 (digest, md5), analyzed = job.parts["full"]
+            elif job.media:
+                (digest, md5), analyzed = job.parts["hash"], None
             else:
                 (digest, md5), analyzed = job.parts["hash"], job.parts["analyze"]
             reason = hash_verdict(job.st.st_size, digest, md5, signatures) or analyzed

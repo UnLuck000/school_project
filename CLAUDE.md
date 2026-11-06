@@ -48,7 +48,10 @@
   check_revocation — отзыв сертификата через CRL/OCSP в отдельном потоке с таймаутом 15 с,
   кэш на сутки, без связи revocation=unknown и статус не меняется; движок проверяет отзыв,
   прежде чем по подписи снять срабатывание, настройка scan/revocation),
-  whitelist, exclusions
+  whitelist, exclusions, media (видео и аудио по содержимому: сигнатура формата, для
+  MP4/MOV и AVI/WAV — блоки контейнера ровно до конца файла, нет PE в первых и последних
+  4 МБ, расширение не исполняемое; такие файлы без YARA и эвристики, крупнее 64 МБ — и без
+  хэшей; engine.check_file и pool.check_files)
 - updater.py: домены (ThreatFox; URLhaus — выгрузка online.csv по ключу, старые ссылки
   без ключа отвечают 410) и JA3 (SSLBL) → signatures/netfeeds/domains, netfeeds/ja3;
   хэши (MalwareBazaar и ThreatFox по ключу abuse.ch, VirusShare без ключа),

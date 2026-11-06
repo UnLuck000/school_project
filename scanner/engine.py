@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scanner import overrides, verdict_cache
+from scanner import media, overrides, verdict_cache
 from scanner.hashing import file_hashes
 from scanner.heuristics import analyze_pe, get_threshold
 from scanner.relations import signed_partner, weak_match
@@ -8,7 +8,7 @@ from scanner.yara_engine import match_details, rules_version
 from scanner.signature import (INVALID, REVOKED, UNSIGNED, VALID, check_revocation,
                                inspect_signature)
 
-ENGINE_VERSION = "5"  # меняется вместе с логикой проверки: старые вердикты в кэше не годятся
+ENGINE_VERSION = "6"  # меняется вместе с логикой проверки: старые вердикты в кэше не годятся
 
 # проверять отзыв сертификата, прежде чем по подписи признать срабатывание ложным
 # (настройка scan/revocation; нужен интернет, без связи подпись считается как раньше)
@@ -57,10 +57,15 @@ def check_file(p: Path, signatures, rules=None,
         if cached is not None:
             digest, reason = cached
             return None if whitelist and digest in whitelist else reason
-    digest, md5 = file_hashes(p)
-    if whitelist and digest in whitelist:
-        return None
-    reason = hash_verdict(st.st_size, digest, md5, signatures) or analyze(p, rules, heuristics)
+    kind = media.plain_media(p, st.st_size)  # видео и аудио: без YARA и эвристики
+    if kind and st.st_size > media.MEDIA_HASH_LIMIT:
+        digest, reason = "", None  # крупный медиафайл целиком не читается
+    else:
+        digest, md5 = file_hashes(p)
+        if whitelist and digest in whitelist:
+            return None
+        reason = hash_verdict(st.st_size, digest, md5, signatures) or (
+            None if kind else analyze(p, rules, heuristics))
     if version:
         verdict_cache.put(p, st, version, digest, reason)
     return reason
