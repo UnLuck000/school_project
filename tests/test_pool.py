@@ -97,9 +97,9 @@ def test_engine_uses_partner_only_for_weak_hits(tmp_path, monkeypatch):
     strong = SimpleNamespace(rule="Trojan_X", namespace="1_mal", meta={"score": 90})
     monkeypatch.setattr(engine, "inspect_signature", lambda p: SignatureInfo("unsigned"))
     monkeypatch.setattr(engine, "signed_partner", lambda p: ("app.exe", "app.exe импортирует этот файл"))
-    monkeypatch.setattr(engine, "match_details", lambda rules, p: [weak])
+    monkeypatch.setattr(engine, "match_details", lambda rules, p, data=None: [weak])
     assert engine.analyze(target, object(), heuristics=False) is None
-    monkeypatch.setattr(engine, "match_details", lambda rules, p: [weak, strong])
+    monkeypatch.setattr(engine, "match_details", lambda rules, p, data=None: [weak, strong])
     assert engine.analyze(target, object(), heuristics=False) == "YARA: X_PUA, Trojan_X"
 
 
@@ -112,3 +112,22 @@ def test_frames_roundtrip(value):
     stream.seek(0)
     assert read_frame(stream) == (1, "hash", value, {})
     assert read_frame(stream) is None
+
+
+def test_single_files_use_one_worker(tmp_path):
+    """Защита проверяет файлы по одному: второй процесс не нужен (правила YARA в каждом)."""
+    from scanner import pool as scan_pool
+    files = []
+    for i in range(12):
+        f = tmp_path / f"f{i}.txt"
+        f.write_text(f"файл {i}")
+        files.append(str(f))
+    scan = scan_pool.ScanPool(4)
+    try:
+        for f in files[:4]:
+            assert list(scan_pool.check_files([f], set(), None, pool=scan))
+        assert len(scan.pids()) == 1
+        list(scan_pool.check_files(files, set(), None, pool=scan))  # очередь — процессов больше
+        assert len(scan.pids()) >= 1
+    finally:
+        scan.shutdown()

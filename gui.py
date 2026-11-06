@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
         self.shell.page_changed.connect(self._on_page_changed)
         self.journal_page.undone.connect(self.on_undone)
 
+        self._apply_tool_access()  # запреты инструментов действуют с запуска
         self.statusBar().showMessage("Готов к работе")
         self.refresh_quarantine()
         self.refresh_whitelist()
@@ -224,6 +225,8 @@ class MainWindow(QMainWindow):
 
     def show_log(self, tab: str = "Действия"):
         """Открывает страницу «Журнал действий» на нужной вкладке."""
+        if tab == "Действия" and not access.allowed("btnUndoJournal"):
+            tab = "Карантин"  # журнал запрещён: остальные вкладки страницы доступны
         self.show_main("Журнал действий")
         for i in range(self.log_tabs.count()):
             if self.log_tabs.tabText(i) == tab:
@@ -239,12 +242,28 @@ class MainWindow(QMainWindow):
 
     # ---------- центр восстановления ----------
 
+    TAB_TOOLS = {0: "btnRestorePoint", 1: "btnSfcDism", 2: "btnSystemChecks"}
+
+    def tool_blocked(self, button_id: str) -> bool:
+        """Инструмент запрещён: сообщение вместо открытия (на случай ссылок из других окон)."""
+        if access.allowed(button_id):
+            return False
+        QMessageBox.information(self if self.isVisible() else None,
+                                FEATURES[button_id].title, access.LOCKED_TIP)
+        return True
+
+    def _apply_recovery_access(self):
+        self.recovery_window.set_allowed(access.allowed("btnRestorePoint"),
+                                         access.allowed("btnSfcDism"),
+                                         access.allowed("btnSystemChecks"))
+
     def open_recovery(self, tab: int = 0, action: str | None = None):
+        if tab in self.TAB_TOOLS and self.tool_blocked(self.TAB_TOOLS[tab]):
+            return
         if self.recovery_window is None:
             self.recovery_window = RecoveryWindow()
             self.recovery_window.restart_requested.connect(self.restart_as_admin)
-            self.recovery_window.set_allowed(access.allowed("btnRestorePoint"),
-                                             access.allowed("btnSfcDism"))
+            self._apply_recovery_access()
             self.apply_on_top(cfg.get("general/on_top"))
         self.recovery_window.show()
         self.recovery_window.raise_()
@@ -276,6 +295,8 @@ class MainWindow(QMainWindow):
     # ---------- анализатор файлов ----------
 
     def open_analyzer(self, path: str | None = None):
+        if self.tool_blocked("btnFileAnalyzer"):
+            return
         """Файл или папка открываются на странице «Сканирование папки/файла»."""
         self.show_main(SCAN_PAGE)
         if path:
@@ -306,22 +327,41 @@ class MainWindow(QMainWindow):
 
     def apply_access(self):
         """Изменились запреты из дополнительных настроек (ui/access.py)."""
-        self.tools_page.apply_access()
-        if self.proc_window is not None:
-            self.proc_window.set_memory_allowed(access.allowed("btnMemoryDeep"))
-        if self.recovery_window is not None:
-            self.recovery_window.set_allowed(access.allowed("btnRestorePoint"),
-                                             access.allowed("btnSfcDism"))
-        if self.tray is not None:
-            self.tray.usb_action.setVisible(access.allowed("btnUsb"))
-        if self.usb_window is not None and not access.allowed("btnUsb"):
-            self.usb_window.hide()
+        self._apply_tool_access()
         # запрет выключения: то, что сейчас выключено, включается
         if access.protection_locked() and self.monitor is None:
             self.toggle_protection()
         if access.network_locked() and self.net_monitor is None:
             self.toggle_network()
         self._apply_off_locks()
+
+    def _apply_tool_access(self):
+        """Запреты инструментов: кнопки, страницы, пункты трея и вкладки (и при запуске)."""
+        self.tools_page.apply_access()
+        if self.proc_window is not None:
+            self.proc_window.set_memory_allowed(access.allowed("btnMemoryDeep"))
+        if self.recovery_window is not None:
+            self._apply_recovery_access()
+        if self.tray is not None:
+            for button_id, action in self.tray.tool_actions.items():
+                action.setVisible(access.allowed(button_id))
+        # пути к запрещённым инструментам скрываются, открытые окна закрываются
+        scan_ok = access.allowed("btnFileAnalyzer")
+        self.shell.set_page_visible(SCAN_PAGE, scan_ok)
+        for name, button_id in (("btnQuickScan", "btnFileAnalyzer"),
+                                ("btnScanPath", "btnFileAnalyzer"),
+                                ("btnOpenProcesses", "btnProcessManager"),
+                                ("btnOpenJournal", "btnUndoJournal")):
+            self.dashboard.set_button_visible(name, access.allowed(button_id))
+        self.log_tabs.setTabVisible(self.log_tabs.indexOf(self.journal_page),
+                                    access.allowed("btnUndoJournal"))
+        for window, button_id in ((self.usb_window, "btnUsb"),
+                                  (self.autoruns_window, "btnAutoruns"),
+                                  (self.proc_window, "btnProcessManager"),
+                                  (self.tool_windows.get("link"), "btnLinkCheck"),
+                                  (self.tool_windows.get("password"), "btnPasswordLeak")):
+            if window is not None and not access.allowed(button_id):
+                window.hide()
 
     def _apply_off_locks(self):
         """Кнопки выключения защиты и сети неактивны, если выключать запрещено."""
@@ -359,7 +399,8 @@ class MainWindow(QMainWindow):
     # ---------- системный трей ----------
     def setup_tray(self, icon):
         self.tray = TrayIcon(self, icon)
-        self.tray.usb_action.setVisible(access.allowed("btnUsb"))
+        for button_id, action in self.tray.tool_actions.items():
+            action.setVisible(access.allowed(button_id))
         self.tray.show()
 
     def show_main(self, page: str | None = None):
@@ -394,6 +435,8 @@ class MainWindow(QMainWindow):
 
     # ---------- USB-накопители ----------
     def open_usb(self, root: str | None = None, report=None):
+        if self.tool_blocked("btnUsb"):
+            return
         from usbguard.window import UsbWindow
         if self.usb_window is None:
             self.usb_window = UsbWindow()
@@ -477,6 +520,8 @@ class MainWindow(QMainWindow):
 
     # ---------- проверка ссылки, пароля, ловушки ----------
     def open_tool(self, name: str):
+        if self.tool_blocked({"link": "btnLinkCheck", "password": "btnPasswordLeak"}[name]):
+            return
         from toolbox import windows
         window = self.tool_windows.get(name)
         if window is None:
@@ -573,7 +618,10 @@ class MainWindow(QMainWindow):
 
     def open_autoruns(self, journal: bool = False):
         if journal:  # журнал теперь отдельная страница главного меню
-            self.show_log()
+            if not self.tool_blocked("btnUndoJournal"):
+                self.show_log()
+            return
+        if self.tool_blocked("btnAutoruns"):
             return
         if self.autoruns_window is None:
             self.autoruns_window = AutorunsWindow()
@@ -590,6 +638,8 @@ class MainWindow(QMainWindow):
             self.autoruns_window.show_journal()
 
     def open_process_manager(self):
+        if self.tool_blocked("btnProcessManager"):
+            return
         if self.proc_window is None:
             self.proc_window = ProcessWindow()
             self.proc_window.analyze_requested.connect(lambda path: self.open_analyzer(path))

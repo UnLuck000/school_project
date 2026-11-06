@@ -158,7 +158,7 @@ def test_engine_revoked_signature_keeps_detection(tmp_path, monkeypatch):
     target = tmp_path / "x.exe"
     target.write_bytes(b"MZ")
     monkeypatch.setattr(engine, "match_details",
-                        lambda rules, p: [SimpleNamespace(rule="R", namespace="1_x", meta={})])
+                        lambda rules, p, data=None: [SimpleNamespace(rule="R", namespace="1_x", meta={})])
     monkeypatch.setattr(engine, "inspect_signature", lambda p: SignatureInfo("valid", "X"))
     monkeypatch.setattr(engine, "check_revocation",
                         lambda p, sig: SignatureInfo(REVOKED, "X", revocation="revoked"))

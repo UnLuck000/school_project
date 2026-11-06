@@ -119,6 +119,10 @@ class DashboardPage(_UiPage):
             button.clicked.connect(lambda checked=False, s=signal: s.emit())
         self.btn_protection.clicked.connect(lambda checked=False: self.toggle_protection.emit())
 
+    def set_button_visible(self, name: str, on: bool) -> None:
+        """Кнопка быстрого действия (скрывается, если её инструмент запрещён)."""
+        child(self.ui, QPushButton, name).setVisible(on)
+
     def _hero(self, color: str, icon, title: str, text: str) -> None:
         c = QColor(color)
         rgba = f"rgba({c.red()}, {c.green()}, {c.blue()}"
@@ -333,7 +337,11 @@ class SettingsPage(_UiPage):
         self.locks = {key: child(ui, QCheckBox, name) for key, name in (
             ("lock/protection", "chkLockProtection"), ("lock/network", "chkLockNetwork"),
             ("lock/restore_point", "chkLockRestorePoint"), ("lock/sfc_dism", "chkLockSfcDism"),
-            ("lock/memory", "chkLockMemory"), ("lock/usb", "chkLockUsb"))}
+            ("lock/memory", "chkLockMemory"), ("lock/usb", "chkLockUsb"),
+            ("lock/autoruns", "chkLockAutoruns"), ("lock/file_analyzer", "chkLockFileAnalyzer"),
+            ("lock/process_manager", "chkLockProcessManager"),
+            ("lock/link_check", "chkLockLinkCheck"), ("lock/password_leak", "chkLockPasswordLeak"),
+            ("lock/system_checks", "chkLockSystemChecks"), ("lock/journal", "chkLockJournal"))}
         self.btn_advanced = child(ui, QPushButton, "btnAdvanced")
         self.btn_advanced.clicked.connect(lambda checked=False: self.advanced_requested.emit())
         self._all = (self.chk_autostart, self.chk_ask_admin, self.chk_block_exit,

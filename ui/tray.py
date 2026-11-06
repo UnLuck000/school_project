@@ -55,17 +55,15 @@ class TrayIcon(QSystemTrayIcon):
         menu.addSeparator()
 
         tools = menu.addMenu("Инструменты")  # подменю раскрывается при наведении
-        items = (
-            ("Сканер автозапуска", window.open_autoruns),
-            ("Диспетчер процессов", window.open_process_manager),
-            ("Сканирование папки/файла", lambda: window.run_feature("btnFileAnalyzer")),
-            ("Проверка системы", lambda: window.run_feature("btnSystemChecks")),
-        )
-        for text, handler in items:
-            tools.addAction(text).triggered.connect(
-                lambda checked=False, h=handler: h())
-        self.usb_action = tools.addAction("USB-накопители")
-        self.usb_action.triggered.connect(lambda checked=False: window.run_feature("btnUsb"))
+        self.tool_actions = {}  # кнопка инструмента → пункт меню (скрыт, если запрещён)
+        for button_id, text in (("btnAutoruns", "Сканер автозапуска"),
+                                ("btnProcessManager", "Диспетчер процессов"),
+                                ("btnFileAnalyzer", "Сканирование папки/файла"),
+                                ("btnSystemChecks", "Проверка системы"),
+                                ("btnUsb", "USB-накопители")):
+            action = tools.addAction(text)
+            action.triggered.connect(lambda checked=False, b=button_id: window.run_feature(b))
+            self.tool_actions[button_id] = action
 
         self.settings_action = menu.addAction("Настройки")
         self.settings_action.triggered.connect(

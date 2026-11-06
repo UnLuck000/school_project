@@ -104,12 +104,14 @@ class RecoveryWindow(QMainWindow):
         if self.tabs.isTabVisible(index):
             self.tabs.setCurrentIndex(index)
 
-    def set_allowed(self, restore_point: bool, sfc_dism: bool) -> None:
+    def set_allowed(self, restore_point: bool, sfc_dism: bool, checks: bool = True) -> None:
         """Запреты из дополнительных настроек (ui/access.py): вкладки запрещённых скрыты."""
-        for index, on in ((0, restore_point), (1, sfc_dism)):
+        for index, on in ((0, restore_point), (1, sfc_dism), (2, checks)):
             self.tabs.setTabVisible(index, on)
         if not self.tabs.isTabVisible(self.tabs.currentIndex()):
-            self.tabs.setCurrentIndex(2)
+            visible = [i for i in range(self.tabs.count()) if self.tabs.isTabVisible(i)]
+            if visible:
+                self.tabs.setCurrentIndex(visible[0])
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._busy = busy

@@ -124,6 +124,7 @@ class ScanPool:
         self._tasks: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._threads = 0
+        self._idle = 0                            # потоков, ждущих задачу
         self._slots = 0                           # номера слотов не повторяются
         self._workers: dict[int, _Worker] = {}   # слот -> процесс
         self._applied: dict[int, object] = {}    # pid -> ядра, к которым привязан
@@ -138,7 +139,10 @@ class ScanPool:
             task = _Task(self._number, kind, path, options)
         self._tasks.put(task)
         with self._lock:
-            if self._threads < self.size:
+            # новый процесс — только если задач больше, чем свободных процессов: защита,
+            # проверяющая по одному файлу, держит один процесс (правила YARA в каждом
+            # процессе — десятки мегабайт), а проверка папки разворачивает все
+            if self._threads < self.size and self._tasks.qsize() > self._idle:
                 self._threads += 1
                 self._slots += 1
                 threading.Thread(target=self._serve, args=(self._slots,), daemon=True,
@@ -159,13 +163,22 @@ class ScanPool:
                         self._threads -= 1
                         retired = True
                         return
+                with self._lock:
+                    self._idle += 1
                 try:
                     task = self._tasks.get(timeout=IDLE_SECONDS)
                 except queue.Empty:
                     with self._lock:
+                        self._idle -= 1
                         if self._tasks.empty():
-                            return  # простой: процесс больше не нужен
+                            # простой: процесс больше не нужен; счётчик уменьшается под той
+                            # же блокировкой, иначе новая задача решит, что поток ещё есть
+                            self._threads -= 1
+                            retired = True
+                            return
                     continue
+                with self._lock:
+                    self._idle -= 1
                 if not task.future.set_running_or_notify_cancel():
                     continue  # проверку отменили, пока задача ждала
                 if worker is not None and (worker.generation != self._generation

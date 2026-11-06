@@ -68,11 +68,26 @@ def test_tool_locks(monkeypatch):
     from ui import access, settings
     values = dict(settings.DEFAULTS)
     monkeypatch.setattr(settings, "get", values.__getitem__)
-    # по умолчанию запрещены точка восстановления, SFC/DISM и память
-    assert not any(access.allowed(b) for b in access.TOOL_LOCKS)
-    for button in ("btnAutoruns", "btnFileAnalyzer", "btnSystemChecks", "btnProcessManager",
-                   "btnUndoJournal", "btnNetBeacon"):
-        assert access.allowed(button), button
+    # у каждого инструмента своя галочка; по умолчанию запрещены только эти четыре
+    from ui.registry import FEATURES
+    locked = {"btnRestorePoint", "btnSfcDism", "btnMemoryDeep", "btnUsb"}
+    assert set(access.TOOL_LOCKS) <= set(FEATURES)
+    for button in access.TOOL_LOCKS:
+        assert access.allowed(button) == (button not in locked), button
     assert not access.protection_locked() and not access.network_locked()
-    values["lock/sfc_dism"] = False  # каждый инструмент — своя галочка
+    values["lock/sfc_dism"] = False
+    values["lock/autoruns"] = True
     assert access.allowed("btnSfcDism") and not access.allowed("btnRestorePoint")
+    assert not access.allowed("btnAutoruns") and access.allowed("btnProcessManager")
+
+
+def test_every_tool_has_lock_checkbox():
+    """Галочка запрета есть у каждой кнопки страницы «Инструменты»."""
+    import re
+    from pathlib import Path
+    from ui import access
+    from ui.pages import SettingsPage
+    tools = set(re.findall(r'name="(btn\w+)"', Path("ui/designer/tools_page.ui").read_text(
+        encoding="utf-8"))) - {"btnRelaunchAdmin"}
+    assert tools == set(access.TOOL_LOCKS)
+    assert set(SettingsPage().locks) >= set(access.TOOL_LOCKS.values())

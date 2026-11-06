@@ -1,3 +1,4 @@
+import io
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,17 +92,20 @@ def api_findings(names: set[str]) -> list[Finding]:
 # imports (имена функций в нижнем регистре), total_imports (вместе с импортом по номеру).
 # Основной — нативный модуль (C++, native/src/pe.cpp): в 5-10 раз быстрее и не держит GIL;
 # запасной — pefile, если модуль не собран.
-def _native_info(path: Path) -> dict | None:
+def _native_info(path: Path, data: bytes | None = None) -> dict | None:
+    if data is not None:
+        return _native.pe_info_bytes(data, ENTROPY_LIMIT) if len(data) <= MAX_PE_SIZE else None
     return _native.pe_info(str(path), ENTROPY_LIMIT, MAX_PE_SIZE)
 
 
-def _pefile_info(path: Path) -> dict | None:
-    if path.stat().st_size > MAX_PE_SIZE:
+def _pefile_info(path: Path, data: bytes | None = None) -> dict | None:
+    if (len(data) if data is not None else path.stat().st_size) > MAX_PE_SIZE:
         return None
-    with path.open("rb") as fh:
+    with (io.BytesIO(data) if data is not None else path.open("rb")) as fh:
         if fh.read(2) != b"MZ":
             return None
-        pe = pefile.PE(str(path), fast_load=True)
+        pe = pefile.PE(data=data, fast_load=True) if data is not None else \
+            pefile.PE(str(path), fast_load=True)
         try:
             pe.parse_data_directories(directories=[
                 pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
@@ -128,11 +132,13 @@ def _pefile_info(path: Path) -> dict | None:
             pe.close()
 
 
-def pe_info(path: Path) -> dict | None:
-    """Сведения о PE-файле для эвристики. None — не PE (или слишком большой, битый)."""
-    if _native is not None and hasattr(_native, "pe_info"):
-        return _native_info(path)
-    return _pefile_info(path)
+def pe_info(path: Path, data: bytes | None = None) -> dict | None:
+    """Сведения о PE-файле для эвристики. None — не PE (или слишком большой, битый).
+    data — уже прочитанное содержимое файла (тогда диск не трогается)."""
+    if _native is not None and hasattr(_native, "pe_info") and (
+            data is None or hasattr(_native, "pe_info_bytes")):
+        return _native_info(path, data)
+    return _pefile_info(path, data)
 
 
 def pe_backend() -> str:
@@ -206,10 +212,10 @@ def report_from_info(info: dict | None) -> PEReport:
     return PEReport(is_pe=True, findings=findings, dotnet=dotnet)
 
 
-def analyze_pe(path: Path) -> PEReport:
+def analyze_pe(path: Path, data: bytes | None = None) -> PEReport:
     """Анализ PE-файла. Для остальных файлов возвращает пустой отчёт."""
     try:
-        return report_from_info(pe_info(path))
+        return report_from_info(pe_info(path, data))
     except Exception:  # битый или необычный файл не должен ронять сканирование
         return PEReport()
 

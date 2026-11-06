@@ -331,13 +331,18 @@ def match_file(rules, path: Path, timeout: int = 30, raw: bool = False) -> list[
     return [m.rule for m in match_details(rules, path, timeout, raw)]
 
 
-def match_details(rules, path: Path, timeout: int = 30, raw: bool = False) -> list:
-    """То же, но объекты совпадений yara (rule, namespace, meta)."""
+def match_details(rules, path: Path, timeout: int = 30, raw: bool = False,
+                  data: bytes | None = None) -> list:
+    """То же, но объекты совпадений yara (rule, namespace, meta).
+    data — уже прочитанное содержимое файла: тогда он не читается с диска ещё раз."""
     from scanner import overrides
     try:
-        if path.stat().st_size > MAX_FILE_SIZE:
+        if data is not None:
+            matches = rules.match(data=data, timeout=timeout, externals=_externals(path))
+        elif path.stat().st_size > MAX_FILE_SIZE:
             return []
-        matches = rules.match(str(path), timeout=timeout, externals=_externals(path))
+        else:
+            matches = rules.match(str(path), timeout=timeout, externals=_externals(path))
     except (yara.Error, OSError):  # TimeoutError тоже наследуется от yara.Error
         return []
     if raw:

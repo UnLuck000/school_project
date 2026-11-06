@@ -16,6 +16,7 @@ namespace py = pybind11;
 
 // pe.cpp
 py::object pe_info(const std::wstring& path, size_t entropy_limit, size_t max_size);
+py::object pe_info_bytes(const py::bytes& raw, size_t entropy_limit);
 
 // Принимает bytes, bytearray или memoryview
 static double entropy(py::buffer buf) {
@@ -138,6 +139,8 @@ PYBIND11_MODULE(_native, m) {
     m.def("pe_info", &pe_info, py::arg("path"), py::arg("entropy_limit"), py::arg("max_size"),
           "Сведения о PE для эвристики: секции с энтропией, точка входа, импорт; None — не PE");
 #ifdef _WIN32
+    m.def("pe_info_bytes", &pe_info_bytes, py::arg("data"), py::arg("entropy_limit"),
+          "pe_info по уже прочитанным байтам файла");
     m.def("read_regions", &read_regions, py::arg("pid"), py::arg("max_region"),
           py::arg("max_total"), py::arg("rwx_images") = true, py::arg("start") = 0,
           "Порция приватной памяти процесса для YARA: ([(адрес, bytes)], адрес продолжения)");

@@ -24,6 +24,13 @@ DEFAULTS = {
     "lock/sfc_dism": True,
     "lock/memory": True,
     "lock/usb": True,               # инструмент «USB-накопители» (защита флешек работает всегда)
+    "lock/autoruns": False,         # остальные инструменты по умолчанию разрешены
+    "lock/file_analyzer": False,
+    "lock/process_manager": False,
+    "lock/link_check": False,
+    "lock/password_leak": False,
+    "lock/system_checks": False,
+    "lock/journal": False,
     "protect/decoys": True,         # ловушки для шифровальщиков вместе с защитой файлов
     "lock/protection": False,       # запрет выключать защиту файлов
     "lock/network": False,          # запрет выключать мониторинг сети

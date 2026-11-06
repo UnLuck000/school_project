@@ -36,15 +36,16 @@ def write_frame(stream, obj) -> None:
 
 
 def _handle(kind: str, path: Path, options: dict, rules):
-    from scanner.engine import analyze
-    from scanner.hashing import file_hashes
+    from scanner.engine import analyze, read_small
+    from scanner.hashing import data_hashes, file_hashes
     if kind == "hash":
         return file_hashes(path)
+    data = read_small(path, path.stat().st_size)  # до 32 МБ: одно чтение на все слои
     reason = analyze(path, rules, options.get("heuristics", True), options.get("threshold"),
-                     options.get("revocation"))
+                     options.get("revocation"), data=data)
     if kind == "analyze":
         return reason
-    return file_hashes(path), reason
+    return (data_hashes(data) if data is not None else file_hashes(path)), reason
 
 
 def main() -> None:

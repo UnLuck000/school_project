@@ -1,14 +1,16 @@
 from pathlib import Path
 
 from scanner import media, overrides, verdict_cache
-from scanner.hashing import file_hashes
+from scanner.hashing import data_hashes, file_hashes
 from scanner.heuristics import analyze_pe, get_threshold
 from scanner.relations import signed_partner, weak_match
 from scanner.yara_engine import match_details, rules_version
 from scanner.signature import (INVALID, REVOKED, UNSIGNED, VALID, check_revocation,
                                inspect_signature)
 
-ENGINE_VERSION = "6"  # меняется вместе с логикой проверки: старые вердикты в кэше не годятся
+ENGINE_VERSION = "6"
+# файлы до этого размера читаются один раз: хэши, YARA и эвристика берут байты из памяти
+ONE_READ_LIMIT = 32 * 1024 * 1024  # меняется вместе с логикой проверки: старые вердикты в кэше не годятся
 
 # проверять отзыв сертификата, прежде чем по подписи признать срабатывание ложным
 # (настройка scan/revocation; нужен интернет, без связи подпись считается как раньше)
@@ -61,11 +63,12 @@ def check_file(p: Path, signatures, rules=None,
     if kind and st.st_size > media.MEDIA_HASH_LIMIT:
         digest, reason = "", None  # крупный медиафайл целиком не читается
     else:
-        digest, md5 = file_hashes(p)
+        data = read_small(p, st.st_size)  # одно чтение на хэши, YARA и эвристику
+        digest, md5 = data_hashes(data) if data is not None else file_hashes(p)
         if whitelist and digest in whitelist:
             return None
         reason = hash_verdict(st.st_size, digest, md5, signatures) or (
-            None if kind else analyze(p, rules, heuristics))
+            None if kind else analyze(p, rules, heuristics, data=data))
     if version:
         verdict_cache.put(p, st, version, digest, reason)
     return reason
@@ -81,8 +84,13 @@ def hash_verdict(size: int, digest: str, md5: str, signatures) -> str | None:
     return None
 
 
+def read_small(p: Path, size: int) -> bytes | None:
+    """Содержимое файла до ONE_READ_LIMIT (для одного чтения на все слои), иначе None."""
+    return p.read_bytes() if size <= ONE_READ_LIMIT else None
+
+
 def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = None,
-            revocation: bool | None = None) -> str | None:
+            revocation: bool | None = None, data: bytes | None = None) -> str | None:
     """Слои без хэшей: YARA, эвристика PE, подпись и связь с подписанной программой.
     Выполняется и в рабочих процессах (scanner.pool), поэтому настройки передаются явно."""
     threshold = get_threshold() if threshold is None else threshold
@@ -90,7 +98,7 @@ def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = Non
     sig = None
     partner = False  # False: связь ещё не искали
     if rules is not None:
-        matches = match_details(rules, p)
+        matches = match_details(rules, p, data=data)
         if matches:
             sig = _trusted_signature(p, inspect_signature(p), revocation)
             if sig.status == REVOKED:
@@ -103,7 +111,7 @@ def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = Non
                 if not partner:
                     return "YARA: " + ", ".join(m.rule for m in matches)
     if heuristics:
-        report = analyze_pe(p)
+        report = analyze_pe(p, data)
         if report.score >= threshold:
             sig = sig or _trusted_signature(p, inspect_signature(p), revocation)
             if sig.status == VALID:

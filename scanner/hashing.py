@@ -24,6 +24,11 @@ def file_hashes(path: Path, chunk: int = 1024 * 1024) -> tuple[str, str]:
     return sha.hexdigest(), md5.hexdigest()
 
 
+def data_hashes(data: bytes) -> tuple[str, str]:
+    """(SHA-256, MD5) уже прочитанного файла."""
+    return hashlib.sha256(data).hexdigest(), hashlib.md5(data, usedforsecurity=False).hexdigest()
+
+
 def load_signatures(db: Path) -> set[str]:
     sigs = set()
     for line in db.read_text(encoding="utf-8").splitlines():

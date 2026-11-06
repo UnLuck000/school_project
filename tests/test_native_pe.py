@@ -71,3 +71,17 @@ def test_load_rules_with_filter(tmp_path):
     rules, errors = ye.load_rules(tmp_path, use_cache=False)
     assert not errors
     assert {r.identifier for r in rules} == {"W"}  # Uses ссылался на убранное правило
+
+
+def test_pe_info_from_bytes_matches_file():
+    """Одно чтение файла: разбор PE по байтам совпадает с разбором по пути."""
+    import os
+    from pathlib import Path
+    from scanner import heuristics
+    folder = Path(os.environ["SystemRoot"]) / "System32"
+    for name in ("notepad.exe", "kernel32.dll", "cmd.exe"):
+        path = folder / name
+        data = path.read_bytes()
+        assert heuristics.pe_info(path, data) == heuristics.pe_info(path)
+        assert heuristics._pefile_info(path, data) == heuristics._pefile_info(path)
+    assert heuristics.pe_info(Path("x.txt"), b"not a pe file at all" * 10) is None

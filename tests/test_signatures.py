@@ -16,7 +16,7 @@ def test_valid_signature_suppresses_heuristic(tmp_path, monkeypatch):
     f = tmp_path / "a.exe"
     f.write_bytes(b"MZ")
     monkeypatch.setattr(engine, "analyze_pe",
-                        lambda p: PEReport(is_pe=True, findings=[Finding("api", "x", 9)]))
+                        lambda p, data=None: PEReport(is_pe=True, findings=[Finding("api", "x", 9)]))
     monkeypatch.setattr(engine, "inspect_signature", lambda p: SignatureInfo("valid"))
     assert engine.check_file(f, set()) is None
     monkeypatch.setattr(engine, "inspect_signature", lambda p: SignatureInfo("unsigned"))

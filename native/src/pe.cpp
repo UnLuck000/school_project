@@ -210,22 +210,9 @@ private:
 
 }  // namespace
 
-// Возвращает словарь со сведениями о PE или None (не PE, слишком большой, не прочитан)
-py::object pe_info(const std::wstring& path, size_t entropy_limit, size_t max_size) {
-    PeInfo info;
-    {
-        py::gil_scoped_release release;  // объекты Python здесь не трогаем
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        const auto size = file ? static_cast<size_t>(file.tellg()) : 0;
-        if (file && size >= 64 && size <= max_size) {
-            std::string data(size, '\0');
-            file.seekg(0);
-            file.read(data.data(), static_cast<std::streamsize>(size));
-            if (static_cast<size_t>(file.gcount()) == size && data[0] == 'M' && data[1] == 'Z') {
-                Parser(data, info).run(entropy_limit);
-            }
-        }
-    }
+namespace {
+
+py::object to_python(const PeInfo& info) {
     if (!info.ok) return py::none();
     py::list sections;
     for (const Section& s : info.sections) {
@@ -242,4 +229,38 @@ py::object pe_info(const std::wstring& path, size_t entropy_limit, size_t max_si
     result["imports"] = imports;
     result["total_imports"] = info.total_imports;
     return result;
+}
+
+}  // namespace
+
+// Возвращает словарь со сведениями о PE или None (не PE, слишком большой, не прочитан)
+py::object pe_info(const std::wstring& path, size_t entropy_limit, size_t max_size) {
+    PeInfo info;
+    {
+        py::gil_scoped_release release;  // объекты Python здесь не трогаем
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        const auto size = file ? static_cast<size_t>(file.tellg()) : 0;
+        if (file && size >= 64 && size <= max_size) {
+            std::string data(size, '\0');
+            file.seekg(0);
+            file.read(data.data(), static_cast<std::streamsize>(size));
+            if (static_cast<size_t>(file.gcount()) == size && data[0] == 'M' && data[1] == 'Z') {
+                Parser(data, info).run(entropy_limit);
+            }
+        }
+    }
+    return to_python(info);
+}
+
+// То же по уже прочитанным байтам: файл читается один раз для хэшей, YARA и эвристики
+py::object pe_info_bytes(const py::bytes& raw, size_t entropy_limit) {
+    std::string data = raw;  // копия: дальше без GIL
+    PeInfo info;
+    {
+        py::gil_scoped_release release;
+        if (data.size() >= 64 && data[0] == 'M' && data[1] == 'Z') {
+            Parser(data, info).run(entropy_limit);
+        }
+    }
+    return to_python(info);
 }
