@@ -1199,7 +1199,14 @@ class MainWindow(QMainWindow):
     def start_vpn_on_launch(self):
         """Прокси, оставшийся после сбоя, возвращается; VPN подключается, если включено
         «Подключать VPN при запуске программы» (vpn/autostart) и инструмент разрешён."""
-        from vpn import dnsguard, killswitch, xray
+        from vpn import dnsguard, killswitch, procguard, xray
+        # ядра VPN от прошлого запуска (программу сняли в диспетчере задач до привязки к
+        # заданию Windows): туннель и порты заняты, а управлять ими нечем
+        orphans = procguard.kill_orphans()
+        if orphans:
+            text = "Завершены ядра VPN, оставшиеся от прошлого запуска: " + ", ".join(orphans)
+            self.add_event(text, "info")
+            activity.record("vpn", text)
         if xray.recover_proxy():
             self.add_event("Системный прокси возвращён (VPN был отключён аварийно)", "info")
         # программа закрылась с подключённым VPN или упала: интернет не должен остаться

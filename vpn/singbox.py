@@ -35,31 +35,40 @@ def find_singbox() -> str:
     return next((c for c in candidates if c and os.path.isfile(c)), "")
 
 
-def build_config(socks_port: int, xray_exe: str, ipv6: bool = False,
-                 direct_apps: list[str] | None = None) -> dict:
+def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
+                 direct_apps: list[str] | None = None, block_quic: bool = False,
+                 block_udp: bool = False, dns_server: str = "1.1.1.1") -> dict:
     """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray).
 
     xray_exe — полный путь: мимо туннеля пропускается только этот файл (не любой xray.exe).
     Локальная сеть идёт напрямую правилом ip_is_private. DNS-запросы к роутеру в туннель по
     маршрутам не попадают (маршрут к своей подсети точнее, а адрес шлюза sing-box в туннель
     не берёт) — поэтому на время подключения DNS адаптеров подменяется (vpn/dnsguard.py).
-    ipv6 — IPv6 через туннель; выключено — IPv6 тоже заходит в туннель, но отклоняется
-    (иначе он шёл бы мимо VPN), программы сразу переходят на IPv4.
-    direct_apps — программы (полные пути), которые идут напрямую, мимо VPN."""
+    ip_mode — ipv4: IPv6 тоже заходит в туннель, но отклоняется (иначе шёл бы мимо VPN),
+    DNS отдаёт только IPv4; prefer_ipv6 и ipv6: IPv6 через туннель, DNS отдаёт IPv6, если он
+    есть у сайта, иначе IPv4 (в режиме ipv6 ещё и до сервера VPN — по IPv6, см.
+    xray.server_address).
+    direct_apps — программы (полные пути), которые идут напрямую, мимо VPN.
+    block_quic — UDP 443 отклоняется (браузер переходит на TCP); block_udp — весь UDP
+    отклоняется, а DNS через сервер идёт по TCP (иначе он тоже был бы UDP)."""
     address = [TUN_ADDRESS, TUN_ADDRESS6]
-    ipv6_rule = [] if ipv6 else [{"ip_version": 6, "action": "reject"}]
+    extra = [] if ip_mode in ("prefer_ipv6", "ipv6") else [{"ip_version": 6, "action": "reject"}]
+    if block_udp:
+        extra.append({"network": "udp", "action": "reject"})
+    elif block_quic:
+        extra.append({"network": "udp", "port": 443, "action": "reject"})
     return {
         "log": {"level": "warn", "timestamp": True},
         "dns": {
             "servers": [
                 # обычный DNS по UDP через сервер: DoH держит одно долгое соединение HTTP/2,
                 # оно через туннель обрывается, и все запросы на нём разом падают
-                {"type": "udp", "tag": "dns-remote", "server": "1.1.1.1",
-                 "detour": "proxy"},
+                {"type": "tcp" if block_udp else "udp", "tag": "dns-remote",
+                 "server": dns_server, "detour": "proxy"},
                 {"type": "local", "tag": "dns-local"},
             ],
             "final": "dns-remote",
-            "strategy": "prefer_ipv4" if ipv6 else "ipv4_only",
+            "strategy": "ipv4_only" if ip_mode == "ipv4" else "prefer_ipv6",
         },
         "inbounds": [{
             "type": "tun", "tag": "tun-in", "interface_name": TUN_NAME,
@@ -80,7 +89,7 @@ def build_config(socks_port: int, xray_exe: str, ipv6: bool = False,
                 *([{"process_path": [os.path.normpath(a) for a in direct_apps],
                     "outbound": "direct"}] if direct_apps else []),
                 {"ip_is_private": True, "outbound": "direct"},
-                *ipv6_rule,
+                *extra,
             ],
             "final": "proxy",
             "auto_detect_interface": True,

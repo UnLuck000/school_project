@@ -125,19 +125,35 @@ FRAGMENT = {"packets": "tlshello", "length": "100-200", "interval": "10-20"}
 MUX = {"enabled": True, "concurrency": 8, "xudpConcurrency": 16, "xudpProxyUDP443": "reject"}
 
 
-LOCAL_TAG = "local-in"
+LOCAL_SOCKS_TAG, LOCAL_HTTP_TAG = "local-socks", "local-http"
+IP_MODES = {"ipv4": "Только IPv4",
+            "prefer_ipv6": "Предпочтительно IPv6 (IPv4, если у сайта нет IPv6)",
+            "ipv6": "IPv6 и до сервера VPN тоже (IPv4 — только если IPv6 нет)"}
 
 
-def local_port() -> int | None:
-    """Порт локального прокси для программ (vpn/local_proxy, vpn/local_port) или None."""
+def _cfg(key: str, default=None):
     try:
         from ui import settings as cfg
-        if not cfg.get("vpn/local_proxy"):
-            return None
-        port = int(cfg.get("vpn/local_port"))
+        return cfg.get(key)
     except Exception:
-        return None
-    return port if 1024 <= port <= 65535 and port not in (SOCKS_PORT, HTTP_PORT) else None
+        return default
+
+
+def local_ports() -> dict[str, int]:
+    """Локальные прокси для программ: {"socks": порт, "http": порт} — только включённые и
+    допустимые (не внутренние порты связки и не одинаковые)."""
+    ports = {}
+    for kind in ("socks", "http"):
+        if not _cfg(f"vpn/{kind}_enabled", False):
+            continue
+        try:
+            port = int(_cfg(f"vpn/{kind}_port", 0))
+        except (TypeError, ValueError):
+            continue
+        if 1024 <= port <= 65535 and port not in (SOCKS_PORT, HTTP_PORT) and \
+                port not in ports.values():
+            ports[kind] = port
+    return ports
 
 
 def port_owner(port: int) -> str | None:
@@ -158,41 +174,105 @@ def port_owner(port: int) -> str | None:
     return "другая программа"
 
 
-def add_local_inbound(config: dict, port: int) -> None:
-    """Локальный прокси для программ: SOCKS5 и HTTP на одном порту (входящее mixed), только
-    127.0.0.1 — снаружи к нему не подключиться. Трафик идёт по тем же правилам, что и туннель."""
-    config["inbounds"].append({"tag": LOCAL_TAG, "listen": "127.0.0.1", "port": port,
-                               "protocol": "mixed", "settings": {"udp": True}})
+def ensure_free(*ports: int) -> None:
+    """Внутренние порты связки должны быть свободны: иначе wait_port примет чужой Xray
+    (второй экземпляр программы, другой клиент) за свой и подключение покажется удачным."""
+    for port in ports:
+        owner = port_owner(port)
+        if owner:
+            raise OSError(f"порт 127.0.0.1:{port} уже занят ({owner}) — возможно, VPN уже "
+                          "подключён в другом окне или программе")
+
+
+def add_local_inbound(config: dict, kind: str, port: int) -> None:
+    """Локальный прокси для программ: SOCKS5 или HTTP, только 127.0.0.1 — снаружи к нему не
+    подключиться. Трафик идёт по тем же правилам, что и туннель."""
+    if kind == "socks":
+        config["inbounds"].append({"tag": LOCAL_SOCKS_TAG, "listen": "127.0.0.1", "port": port,
+                                   "protocol": "socks", "settings": {"udp": True}})
+    else:
+        config["inbounds"].append({"tag": LOCAL_HTTP_TAG, "listen": "127.0.0.1", "port": port,
+                                   "protocol": "http", "settings": {}})
 
 
 def options_from_settings() -> dict:
-    try:
-        from ui import settings as cfg
-        return {key: bool(cfg.get(f"vpn/{key}"))
-                for key in ("route_ru", "block_ads", "mux", "fragment")}
-    except Exception:
-        return {}
+    keys = ("route_ru", "block_ads", "mux", "fragment", "block_quic", "block_udp")
+    options = {key: bool(_cfg(f"vpn/{key}", False)) for key in keys}
+    for kind in ("direct", "proxy", "block"):
+        options[f"rules_{kind}"] = [line.strip() for line in
+                                    str(_cfg(f"vpn/rules_{kind}", "") or "").splitlines()
+                                    if line.strip() and not line.strip().startswith("#")]
+    options["cert_blocked"] = [h for h in str(_cfg("vpn/cert_blocked", "") or "").splitlines()
+                               if h.strip()]
+    return options
+
+
+def split_rule_entries(entries: list[str]) -> tuple[list[str], list[str]]:
+    """Свои правила: строки → (домены, адреса). Адрес — IP, сеть CIDR или geoip:...;
+    домен — имя (как domain:, вместе с поддоменами), full:, keyword:, regexp:, geosite:..."""
+    domains, ips = [], []
+    for entry in entries:
+        low = entry.lower()
+        if low.startswith("geoip:"):
+            ips.append(low)
+            continue
+        try:
+            ipaddress.ip_network(entry, strict=False)
+            ips.append(entry)
+            continue
+        except ValueError:
+            pass
+        if ":" in entry and low.split(":", 1)[0] in ("domain", "full", "keyword", "regexp",
+                                                     "geosite", "dotless", "ext"):
+            domains.append(entry)
+        else:
+            domains.append("domain:" + entry.strip(".").lstrip("*."))
+    return domains, ips
+
+
+def _rules_for(entries: list[str], tag: str) -> list[dict]:
+    domains, ips = split_rule_entries(entries)
+    rules = []
+    if domains:
+        rules.append({"type": "field", "domain": domains, "outboundTag": tag})
+    if ips:
+        rules.append({"type": "field", "ip": ips, "outboundTag": tag})
+    return rules
 
 
 def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
-    """Маршрутизация, Mux и фрагментация в готовой конфигурации Xray.
+    """Маршрутизация, блокировки, Mux и фрагментация в готовой конфигурации Xray.
 
-    • route_ru — российские сайты напрямую (geosite:category-ru, зоны .ru/.рф/.su, geoip:ru):
-      домен берётся из трафика (sniffing routeOnly), IP — из адреса назначения, сам Xray адреса
-      не спрашивает (domainStrategy AsIs);
-    • block_ads — реклама и трекеры (geosite:category-ads-all) в blackhole;
-    • mux — несколько соединений в одном до сервера; с flow=xtls-rprx-vision несовместим и не
-      включается;
-    • fragment — ClientHello соединения с сервером режется на кусочки (обход DPI): исходящее
-      «fragment» и dialerProxy у прокси."""
+    Порядок правил: сертификат подменён (cert_blocked) и свои «блокировать» → свои «через VPN»
+    → свои «напрямую» → реклама → QUIC/UDP → российские сайты напрямую → остальное через VPN.
+    • свои правила (rules_block/proxy/direct): домены (domain:, full:, keyword:, regexp:,
+      geosite:...) и адреса (IP, CIDR, geoip:...);
+    • route_ru — geosite:category-ru, зоны .ru/.рф/.su, geoip:ru напрямую;
+    • block_ads — geosite:category-ads-all;
+    • block_quic — UDP на порт 443 (браузеры переходят на TCP), block_udp — весь UDP: по UDP
+      внутри VLESS VPN чаще распознают и режут;
+    • домен для правил — из трафика (sniffing routeOnly), сам Xray адреса не спрашивает (AsIs);
+    • mux — не с flow=xtls-rprx-vision; fragment — ClientHello до сервера кусочками."""
     say = log or (lambda text: None)
     rules = config.setdefault("routing", {"domainStrategy": "AsIs", "rules": []})["rules"]
+    head = []
+    if options.get("cert_blocked"):
+        head.append({"type": "field", "domain": ["full:" + h for h in options["cert_blocked"]],
+                     "outboundTag": "block"})
+    head += _rules_for(options.get("rules_block", []), "block")
+    head += _rules_for(options.get("rules_proxy", []), "proxy")
+    head += _rules_for(options.get("rules_direct", []), "direct")
     if options.get("block_ads"):
-        rules.insert(0, {"type": "field", "domain": list(ADS), "outboundTag": "block"})
+        head.append({"type": "field", "domain": list(ADS), "outboundTag": "block"})
+    if options.get("block_udp"):
+        head.append({"type": "field", "network": "udp", "outboundTag": "block"})
+    elif options.get("block_quic"):
+        head.append({"type": "field", "network": "udp", "port": "443", "outboundTag": "block"})
+    rules[:0] = head
     if options.get("route_ru"):
         rules.append({"type": "field", "domain": list(RU_DOMAINS), "outboundTag": "direct"})
         rules.append({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})
-    if options.get("route_ru") or options.get("block_ads"):
+    if any(r.get("domain") for r in rules):
         for inbound in config["inbounds"]:  # домен для правил — из трафика, без своего DNS
             if inbound["protocol"] in ("socks", "http", "mixed"):
                 inbound["sniffing"] = {"enabled": True, "routeOnly": True,
@@ -209,6 +289,27 @@ def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
         proxy.setdefault("streamSettings", {}).setdefault("sockopt", {})["dialerProxy"] = \
             "fragment"
     return config
+
+
+def server_address(host: str, ip_mode: str = "ipv4") -> str:
+    """Адрес сервера VPN заранее (до туннеля). Режим «ipv6» — сначала IPv6, если он есть у
+    сервера и у компьютера, иначе IPv4."""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if ip_mode == "ipv6":
+        try:
+            infos = socket.getaddrinfo(host, 443, socket.AF_INET6, socket.SOCK_STREAM)
+            for *_, addr in infos:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                    s.settimeout(3)
+                    if s.connect_ex(addr[:2]) == 0:
+                        return addr[0]
+        except OSError:
+            pass
+    return socket.gethostbyname(host)
 
 
 def build_config(v: dict, mode: str, interface: str = "", options: dict | None = None,

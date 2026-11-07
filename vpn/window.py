@@ -1,36 +1,117 @@
-"""Окно VPN (прототип): профили, подключение, состояние, трафик, журнал."""
+"""Окно VPN: профили, подключение, маршрутизация, проверки, настройки клиента, журнал.
+
+Профиль — в выпадающем списке сверху, большая круглая кнопка подключения, плитки состояния,
+разделы (строятся _page_*) — кнопками слева.
+"""
+import os
 import threading
 import time
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPlainTextEdit, QPushButton, QVBoxLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer.fileops import human_size
 from recovery import activity
+from ui import settings as cfg
 from vpn import backends, profiles
 
-STATE_TEXT = {backends.DISCONNECTED: ("Не подключено", "#c0392b"),
-              backends.CONNECTING: ("Подключение...", "#d68910"),
-              backends.CONNECTED: ("Подключено", "#2e9e4f"),
-              backends.ERROR: ("Ошибка", "#c0392b")}
+GREEN, ORANGE, RED, GREY, ACCENT = "#2e9e4f", "#d68910", "#c0392b", "#8a8a8a", "#2f7ed8"
+STATE_TEXT = {backends.DISCONNECTED: ("Не подключено", GREY),
+              backends.CONNECTING: ("Подключение...", ORANGE),
+              backends.CONNECTED: ("Подключено", GREEN),
+              backends.ERROR: ("Ошибка", RED)}
+SECURITY = {"reality": "REALITY", "tls": "TLS", "none": "без шифрования"}
+NETWORK = {"tcp": "TCP", "raw": "TCP", "ws": "WebSocket", "grpc": "gRPC", "xhttp": "XHTTP",
+           "httpupgrade": "HTTPUpgrade", "splithttp": "XHTTP"}
+CERT_INTERVAL = 600  # проверка сертификатов во время подключения, с
+
+STYLE = """
+QFrame[card="true"] { background: palette(base); border: 1px solid palette(mid);
+                      border-radius: 12px; }
+QFrame[card="true"] QLabel { background: transparent; border: none; }
+QLabel[role="title"] { font-size: 11pt; font-weight: 600; }
+QLabel[role="hint"] { color: palette(placeholder-text); }
+QLabel[role="tileValue"] { font-size: 14pt; font-weight: 600; }
+QLabel[role="tileName"] { color: palette(placeholder-text); font-size: 9pt; }
+QPushButton[nav="true"] { text-align: left; padding: 10px 14px; border: none;
+                          border-radius: 8px; font-size: 10.5pt; }
+QPushButton[nav="true"]:checked { background: palette(highlight); color: palette(highlighted-text); }
+QPushButton[nav="true"]:hover:!checked { background: palette(alternate-base); }
+"""
+
+
+def _label(text: str = "", role: str = "", wrap: bool = True) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(wrap)
+    if role:
+        label.setProperty("role", role)
+    return label
+
+
+def _card() -> tuple[QFrame, QVBoxLayout]:
+    card = QFrame()
+    card.setProperty("card", True)
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(8)
+    return card, layout
+
+
+def _lines(key: str) -> list[str]:
+    return [line.strip() for line in str(cfg.get(key) or "").splitlines() if line.strip()]
+
+
+def protocol_text(p: profiles.Profile | None) -> str:
+    """«VLESS · REALITY · TCP · Vision» — только сам протокол, без режима подключения."""
+    if p is None:
+        return "—"
+    if p.kind != "vless":
+        return profiles.KINDS.get(p.kind, p.kind)
+    try:
+        from vpn import xray
+        v = xray.parse_vless(p.config)
+    except ValueError:
+        return "VLESS"
+    parts = ["VLESS", SECURITY.get(v["security"], v["security"].upper()),
+             NETWORK.get(v["network"], v["network"])]
+    if v["flow"]:
+        parts.append("Vision" if "vision" in v["flow"] else v["flow"])
+    return " · ".join(parts)
+
+
+def mode_text(p: profiles.Profile | None, backend=None) -> str:
+    if p is None or p.kind != "vless":
+        return "—"
+    from vpn import xray
+    if p.mode == "local":
+        ports = getattr(backend, "local_ports", None) or xray.local_ports()
+        names = [f"{'SOCKS5' if k == 'socks' else 'HTTP'} 127.0.0.1:{v}" for k, v in ports.items()]
+        return "Только локальный прокси: " + (", ".join(names) or "порты выключены")
+    return profiles.MODES.get(p.mode, p.mode)
 
 
 class _Bridge(QObject):
     log = Signal(str)
     ip = Signal(str)
+    probes = Signal(object)          # список checks.Probe
+    cert_alarm = Signal(object)      # checks.Probe с подменённым сертификатом
+    apps = Signal(object)            # список apps.App
+    apps_progress = Signal(str)
 
 
+# ================================ диалоги ================================
 class PasteDialog(QDialog):
     """Профиль из текста конфигурации (вставить из буфера)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Новый профиль VPN")
-        self.resize(640, 460)
+        self.resize(680, 460)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Название профиля (необязательно — возьмётся из ссылки):"))
         self.name = QLineEdit()
@@ -42,9 +123,7 @@ class PasteDialog(QDialog):
                                      "конфигурации WireGuard ([Interface] ... [Peer]) или "
                                      "OpenVPN (client, remote ...)")
         layout.addWidget(self.text, 1)
-        # ссылка в буфере обмена — сразу в поле
-        from PySide6.QtWidgets import QApplication
-        clip = QApplication.clipboard().text().strip()
+        clip = QApplication.clipboard().text().strip()  # ссылка в буфере — сразу в поле
         if clip.lower().startswith("vless://"):
             self.text.setPlainText(clip)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
@@ -55,247 +134,607 @@ class PasteDialog(QDialog):
 
 
 class DirectAppsDialog(QDialog):
-    """Программы, которые идут напрямую, мимо VPN (режим TUN): игры, торренты, банки."""
+    """Программы напрямую, мимо VPN: поиск по «Пуску», запущенным процессам и папкам
+    установки; поиск по названию; «Только приложения» убирает .dll и служебные .exe."""
 
-    def __init__(self, parent, apps: list[str]):
+    _cache: list | None = None  # найденное — на время работы программы
+
+    def __init__(self, parent, chosen: list[str]):
         super().__init__(parent)
         self.setWindowTitle("Программы напрямую, мимо VPN")
-        self.resize(640, 380)
+        self.resize(1100, 680)
+        self.chosen = {os.path.normcase(p) for p in chosen}
+        self.found: list = []
+        self.bridge = _Bridge()
+        self.bridge.apps.connect(self._on_found)
+        self.bridge.apps_progress.connect(lambda t: self.status.setText(t))
         layout = QVBoxLayout(self)
-        hint = QLabel("Трафик этих программ не идёт через сервер VPN (только в режиме TUN). "
-                      "Программа узнаётся по полному пути к файлу.")
-        hint.setWordWrap(True)
+        hint = _label("Отмеченные программы идут напрямую, мимо сервера VPN (режим TUN). "
+                      "Программы найдены по ярлыкам «Пуска», запущенным процессам и папкам "
+                      "Program Files, Program Files (x86), %LOCALAPPDATA%\\Programs и "
+                      "библиотекам игр.", "hint")
         layout.addWidget(hint)
-        self.list = QListWidget()
-        self.list.addItems(apps)
-        layout.addWidget(self.list, 1)
         row = QHBoxLayout()
-        add = QPushButton("Добавить программу...")
-        add.clicked.connect(self._add)
-        remove = QPushButton("Убрать выбранную")
-        remove.clicked.connect(lambda: self.list.takeItem(self.list.currentRow()))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Поиск: название, описание или путь")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._fill)
+        self.only_apps = QPushButton("Только приложения")
+        self.only_apps.setCheckable(True)
+        self.only_apps.setChecked(True)
+        self.only_apps.setToolTip("Скрыть .dll и служебные .exe (установщики, обновление, "
+                                  "отчёты об ошибках, помощники) — оставить то, что запускают")
+        self.only_apps.toggled.connect(self._fill)
+        self.only_chosen = QCheckBox("Только отмеченные")
+        self.only_chosen.toggled.connect(self._fill)
+        add = QPushButton("Добавить файл вручную...")
+        add.clicked.connect(self._add_manual)
+        row.addWidget(self.search, 1)
+        row.addWidget(self.only_apps)
+        row.addWidget(self.only_chosen)
         row.addWidget(add)
-        row.addWidget(remove)
-        row.addStretch()
         layout.addLayout(row)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["", "Название", "Описание", "Где найдена", "Путь"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        for col, width in enumerate((34, 230, 260, 150)):
+            self.table.setColumnWidth(col, width)
+        self.table.itemChanged.connect(self._on_check)
+        layout.addWidget(self.table, 1)
+        self.status = _label("Ищу программы...", "hint")
+        layout.addWidget(self.status)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                    QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        if DirectAppsDialog._cache is not None:
+            self._on_found(DirectAppsDialog._cache)
+        else:
+            threading.Thread(target=self._discover, daemon=True).start()
 
-    def _add(self) -> None:
-        import os
+    def _discover(self) -> None:
+        from vpn import apps
+        try:
+            found = apps.discover(self.bridge.apps_progress.emit)
+        except Exception as e:
+            self.bridge.apps_progress.emit(f"Поиск не удался: {e}")
+            found = []
+        self.bridge.apps.emit(found)
+
+    def _on_found(self, found) -> None:
+        from vpn import apps
+        DirectAppsDialog._cache = found
+        known = {os.path.normcase(a.path) for a in found}
+        for path in self.chosen - known:  # добавленные вручную раньше
+            found = found + [apps.App(path, os.path.basename(path), sources={"вручную"},
+                                      is_app=True)]
+        self.found = found
+        self._fill()
+
+    SOURCE = {"start": "Пуск", "running": "запущена", "folder": "папка", "вручную": "вручную"}
+
+    def _fill(self) -> None:
+        text = self.search.text().strip().lower()
+        self.table.blockSignals(True)
+        self.table.setRowCount(0)
+        shown = 0
+        for app in self.found:
+            key = os.path.normcase(app.path)
+            checked = key in self.chosen
+            if self.only_chosen.isChecked() and not checked:
+                continue
+            if self.only_apps.isChecked() and not app.is_app and not checked:
+                continue
+            if text and text not in f"{app.name} {app.description} {app.path}".lower():
+                continue
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            box = QTableWidgetItem()
+            box.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            box.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            box.setData(Qt.ItemDataRole.UserRole, app.path)
+            self.table.setItem(row, 0, box)
+            where = ", ".join(self.SOURCE.get(s, s) for s in sorted(app.sources))
+            for col, value in enumerate((app.name, app.description, where, app.path), start=1):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.table.setItem(row, col, item)
+            shown += 1
+            if shown >= 3000:
+                break
+        self.table.blockSignals(False)
+        total = len(self.found)
+        apps_count = sum(a.is_app for a in self.found)
+        self.status.setText(f"Показано: {shown}. Найдено файлов: {total}, из них приложений: "
+                            f"{apps_count}. Отмечено: {len(self.chosen)}.")
+
+    def _on_check(self, item: QTableWidgetItem) -> None:
+        if item.column() != 0:
+            return
+        key = os.path.normcase(item.data(Qt.ItemDataRole.UserRole))
+        if item.checkState() == Qt.CheckState.Checked:
+            self.chosen.add(key)
+        else:
+            self.chosen.discard(key)
+
+    def _add_manual(self) -> None:
+        from vpn import apps
         path, _ = QFileDialog.getOpenFileName(self, "Программа", "", "Программы (*.exe)")
-        if path:
-            path = os.path.normpath(path)
-            if not self.list.findItems(path, Qt.MatchFlag.MatchFixedString):
-                self.list.addItem(path)
+        if not path:
+            return
+        key = os.path.normcase(os.path.normpath(path))
+        self.chosen.add(key)
+        if all(os.path.normcase(a.path) != key for a in self.found):
+            self.found = [apps.App(key, os.path.basename(path), sources={"вручную"},
+                                   is_app=True)] + self.found
+        self._fill()
 
     def apps(self) -> list[str]:
-        return [self.list.item(i).text() for i in range(self.list.count())]
+        paths = {os.path.normcase(a.path): a.path for a in self.found}
+        return [paths.get(k, k) for k in sorted(self.chosen)]
 
 
+class RulesEditor(QWidget):
+    """Свои правила: напрямую, через VPN, блокировать — по строке на правило."""
+
+    KINDS = (("rules_direct", "Напрямую, мимо VPN"), ("rules_proxy", "Только через VPN"),
+             ("rules_block", "Блокировать"))
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_label(
+            "По одному на строку. Домен: example.com (вместе с поддоменами), full:example.com "
+            "(точно), keyword:слово, regexp:выражение, geosite:категория (например "
+            "geosite:youtube). Адрес: 1.2.3.4, 10.0.0.0/8, geoip:страна (например geoip:ru). "
+            "Строки с # — комментарии. Действуют со следующего подключения; «Блокировать» "
+            "главнее остальных, свои правила главнее встроенных.", "hint"))
+        grid = QHBoxLayout()
+        self.edits = {}
+        for key, title in self.KINDS:
+            box = QVBoxLayout()
+            box.addWidget(_label(title, "title"))
+            edit = QPlainTextEdit(str(cfg.get(f"vpn/{key}") or ""))
+            edit.setPlaceholderText("example.com\ngeosite:youtube\n1.2.3.0/24")
+            edit.textChanged.connect(lambda k=key, e=edit: cfg.set_(f"vpn/{k}", e.toPlainText()))
+            box.addWidget(edit, 1)
+            grid.addLayout(box, 1)
+            self.edits[key] = edit
+        layout.addLayout(grid, 1)
+
+
+# ================================ окно ================================
 class VpnWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("VPN")
         self.setWindowFlag(Qt.WindowType.Window)
-        self.resize(980, 640)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint)
+        self.setMinimumSize(1200, 760)
+        self.resize(1460, 900)
+        self.setStyleSheet(STYLE)
         self.profiles = profiles.load()
         if not self.profiles:
             self.profiles = [profiles.demo_profile()]
         self.backend: backends.Backend | None = None
         self.active: profiles.Profile | None = None
         self._last = (0, 0, time.monotonic())
+        self._log_lines: list[str] = []
+        self._probes: list = []
+        self._cert_last = 0.0
         self.bridge = _Bridge()
         self.bridge.log.connect(self._append_log)
-        self.bridge.ip.connect(lambda text: self.ip_label.setText(text))
-
-        root = QHBoxLayout(self)
-        # ----- профили -----
-        left = QVBoxLayout()
-        left.addWidget(QLabel("Профили"))
-        self.list = QListWidget()
-        self.list.currentRowChanged.connect(self._on_select)
-        left.addWidget(self.list, 1)
-        row = QHBoxLayout()
-        for text, slot in (("Импорт файла...", self._import), ("Вставить...", self._paste),
-                           ("Переименовать", self._rename), ("Удалить", self._delete)):
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            row.addWidget(button)
-        left.addLayout(row)
-        root.addLayout(left, 2)
-
-        # ----- состояние -----
-        right = QVBoxLayout()
-        card = QFrame()
-        card.setObjectName("vpnCard")
-        card.setStyleSheet("QFrame#vpnCard { border: 1px solid palette(mid); border-radius: 10px;"
-                           " background: palette(base); }")
-        grid = QGridLayout(card)
-        self.state_label = QLabel()
-        self.state_label.setStyleSheet("font-size: 18pt; font-weight: 600;")
-        grid.addWidget(self.state_label, 0, 0, 1, 2)
-        self.connect_btn = QPushButton("Подключить")
-        self.connect_btn.setMinimumHeight(40)
-        self.connect_btn.clicked.connect(self.toggle)
-        grid.addWidget(self.connect_btn, 0, 2)
-        self.info = {}
-        for i, (key, title) in enumerate((("server", "Сервер"), ("kind", "Протокол"),
-                                          ("time", "Время подключения"),
-                                          ("traffic", "Получено / отправлено"),
-                                          ("speed", "Скорость"), ("engine", "Клиент"))):
-            grid.addWidget(QLabel(title + ":"), i + 1, 0)
-            value = QLabel("—")
-            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            grid.addWidget(value, i + 1, 1, 1, 2)
-            self.info[key] = value
-        right.addWidget(card)
-
-        ip_row = QHBoxLayout()
-        self.ip_btn = QPushButton("Проверить внешний IP")
-        self.ip_btn.clicked.connect(self._check_ip)
-        self.ip_label = QLabel("")
-        ip_row.addWidget(self.ip_btn)
-        ip_row.addWidget(self.ip_label, 1)
-        right.addLayout(ip_row)
-
-        mode_row = QHBoxLayout()
-        self.mode_label = QLabel("Режим VLESS:")
-        self.cmb_mode = QComboBox()
-        self._modes = list(profiles.MODES)
-        self.cmb_mode.addItems(list(profiles.MODES.values()))
-        self.cmb_mode.setToolTip(
-            "TUN: sing-box + Xray — весь трафик через виртуальный адаптер: маршруты и DNS "
-            "настраивает sing-box, соединение с сервером ведёт Xray (нужны права "
-            "администратора). Системный прокси — "
-            "браузеры и программы, которые слушаются прокси Windows (Xray). TUN через Xray — "
-            "запасной вариант (wintun.dll рядом с xray.exe, экспериментально). Только "
-            "локальный прокси — через VPN идут лишь программы с прокси 127.0.0.1:порт "
-            "(Telegram, переменная HTTPS_PROXY), остальное — как без VPN.")
-        self.cmb_mode.currentIndexChanged.connect(self._on_mode)
-        mode_row.addWidget(self.mode_label)
-        mode_row.addWidget(self.cmb_mode, 1)
-        right.addLayout(mode_row)
-        self.chk_auto = QCheckBox("Профиль для автоподключения (при запуске программы — если "
-                                  "включено в настройках)")
-        self.chk_auto.toggled.connect(self._on_auto)
-        right.addWidget(self.chk_auto)
-        from ui import settings as cfg
-        self.chk_kill = QCheckBox("Kill switch: интернет только через VPN, при обрыве — "
-                                  "блокировка")
-        self.chk_kill.setToolTip(
-            "Режим TUN: пока VPN подключён, брандмауэр Windows разрешает выход в интернет "
-            "только через туннель (локальная сеть — можно). Если VPN оборвётся, интернет "
-            "останется перекрытым, пока вы не снимете блокировку. Включение и снятие — в "
-            "журнале действий с откатом.")
-        self.chk_kill.setChecked(cfg.get("vpn/killswitch"))
-        self.chk_kill.toggled.connect(lambda on: cfg.set_("vpn/killswitch", on))
-        right.addWidget(self.chk_kill)
-        self.chk_ipv6 = QCheckBox("IPv6 через VPN")
-        self.chk_ipv6.setToolTip(
-            "Режим TUN. Включено — IPv6 идёт через туннель (если сервер его поддерживает). "
-            "Выключено — IPv6 перекрыт, программы работают по IPv4; мимо VPN он не идёт ни в "
-            "каком случае.")
-        self.chk_ipv6.setChecked(cfg.get("vpn/ipv6"))
-        self.chk_ipv6.toggled.connect(lambda on: cfg.set_("vpn/ipv6", on))
-        right.addWidget(self.chk_ipv6)
-        self.unblock_btn = QPushButton("Снять блокировку интернета (kill switch)")
-        self.unblock_btn.setStyleSheet("color: #c0392b; font-weight: 600;")
-        self.unblock_btn.clicked.connect(self._release_block)
-        self.unblock_btn.setVisible(False)
-        right.addWidget(self.unblock_btn)
-
-        # ----- маршрутизация, Mux, фрагментация -----
-        route = QGridLayout()
-        route.setContentsMargins(0, 4, 0, 4)
-        self.route_boxes = {}
-        for i, (key, text, tip) in enumerate((
-                ("route_ru", "Российские сайты напрямую",
-                 "Сайты в зонах .ru, .рф, .su, из списка российских сайтов и с российскими "
-                 "адресами идут напрямую, без сервера VPN: Госуслуги, банки и маркетплейсы "
-                 "работают быстрее и не ругаются на зарубежный IP."),
-                ("block_ads", "Блокировать рекламу и трекеры",
-                 "Список рекламных и следящих доменов (geosite:category-ads-all) — "
-                 "соединения к ним не устанавливаются."),
-                ("mux", "Mux (несколько соединений в одном)",
-                 "Меньше рукопожатий с сервером — быстрее открываются сайты с множеством "
-                 "запросов. Не работает со ссылками flow=xtls-rprx-vision (для них не "
-                 "включается). Минус: одна потеря пакета тормозит все соединения внутри."),
-                ("fragment", "Фрагментация (обход DPI)",
-                 "Начало TLS-соединения с сервером режется на кусочки 100–200 байт с паузой "
-                 "10–20 мс, чтобы DPI провайдера не распознал его. Нужно, если провайдер "
-                 "режет или тормозит соединение с сервером VPN."))):
-            box = QCheckBox(text)
-            box.setToolTip(tip)
-            box.setChecked(cfg.get(f"vpn/{key}"))
-            box.toggled.connect(lambda on, k=key: cfg.set_(f"vpn/{k}", on))
-            route.addWidget(box, i // 2, i % 2)
-            self.route_boxes[key] = box
-        local_row = QHBoxLayout()
-        self.chk_local = QCheckBox("Локальный прокси для программ (SOCKS5 и HTTP), порт:")
-        self.chk_local.setToolTip(
-            "Пока VPN подключён, программы с настройкой прокси 127.0.0.1:порт (Telegram, "
-            "браузеры, переменная HTTPS_PROXY) ходят через VPN — по тем же правилам "
-            "маршрутизации. Доступен только с этого компьютера. Если порт занят другой "
-            "программой (например, Throne), VPN подключится без локального прокси.")
-        self.chk_local.setChecked(cfg.get("vpn/local_proxy"))
-        self.chk_local.toggled.connect(lambda on: cfg.set_("vpn/local_proxy", on))
-        from PySide6.QtWidgets import QSpinBox
-        self.spn_port = QSpinBox()
-        self.spn_port.setRange(1024, 65535)
-        self.spn_port.setValue(cfg.get("vpn/local_port"))
-        self.spn_port.valueChanged.connect(lambda v: cfg.set_("vpn/local_port", v))
-        local_row.addWidget(self.chk_local)
-        local_row.addWidget(self.spn_port)
-        local_row.addStretch()
-        route.addLayout(local_row, 3, 0, 1, 2)
-        self.apps_btn = QPushButton()
-        self.apps_btn.setToolTip("Программы, которые идут напрямую, мимо VPN (режим TUN)")
-        self.apps_btn.clicked.connect(self._edit_apps)
-        route.addWidget(self.apps_btn, 2, 0, 1, 2)
-        right.addLayout(route)
-        self._apps_text()
-        from ui.widgets import guard_wheel
-        guard_wheel(self)  # порт и режим меняются колесом только после щелчка
-
-        right.addWidget(QLabel("Журнал"))
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(500)
-        right.addWidget(self.log_view, 1)
-        root.addLayout(right, 3)
-
-        self._fill()
+        self.bridge.ip.connect(self._on_ip)
+        self.bridge.probes.connect(self._on_probes)
+        self.bridge.cert_alarm.connect(self._on_cert_alarm)
+        self._ip_text = ""
+        self.root = QVBoxLayout(self)
+        self.root.setContentsMargins(0, 0, 0, 0)
+        self._build()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(1000)
         self._tick()
 
-    def autoconnect(self) -> bool:
-        """VPN вместе с программой (настройка vpn/autostart): профиль автоподключения."""
-        auto = next((p for p in self.profiles if p.auto_connect), None)
-        if auto is None:
-            self.bridge.log.emit("Автоподключение: не выбран профиль для автоподключения")
-            return False
-        self.list.setCurrentRow(self.profiles.index(auto))
-        self.toggle()
-        return True
+    # ---------------- построение ----------------
+    def _build(self) -> None:
+        self.body = QWidget()
+        self.root.addWidget(self.body)
+        self._build_modern(self.body)
+        from ui.widgets import guard_wheel
+        guard_wheel(self.body)
+        self._fill_profiles()
+        self._render_log()
+        self._on_probes(self._probes)
+        self._tick()
 
-    # ----- профили -----
-    def _fill(self, select: int = 0) -> None:
-        self.list.clear()
-        for p in self.profiles:
-            item = QListWidgetItem(p.title)
-            item.setToolTip(p.server)
-            self.list.addItem(item)
+    def _header(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        title = QLabel("VPN")
+        title.setStyleSheet("font-size: 18pt; font-weight: 700;")
+        row.addWidget(title)
+        row.addStretch()
+        return row
+
+    def _profile_buttons(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        for text, slot, tip in (("Вставить...", self._paste, "Ссылка vless:// или текст"),
+                                ("Импорт файла...", self._import, ".conf или .ovpn"),
+                                ("Переименовать", self._rename, ""),
+                                ("Удалить", self._delete, "")):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            row.addWidget(button)
+        return row
+
+    def _build_modern(self, body: QWidget) -> None:
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(18, 14, 18, 14)
+        outer.setSpacing(12)
+        outer.addLayout(self._header())
+        # профиль
+        prow = QHBoxLayout()
+        prow.addWidget(QLabel("Профиль:"))
+        self.cmb_profile = QComboBox()
+        self.cmb_profile.setMinimumWidth(360)
+        self.cmb_profile.currentIndexChanged.connect(self._on_select)
+        prow.addWidget(self.cmb_profile, 1)
+        prow.addLayout(self._profile_buttons())
+        outer.addLayout(prow)
+        # герой: кнопка и плитки
+        hero, hl = _card()
+        hrow = QHBoxLayout()
+        hrow.setSpacing(24)
+        self.connect_btn = QPushButton("Подключить")
+        self.connect_btn.setFixedSize(150, 150)
+        self.connect_btn.clicked.connect(self.toggle)
+        hrow.addWidget(self.connect_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        texts = QVBoxLayout()
+        self.state_label = QLabel()
+        texts.addWidget(self.state_label)
+        self.protocol_label = _label("", "hint")
+        self.protocol_label.setStyleSheet("font-size: 11pt;")
+        texts.addWidget(self.protocol_label)
+        self.mode_label_big = _label("", "hint")
+        texts.addWidget(self.mode_label_big)
+        self.error_label = _label("")
+        self.error_label.setStyleSheet(f"color: {RED};")
+        texts.addWidget(self.error_label)
+        self.unblock_btn = QPushButton("Снять блокировку интернета (kill switch)")
+        self.unblock_btn.setStyleSheet(f"color: {RED}; font-weight: 600;")
+        self.unblock_btn.clicked.connect(self._release_block)
+        texts.addWidget(self.unblock_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        texts.addStretch()
+        hrow.addLayout(texts, 1)
+        tiles = QGridLayout()
+        tiles.setSpacing(10)
+        self.tiles = {}
+        for i, (key, name) in enumerate((("time", "Время"), ("speed", "Скорость"),
+                                         ("rx", "Получено"), ("tx", "Отправлено"),
+                                         ("server", "Сервер"), ("ip", "Внешний IP"))):
+            tile, tl = _card()
+            tl.setContentsMargins(12, 8, 12, 8)
+            tl.setSpacing(2)
+            tl.addWidget(_label(name, "tileName"))
+            value = _label("—", "tileValue", wrap=False)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            tl.addWidget(value)
+            tile.setMinimumWidth(190)
+            tiles.addWidget(tile, i // 3, i % 3)
+            self.tiles[key] = value
+        hrow.addLayout(tiles)
+        hl.addLayout(hrow)
+        outer.addWidget(hero)
+        # разделы
+        lower = QHBoxLayout()
+        nav = QVBoxLayout()
+        nav.setSpacing(4)
+        self.stack = QStackedWidget()
+        group = QButtonGroup(self.body)
+        for i, (title, page) in enumerate(self._pages()):
+            button = QPushButton(title)
+            button.setProperty("nav", True)
+            button.setCheckable(True)
+            button.setMinimumWidth(190)
+            group.addButton(button, i)
+            nav.addWidget(button)
+            self.stack.addWidget(self._scroll(page))
+        group.idClicked.connect(self.stack.setCurrentIndex)
+        self.stack.currentChanged.connect(lambda i: group.button(i).setChecked(True))
+        group.button(0).setChecked(True)
+        nav.addStretch()
+        lower.addLayout(nav)
+        lower.addWidget(self.stack, 1)
+        outer.addLayout(lower, 1)
+
+    @staticmethod
+    def _scroll(page: QWidget) -> QScrollArea:
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidget(page)
+        return area
+
+    def _pages(self) -> list[tuple[str, QWidget]]:
+        return [("Подключение", self._page_connection()),
+                ("Маршрутизация", self._page_routing()),
+                ("Проверка", self._page_checks()),
+                ("Настройки клиента", self._page_settings()),
+                ("Журнал", self._page_log())]
+
+    # ---------------- разделы ----------------
+    def _page_connection(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        card, cl = _card()
+        cl.addWidget(_label("Режим подключения", "title"))
+        self.cmb_mode = QComboBox()
+        self._modes = list(profiles.MODES)
+        self.cmb_mode.addItems(list(profiles.MODES.values()))
+        self.cmb_mode.currentIndexChanged.connect(self._on_mode)
+        cl.addWidget(self.cmb_mode)
+        cl.addWidget(_label(
+            "TUN — весь трафик компьютера через VPN (маршруты и DNS — sing-box, соединение с "
+            "сервером — Xray). Системный прокси — программы, которые слушаются прокси Windows. "
+            "Только локальный прокси — лишь программы с прокси 127.0.0.1:порт (Telegram, "
+            "HTTPS_PROXY), остальное — как без VPN.", "hint"))
+        self.chk_auto = QCheckBox("Этот профиль подключать при запуске программы (если "
+                                  "включено «VPN при запуске» в настройках клиента)")
+        self.chk_auto.toggled.connect(self._on_auto)
+        cl.addWidget(self.chk_auto)
+        layout.addWidget(card)
+        card, cl = _card()
+        cl.addWidget(_label("Внешний IP", "title"))
+        row = QHBoxLayout()
+        self.ip_btn = QPushButton("Проверить внешний IP")
+        self.ip_btn.clicked.connect(self._check_ip)
+        self.ip_label = QLabel("")
+        row.addWidget(self.ip_btn)
+        row.addWidget(self.ip_label, 1)
+        cl.addLayout(row)
+        self.engine_label = _label("", "hint")
+        cl.addWidget(self.engine_label)
+        layout.addWidget(card)
+        layout.addStretch()
+        return page
+
+    def _page_routing(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        card, cl = _card()
+        cl.addWidget(_label("Встроенные правила", "title"))
+        grid = QGridLayout()
+        self.route_boxes = {}
+        for i, (key, text, tip) in enumerate((
+                ("route_ru", "Российские сайты напрямую",
+                 "Зоны .ru, .рф, .su, список российских сайтов и российские адреса — без "
+                 "сервера VPN: Госуслуги, банки, маркетплейсы."),
+                ("block_ads", "Блокировать рекламу и трекеры",
+                 "Список рекламных и следящих доменов (geosite:category-ads-all)."),
+                ("block_quic", "Блокировать QUIC (UDP 443)",
+                 "Браузеры переходят на обычный TCP. QUIC через VPN часто тормозит и его "
+                 "проще распознать."),
+                ("block_udp", "Блокировать весь UDP",
+                 "По UDP внутри VLESS VPN чаще распознают и режут. Игры, звонки и Discord "
+                 "голосом могут перестать работать. DNS через сервер пойдёт по TCP."))):
+            box = QCheckBox(text)
+            box.setToolTip(tip)
+            box.setChecked(cfg.get(f"vpn/{key}"))
+            box.toggled.connect(lambda on, k=key: cfg.set_(f"vpn/{k}", on))
+            grid.addWidget(box, i // 2, i % 2)
+            self.route_boxes[key] = box
+        cl.addLayout(grid)
+        self.apps_btn = QPushButton()
+        self.apps_btn.clicked.connect(self._edit_apps)
+        cl.addWidget(self.apps_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self._apps_text()
+        layout.addWidget(card)
+        card, cl = _card()
+        cl.addWidget(_label("Свои правила: домены, геометки и адреса", "title"))
+        self.rules = RulesEditor()
+        self.rules.setMinimumHeight(260)
+        cl.addWidget(self.rules)
+        layout.addWidget(card, 1)
+        return page
+
+    def _page_checks(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        card, cl = _card()
+        cl.addWidget(_label("Отклик сайтов", "title"))
+        cl.addWidget(_label("Время до ответа сайта тем же путём, каким сейчас ходят программы "
+                            "(через VPN или напрямую), и проверка сертификата.", "hint"))
+        row = QHBoxLayout()
+        self.probe_btn = QPushButton("Проверить отклик")
+        self.probe_btn.clicked.connect(self._run_probes)
+        self.probe_host = QLineEdit()
+        self.probe_host.setPlaceholderText("свой сайт, например example.com (необязательно)")
+        row.addWidget(self.probe_btn)
+        row.addWidget(self.probe_host, 1)
+        cl.addLayout(row)
+        self.probe_table = QTableWidget(0, 5)
+        self.probe_table.setHorizontalHeaderLabels(["Сайт", "Соединение", "Ответ", "Сертификат",
+                                                    "Подробности"])
+        self.probe_table.verticalHeader().setVisible(False)
+        self.probe_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.probe_table.horizontalHeader().setStretchLastSection(True)
+        for col, width in enumerate((200, 110, 110, 230)):
+            self.probe_table.setColumnWidth(col, width)
+        self.probe_table.setMinimumHeight(240)
+        cl.addWidget(self.probe_table)
+        layout.addWidget(card)
+        card, cl = _card()
+        cl.addWidget(_label("Подмена сертификатов", "title"))
+        self.chk_cert = QCheckBox("Проверять сертификаты сайтов во время подключения (раз в "
+                                  "10 минут)")
+        self.chk_cert.setToolTip(
+            "Сертификаты популярных сайтов сверяются с доверенными центрами Windows. Если "
+            "сертификат подменён (провайдер, DPI, вредонос), трафик к сайту блокируется, "
+            "пока вы не разрешите. Не видит подмену, если злоумышленник добавил свой "
+            "корневой сертификат в Windows.")
+        self.chk_cert.setChecked(cfg.get("vpn/cert_watch"))
+        self.chk_cert.toggled.connect(lambda on: cfg.set_("vpn/cert_watch", on))
+        cl.addWidget(self.chk_cert)
+        cl.addWidget(_label("Заблокированы из-за подмены сертификата:", "hint"))
+        self.cert_list = QListWidget()
+        self.cert_list.setMaximumHeight(120)
+        cl.addWidget(self.cert_list)
+        allow = QPushButton("Разрешить выбранный сайт")
+        allow.clicked.connect(self._allow_cert)
+        cl.addWidget(allow, 0, Qt.AlignmentFlag.AlignLeft)
+        self._fill_cert_list()
+        layout.addWidget(card)
+        layout.addStretch()
+        return page
+
+    def _page_settings(self) -> QWidget:
+        from vpn import xray
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        card, cl = _card()
+        cl.addWidget(_label("Локальные прокси для программ", "title"))
+        cl.addWidget(_label("Только с этого компьютера (127.0.0.1). Telegram и большинство "
+                            "программ умеют SOCKS5; HTTP — для программ с переменной "
+                            "HTTPS_PROXY. Занятый порт (например, Throne) — VPN подключится без "
+                            "этого прокси.", "hint"))
+        form = QGridLayout()
+        self.port_widgets = []
+        for row, kind, title in ((0, "socks", "SOCKS5"), (1, "http", "HTTP")):
+            box = QCheckBox(f"{title}-прокси, порт:")
+            box.setChecked(cfg.get(f"vpn/{kind}_enabled"))
+            box.toggled.connect(lambda on, k=kind: cfg.set_(f"vpn/{k}_enabled", on))
+            spin = QSpinBox()
+            spin.setRange(1024, 65535)
+            spin.setValue(cfg.get(f"vpn/{kind}_port"))
+            spin.valueChanged.connect(lambda v, k=kind: cfg.set_(f"vpn/{k}_port", v))
+            form.addWidget(box, row, 0)
+            form.addWidget(spin, row, 1)
+            self.port_widgets += [box, spin]
+        form.setColumnStretch(2, 1)
+        cl.addLayout(form)
+        layout.addWidget(card)
+        card, cl = _card()
+        cl.addWidget(_label("Защита и сеть", "title"))
+        self.chk_kill = QCheckBox("Kill switch: при обрыве VPN интернет перекрыт до вашего "
+                                  "решения")
+        self.chk_kill.setToolTip(
+            "TUN — брандмауэр Windows выпускает в интернет только через туннель. Системный "
+            "прокси — прокси Windows остаётся на остановившемся Xray. Только локальный прокси "
+            "— программы с прокси при обрыве просто теряют связь, мимо VPN они не уходят.")
+        self.chk_kill.setChecked(cfg.get("vpn/killswitch"))
+        self.chk_kill.toggled.connect(lambda on: cfg.set_("vpn/killswitch", on))
+        cl.addWidget(self.chk_kill)
+        f = QFormLayout()
+        self.cmb_ip = QComboBox()
+        self._ip_modes = list(xray.IP_MODES)
+        self.cmb_ip.addItems(list(xray.IP_MODES.values()))
+        mode = str(cfg.get("vpn/ip_mode") or "ipv4")
+        self.cmb_ip.setCurrentIndex(self._ip_modes.index(mode) if mode in self._ip_modes else 0)
+        self.cmb_ip.currentIndexChanged.connect(
+            lambda i: cfg.set_("vpn/ip_mode", self._ip_modes[i]))
+        self.cmb_ip.setToolTip(
+            "Режим TUN. Только IPv4 — IPv6 перекрыт в туннеле, мимо VPN не идёт. Предпочтительно "
+            "IPv6 — сайт с IPv6 открывается по IPv6, остальные по IPv4. IPv6 — так же, и "
+            "соединение с самим сервером VPN тоже по IPv6, если он у сервера и у вас есть.")
+        f.addRow("IP:", self.cmb_ip)
+        self.cmb_dns = QComboBox()
+        self.cmb_dns.setEditable(True)
+        self.cmb_dns.addItems(["1.1.1.1", "8.8.8.8", "9.9.9.9", "1.0.0.1", "8.8.4.4"])
+        self.cmb_dns.setCurrentText(str(cfg.get("vpn/dns_server") or "1.1.1.1"))
+        self.cmb_dns.currentTextChanged.connect(lambda t: cfg.set_("vpn/dns_server", t.strip()))
+        self.cmb_dns.setToolTip("DNS-сервер, к которому запросы идут через сервер VPN (TUN)")
+        f.addRow("DNS через VPN:", self.cmb_dns)
+        cl.addLayout(f)
+        grid = QGridLayout()
+        self.opt_boxes = {}
+        for i, (key, text, tip) in enumerate((
+                ("mux", "Mux (несколько соединений в одном)",
+                 "Быстрее открываются сайты с множеством запросов. Не работает со ссылками "
+                 "flow=xtls-rprx-vision (для них не включается)."),
+                ("fragment", "Фрагментация (обход DPI)",
+                 "Начало TLS-соединения с сервером режется на кусочки 100–200 байт с паузой "
+                 "10–20 мс — если провайдер режет соединение с сервером VPN."))):
+            box = QCheckBox(text)
+            box.setToolTip(tip)
+            box.setChecked(cfg.get(f"vpn/{key}"))
+            box.toggled.connect(lambda on, k=key: cfg.set_(f"vpn/{k}", on))
+            grid.addWidget(box, 0, i)
+            self.opt_boxes[key] = box
+        cl.addLayout(grid)
+        layout.addWidget(card)
+        card, cl = _card()
+        cl.addWidget(_label("Запуск", "title"))
+        self.chk_autostart = QCheckBox("Подключать VPN при запуске программы (профиль, "
+                                       "отмеченный «подключать при запуске»)")
+        self.chk_autostart.setChecked(cfg.get("vpn/autostart"))
+        self.chk_autostart.toggled.connect(lambda on: cfg.set_("vpn/autostart", on))
+        cl.addWidget(self.chk_autostart)
+        cl.addWidget(_label(self._cores_text(), "hint"))
+        layout.addWidget(card)
+        layout.addWidget(_label("Настройки действуют со следующего подключения. Они относятся "
+                                "только к VPN и не меняют настройки антивируса.", "hint"))
+        layout.addStretch()
+        return page
+
+    def _page_log(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        row = QHBoxLayout()
+        self.chk_access = QCheckBox("Показывать каждое соединение (журнал доступа Xray)")
+        self.chk_access.setChecked(True)
+        self.chk_access.toggled.connect(lambda on: self._render_log())
+        clear = QPushButton("Очистить")
+        clear.clicked.connect(self._clear_log)
+        row.addWidget(self.chk_access)
+        row.addStretch()
+        row.addWidget(clear)
+        layout.addLayout(row)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setMinimumHeight(360)
+        layout.addWidget(self.log_view, 1)
+        return page
+
+    @staticmethod
+    def _cores_text() -> str:
+        from vpn import singbox, xray
+        x, s = xray.find_xray(), singbox.find_singbox()
+        return (f"Xray: {x or 'не найден'}\nsing-box: {s or 'не найден'}\n"
+                "Версии и лицензии — vpn/bin/THIRD_PARTY.md")
+
+    # ---------------- профили ----------------
+    def _fill_profiles(self, select: int | None = None) -> None:
+        if select is None:
+            last = str(cfg.get("vpn/last_profile") or "")
+            select = next((i for i, p in enumerate(self.profiles)
+                           if f"{p.name}|{p.server}" == last), 0)
+            if self.active in self.profiles:
+                select = self.profiles.index(self.active)
+        self.cmb_profile.blockSignals(True)
+        self.cmb_profile.clear()
+        for i, p in enumerate(self.profiles):
+            self.cmb_profile.addItem(p.title)
+            self.cmb_profile.setItemData(i, p.server, Qt.ItemDataRole.ToolTipRole)
+        self.cmb_profile.blockSignals(False)
         if self.profiles:
-            self.list.setCurrentRow(min(select, len(self.profiles) - 1))
+            index = min(select, len(self.profiles) - 1)
+            self.cmb_profile.setCurrentIndex(index)
+            self._on_select(index)
+
+    def _row(self) -> int:
+        return self.cmb_profile.currentIndex()
 
     def _current(self) -> profiles.Profile | None:
-        row = self.list.currentRow()
+        row = self._row()
         return self.profiles[row] if 0 <= row < len(self.profiles) else None
 
     def _on_select(self, _row: int) -> None:
@@ -304,8 +743,7 @@ class VpnWindow(QDialog):
         self.chk_auto.setChecked(bool(p and p.auto_connect))
         self.chk_auto.blockSignals(False)
         vless = bool(p and p.kind == "vless")
-        self.mode_label.setVisible(vless)
-        self.cmb_mode.setVisible(vless)
+        self.cmb_mode.setEnabled(vless)
         if vless:
             self.cmb_mode.blockSignals(True)
             self.cmb_mode.setCurrentIndex(self._modes.index(p.mode) if p.mode in self._modes
@@ -318,6 +756,7 @@ class VpnWindow(QDialog):
         if p is not None and p.kind == "vless":
             p.mode = self._modes[index]
             self._save()
+            self._tick()
 
     def _save(self) -> None:
         try:
@@ -329,12 +768,12 @@ class VpnWindow(QDialog):
     def _add(self, profile: profiles.Profile) -> None:
         self.profiles.append(profile)
         self._save()
-        self._fill(len(self.profiles) - 1)
+        self._fill_profiles(len(self.profiles) - 1)
         activity.record("vpn", f"Добавлен профиль {profile.name} ({profile.kind})")
 
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Конфигурация VPN", "",
-                                              "WireGuard и OpenVPN (*.conf *.ovpn);;Все (*)")
+                                              "VPN (*.conf *.ovpn *.txt);;Все (*)")
         if not path:
             return
         try:
@@ -362,7 +801,7 @@ class VpnWindow(QDialog):
         if ok and name.strip():
             p.name = name.strip()
             self._save()
-            self._fill(self.list.currentRow())
+            self._fill_profiles(self._row())
 
     def _delete(self) -> None:
         p = self._current()
@@ -377,7 +816,7 @@ class VpnWindow(QDialog):
             return
         self.profiles.remove(p)
         self._save()
-        self._fill()
+        self._fill_profiles(0)
 
     def _on_auto(self, on: bool) -> None:
         p = self._current()
@@ -388,7 +827,18 @@ class VpnWindow(QDialog):
         p.auto_connect = on
         self._save()
 
-    # ----- подключение -----
+    def autoconnect(self) -> bool:
+        """VPN вместе с программой (vpn/autostart): профиль автоподключения или последний."""
+        auto = next((p for p in self.profiles if p.auto_connect), None)
+        if auto is None:
+            self.bridge.log.emit("Автоподключение: не выбран профиль для подключения при "
+                                 "запуске")
+            return False
+        self._fill_profiles(self.profiles.index(auto))
+        self.toggle()
+        return True
+
+    # ---------------- подключение ----------------
     def toggle(self) -> None:
         if self.backend is not None and self.backend.state in (backends.CONNECTED,
                                                                backends.CONNECTING):
@@ -406,89 +856,250 @@ class VpnWindow(QDialog):
             return
         self.backend, self.active = backend, p
         self._last = (0, 0, time.monotonic())
+        self._ip_text = ""
+        self._cert_last = time.monotonic()  # первая проверка — через минуту после подключения
+        self._cert_last -= CERT_INTERVAL - 60
+        cfg.set_("vpn/last_profile", f"{p.name}|{p.server}")
         activity.record("vpn", f"Подключение: {p.name} ({p.kind}, {p.server})")
         threading.Thread(target=backend.connect, args=(p,), daemon=True).start()
 
+    def _reconnect(self) -> None:
+        """Переподключиться с новыми правилами (после блокировки или разрешения сайта)."""
+        backend, profile = self.backend, self.active
+        if backend is None or profile is None or backend.state != backends.CONNECTED:
+            return
+
+        def job():
+            backend.disconnect()
+            time.sleep(1)
+            fresh = backends.backend_for(profile.kind, self.bridge.log.emit, profile.mode)
+            self.backend = fresh
+            fresh.connect(profile)
+
+        threading.Thread(target=job, daemon=True).start()
+
     def _tick(self) -> None:
+        if not hasattr(self, "connect_btn"):
+            return
         backend = self.backend
         state = backend.state if backend else backends.DISCONNECTED
         text, color = STATE_TEXT[state]
-        if state == backends.ERROR and backend.error:
-            text = "Ошибка"
-            self.connect_btn.setToolTip(backend.error)
-        self.state_label.setText(f"● {text}")
-        self.state_label.setStyleSheet(f"font-size: 18pt; font-weight: 600; color: {color};")
         busy = state in (backends.CONNECTED, backends.CONNECTING)
-        self.connect_btn.setText("Отключить" if busy else "Подключить")
+        self.state_label.setText(f"● {text}")
+        self.state_label.setStyleSheet(f"font-size: 20pt; font-weight: 700; color: {color};")
+        self.connect_btn.setText(("Отключить" if busy else "Подключить"))
+        ring = GREEN if state == backends.CONNECTED else (ORANGE if busy else ACCENT)
+        self.connect_btn.setStyleSheet(
+            f"QPushButton {{ border-radius: 75px; border: 4px solid {ring}; "
+            f"font-size: 13pt; font-weight: 700; background: palette(base); }}"
+            f"QPushButton:hover {{ background: palette(alternate-base); }}")
+        self.error_label.setText(backend.error if backend and state == backends.ERROR else "")
+        self.error_label.setVisible(bool(self.error_label.text()))
+        blocked = bool(backend and getattr(backend, "blocked", False))
         from vpn import killswitch
-        self.unblock_btn.setVisible(not busy and killswitch.active())
-        for box in (self.chk_kill, self.chk_ipv6, self.apps_btn, self.chk_local, self.spn_port,
-                    *self.route_boxes.values()):
-            box.setEnabled(not busy)  # действуют со следующего подключения
-        self.cmb_mode.setEnabled(not busy)
+        self.unblock_btn.setVisible(not busy and (blocked or killswitch.active()))
+        for w in (self.cmb_mode, self.chk_kill, self.cmb_ip, self.cmb_dns, self.apps_btn,
+                  *self.route_boxes.values(), *self.opt_boxes.values(), *self.port_widgets):
+            w.setEnabled(not busy)  # действуют со следующего подключения
+        if not busy:
+            p = self._current()
+            self.cmb_mode.setEnabled(bool(p and p.kind == "vless"))
         p = self.active if busy else self._current()
-        self.info["server"].setText(p.server if p else "—")
-        kind = profiles.KINDS.get(p.kind, "—") if p else "—"
-        if p and p.kind == "vless":
-            kind += ", " + profiles.MODES.get(p.mode, p.mode).lower()
-        self.info["kind"].setText(kind)
+        self.protocol_label.setText(protocol_text(p))
+        self.mode_label_big.setText(mode_text(p, backend if busy else None))
         engine = backend if busy else (self._engine(p) if p else None)
-        self.info["engine"].setText(
-            "—" if engine is None else getattr(engine, "exe", "") or
-            ("встроенная имитация" if p and p.kind == "demo" else f"не найден: {engine.missing}"))
+        self.engine_label.setText(
+            "Клиент: " + ("—" if engine is None else getattr(engine, "exe", "") or (
+                "встроенная имитация" if p and p.kind == "demo"
+                else f"не найден: {engine.missing}")))
+        self.tiles["server"].setText(p.server if p else "—")
+        self.tiles["ip"].setText(self._ip_text or "—")
         if state == backends.CONNECTED:
             seconds = int(time.time() - backend.since)
-            self.info["time"].setText(f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:"
-                                      f"{seconds % 60:02d}")
+            self.tiles["time"].setText(f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:"
+                                       f"{seconds % 60:02d}")
             rx, tx = backend.counters()
             last_rx, last_tx, last_t = self._last
             dt = max(0.5, time.monotonic() - last_t)
             if last_rx or last_tx:
-                self.info["speed"].setText(f"↓ {human_size(int((rx - last_rx) / dt))}/с   "
-                                           f"↑ {human_size(int((tx - last_tx) / dt))}/с")
+                self.tiles["speed"].setText(f"↓ {human_size(int((rx - last_rx) / dt))}/с  "
+                                            f"↑ {human_size(int((tx - last_tx) / dt))}/с")
             self._last = (rx, tx, time.monotonic())
-            self.info["traffic"].setText(f"{human_size(rx)} / {human_size(tx)}")
+            self.tiles["rx"].setText(human_size(rx))
+            self.tiles["tx"].setText(human_size(tx))
+            self._maybe_check_certs()
         else:
-            for key in ("time", "traffic", "speed"):
-                self.info[key].setText("—")
+            for key in ("time", "speed", "rx", "tx"):
+                self.tiles[key].setText("—")
 
     def _engine(self, p: profiles.Profile):
-        """Чем будет подключаться профиль (для строки «Клиент»), без повторного поиска."""
         key = (p.kind, p.mode)
         if getattr(self, "_engine_key", None) != key:
             self._engine_key = key
             self._engine_cache = backends.backend_for(p.kind, lambda t: None, p.mode)
         return self._engine_cache
 
+    # ---------------- журнал ----------------
     def _append_log(self, text: str) -> None:
-        self.log_view.appendPlainText(f"{time.strftime('%H:%M:%S')}  {text}")
+        line = f"{time.strftime('%H:%M:%S')}  {text}"
+        self._log_lines.append(line)
+        del self._log_lines[:-2000]
+        if self._show_line(line):
+            self.log_view.appendPlainText(line)
+
+    def _show_line(self, line: str) -> bool:
+        return self.chk_access.isChecked() or " accepted " not in line
+
+    def _render_log(self) -> None:
+        if not hasattr(self, "log_view"):
+            return
+        self.log_view.setPlainText("\n".join(l for l in self._log_lines if self._show_line(l)))
+        self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+
+    def _clear_log(self) -> None:
+        self._log_lines.clear()
+        self.log_view.clear()
+
+    # ---------------- проверки ----------------
+    def _on_ip(self, text: str) -> None:
+        self.ip_label.setText(text)
+        self._ip_text = text.removeprefix("Внешний IP: ") if text.startswith("Внешний") else ""
+        self._tick()
 
     def _check_ip(self) -> None:
         self.ip_label.setText("Проверяю...")
+        from vpn import checks
+        route = checks.route_for(self.backend)
 
         def job():
             try:
-                self.bridge.ip.emit(f"Внешний IP: {backends.public_ip()}")
+                sock = checks.open_tcp("api.ipify.org", 443, route)
+                import ssl
+                with ssl.create_default_context().wrap_socket(
+                        sock, server_hostname="api.ipify.org") as tls:
+                    tls.sendall(b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close"
+                                b"\r\n\r\n")
+                    data = b""
+                    while chunk := tls.recv(4096):
+                        data += chunk
+                self.bridge.ip.emit("Внешний IP: " + data.split(b"\r\n\r\n", 1)[-1].decode()
+                                    .strip())
             except Exception as e:
                 self.bridge.ip.emit(f"Не удалось: {e}")
 
         threading.Thread(target=job, daemon=True).start()
 
-    def closeEvent(self, event):
-        # окно скрывается, подключение остаётся (как у обычных VPN-клиентов)
-        if self.backend is not None and self.backend.state == backends.CONNECTED:
-            self.bridge.log.emit("Окно закрыто, VPN остаётся подключённым")
-        super().closeEvent(event)
+    def _run_probes(self) -> None:
+        from vpn import checks
+        hosts = list(checks.TARGETS)
+        own = self.probe_host.text().strip().removeprefix("https://").split("/")[0]
+        if own:
+            hosts.insert(0, (own, own))
+        route = checks.route_for(self.backend)
+        self.probe_btn.setEnabled(False)
+        self.probe_btn.setText("Проверяю...")
 
+        def job():
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(6) as pool:
+                results = list(pool.map(lambda h: (h[0], checks.probe(h[1], route)), hosts))
+            self.bridge.probes.emit(results)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _on_probes(self, results) -> None:
+        self._probes = results
+        if not hasattr(self, "probe_table"):
+            return
+        self.probe_btn.setEnabled(True)
+        self.probe_btn.setText("Проверить отклик")
+        self.probe_table.setRowCount(0)
+        for name, r in results:
+            row = self.probe_table.rowCount()
+            self.probe_table.insertRow(row)
+            cert = {"ok": "настоящий", "substituted": "ПОДМЕНЁН", "unknown": "—"}[r.cert]
+            values = (f"{name} ({r.host})" if name != r.host else r.host,
+                      f"{r.connect_ms:.0f} мс" if r.connect_ms else "—",
+                      f"{r.total_ms:.0f} мс" if r.ok else "нет ответа",
+                      cert + (f" ({r.issuer})" if r.issuer else ""),
+                      r.error or r.status)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                if col == 2 and r.ok:
+                    item.setForeground(Qt.GlobalColor.darkGreen if r.total_ms < 800
+                                       else Qt.GlobalColor.darkYellow)
+                if (col == 2 and not r.ok) or (col == 3 and r.cert == "substituted"):
+                    item.setForeground(Qt.GlobalColor.red)
+                self.probe_table.setItem(row, col, item)
+        for name, r in results:
+            if r.cert == "substituted":
+                self.bridge.cert_alarm.emit(r)
+
+    def _maybe_check_certs(self) -> None:
+        if not cfg.get("vpn/cert_watch") or time.monotonic() - self._cert_last < CERT_INTERVAL:
+            return
+        self._cert_last = time.monotonic()
+        from vpn import checks
+        route = checks.route_for(self.backend)
+
+        def job():
+            for host in checks.CERT_HOSTS:
+                r = checks.probe(host, route)
+                if r.cert == "substituted":
+                    self.bridge.cert_alarm.emit(r)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _on_cert_alarm(self, r) -> None:
+        blocked = _lines("vpn/cert_blocked")
+        if r.host in blocked:
+            return
+        blocked.append(r.host)
+        cfg.set_("vpn/cert_blocked", "\n".join(blocked))
+        self._fill_cert_list()
+        text = (f"Сертификат сайта {r.host} подменён (выдал: {r.issuer or 'неизвестно'}): "
+                f"{r.error}. Трафик к сайту заблокирован, пока вы не разрешите.")
+        self._append_log(text)
+        activity.record("vpn", text)
+        self._reconnect()  # правило блокировки — в новую конфигурацию
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Подменён сертификат")
+        box.setText(text + "\n\nТак бывает при вмешательстве провайдера или DPI, «прозрачном» "
+                    "прокси или вредоносе в системе. Данные, отправленные на такой сайт, может "
+                    "прочитать тот, кто подменил сертификат.")
+        allow = box.addButton("Разрешить сайт", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Оставить заблокированным", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is allow:
+            self._allow_host(r.host)
+
+    def _fill_cert_list(self) -> None:
+        if hasattr(self, "cert_list"):
+            self.cert_list.clear()
+            self.cert_list.addItems(_lines("vpn/cert_blocked"))
+
+    def _allow_cert(self) -> None:
+        item = self.cert_list.currentItem()
+        if item is not None:
+            self._allow_host(item.text())
+
+    def _allow_host(self, host: str) -> None:
+        cfg.set_("vpn/cert_blocked", "\n".join(h for h in _lines("vpn/cert_blocked")
+                                               if h != host))
+        self._fill_cert_list()
+        self._append_log(f"Сайт {host} разрешён пользователем")
+        activity.record("vpn", f"Подмена сертификата: сайт {host} разрешён пользователем")
+        self._reconnect()
+
+    # ---------------- прочее ----------------
     def _apps_text(self) -> None:
-        from ui import settings as cfg
-        apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
-        self.apps_btn.setText(f"Программы напрямую, мимо VPN ({len(apps)})...")
+        self.apps_btn.setText(f"Программы напрямую, мимо VPN ({len(_lines('vpn/direct_apps'))})"
+                              "...")
 
     def _edit_apps(self) -> None:
-        from ui import settings as cfg
-        apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
-        dialog = DirectAppsDialog(self, apps)
+        dialog = DirectAppsDialog(self, _lines("vpn/direct_apps"))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             cfg.set_("vpn/direct_apps", "\n".join(dialog.apps()))
             self._apps_text()
@@ -498,6 +1109,8 @@ class VpnWindow(QDialog):
         dns = dnsguard.restore()
         done = killswitch.disable()
         if self.backend is not None:
+            if hasattr(self.backend, "release_block"):
+                done = self.backend.release_block() or done
             self.backend.blocked = False
             if hasattr(self.backend, "dns_changed"):
                 self.backend.dns_changed = False
@@ -507,6 +1120,12 @@ class VpnWindow(QDialog):
         self._append_log(text)
         activity.record("vpn", text)
         self._tick()
+
+    def closeEvent(self, event):
+        # окно скрывается, подключение остаётся (как у обычных VPN-клиентов)
+        if self.backend is not None and self.backend.state == backends.CONNECTED:
+            self.bridge.log.emit("Окно закрыто, VPN остаётся подключённым")
+        super().closeEvent(event)
 
     def shutdown(self) -> None:
         if self.backend is not None and self.backend.state != backends.DISCONNECTED:

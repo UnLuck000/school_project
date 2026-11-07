@@ -387,12 +387,21 @@ def test_singbox_config_and_modes():
                                       "server_port": xray.SOCKS_PORT, "version": "5"}
     # мимо туннеля — только наш xray.exe по полному пути, не любой файл с таким именем
     assert {"process_path": [r"C:\x\xray.exe"], "outbound": "direct"} in config["route"]["rules"]
-    # IPv6: выключен — заходит в туннель и отклоняется; включён — идёт через сервер
+    # «Только IPv4» — IPv6 заходит в туннель и отклоняется; иначе — идёт через сервер
     assert {"ip_version": 6, "action": "reject"} in config["route"]["rules"]
     assert config["dns"]["strategy"] == "ipv4_only"
-    with6 = singbox.build_config(xray.SOCKS_PORT, r"C:\x\xray.exe", ipv6=True)
-    assert {"ip_version": 6, "action": "reject"} not in with6["route"]["rules"]
-    assert any(":" in a for a in with6["inbounds"][0]["address"])
+    for mode in ("prefer_ipv6", "ipv6"):
+        with6 = singbox.build_config(xray.SOCKS_PORT, r"C:\x\xray.exe", ip_mode=mode)
+        assert {"ip_version": 6, "action": "reject"} not in with6["route"]["rules"]
+        assert with6["dns"]["strategy"] == "prefer_ipv6"
+        assert any(":" in a for a in with6["inbounds"][0]["address"])
+    assert set(xray.IP_MODES) == {"ipv4", "prefer_ipv6", "ipv6"}
+    # QUIC и UDP: QUIC — только UDP 443; весь UDP — и DNS через сервер по TCP
+    quic = singbox.build_config(10808, "x.exe", block_quic=True)
+    assert any(r.get("network") == "udp" and r.get("port") == 443 for r in quic["route"]["rules"])
+    udp = singbox.build_config(10808, "x.exe", block_udp=True)
+    assert {"network": "udp", "action": "reject"} in udp["route"]["rules"]
+    assert any(d.get("type") == "tcp" for d in udp["dns"]["servers"])
     assert config["route"]["auto_detect_interface"] and config["route"]["find_process"]
     assert profiles.from_text("x", reality).mode == "tun"  # по умолчанию — TUN
     assert isinstance(backends.backend_for("vless", print, "tun"), backends.SingBoxBackend)
@@ -472,34 +481,123 @@ def test_vpn_routing_mux_fragment():
 
 
 def test_vpn_local_proxy(monkeypatch):
-    """Локальный прокси для программ: SOCKS5 и HTTP на одном порту, только 127.0.0.1;
-    занятый порт — VPN без него, с записью в журнал."""
+    """Локальные прокси для программ: SOCKS5 и HTTP на своих портах, только 127.0.0.1;
+    занятый порт — VPN без него (в строгом режиме — ошибка)."""
     import socket
     from vpn import backends, xray
     from ui import settings as cfg
-    values = {"vpn/local_proxy": True, "vpn/local_port": 0}
+    values = {"vpn/socks_enabled": True, "vpn/http_enabled": True}
     monkeypatch.setattr(cfg, "get", lambda k: values.get(k, False))
     busy = socket.socket()
     busy.bind(("127.0.0.1", 0))
     busy.listen(1)
-    free = socket.socket()
-    free.bind(("127.0.0.1", 0))
-    free_port = free.getsockname()[1]
-    free.close()
+    free = []
+    for _ in range(2):
+        f = socket.socket()
+        f.bind(("127.0.0.1", 0))
+        free.append(f.getsockname()[1])
+        f.close()
     try:
-        values["vpn/local_port"] = busy.getsockname()[1]
-        if values["vpn/local_port"] < 1024:
+        if busy.getsockname()[1] < 1024 or min(free) < 1024:
             return
+        values.update({"vpn/socks_port": busy.getsockname()[1], "vpn/http_port": free[0]})
         config, said = {"inbounds": []}, []
-        assert backends.add_local_proxy(config, said.append) is None
-        assert config["inbounds"] == [] and "занят" in said[0]
-        values["vpn/local_port"] = free_port
-        assert backends.add_local_proxy(config, said.append) == free_port
-        inbound = config["inbounds"][0]
-        assert (inbound["protocol"], inbound["listen"]) == ("mixed", "127.0.0.1")
-        values["vpn/local_proxy"] = False
-        assert xray.local_port() is None
-        values.update({"vpn/local_proxy": True, "vpn/local_port": xray.SOCKS_PORT})
-        assert xray.local_port() is None  # свой внутренний порт не отдаём
+        assert backends.add_local_proxy(config, said.append) == {"http": free[0]}
+        assert "занят" in said[0]
+        assert [(i["protocol"], i["listen"]) for i in config["inbounds"]] == \
+            [("http", "127.0.0.1")]
+        try:
+            backends.add_local_proxy({"inbounds": []}, said.append, strict=True)
+            raise AssertionError("занятый порт в строгом режиме — ошибка")
+        except OSError:
+            pass
+        values.update({"vpn/socks_port": free[1]})
+        config = {"inbounds": []}
+        assert backends.add_local_proxy(config, said.append) == {"socks": free[1],
+                                                                 "http": free[0]}
+        socks = config["inbounds"][0]
+        assert socks["protocol"] == "socks" and socks["settings"]["udp"]
+        # внутренние порты связки и одинаковые порты не отдаём
+        values.update({"vpn/socks_port": xray.SOCKS_PORT, "vpn/http_port": 3000})
+        assert xray.local_ports() == {"http": 3000}
+        values.update({"vpn/socks_port": 3000})
+        assert xray.local_ports() == {"socks": 3000}
+        values.update({"vpn/socks_enabled": False, "vpn/http_enabled": False})
+        assert xray.local_ports() == {}
+        try:
+            backends.add_local_proxy({"inbounds": []}, said.append, strict=True)
+            raise AssertionError("без прокси режим «Только локальный прокси» не работает")
+        except OSError:
+            pass
     finally:
         busy.close()
+
+
+def test_vpn_custom_rules_and_udp():
+    """Свои правила (домены, геометки, адреса), подменённые сертификаты, QUIC и UDP."""
+    from vpn import xray
+    domains, ips = xray.split_rule_entries(
+        ["example.com", "*.ads.net", "full:a.b", "geosite:youtube", "keyword:bet",
+         "1.2.3.4", "10.0.0.0/8", "GeoIP:RU", "2001:db8::/32"])
+    assert domains == ["domain:example.com", "domain:ads.net", "full:a.b", "geosite:youtube",
+                       "keyword:bet"]
+    assert ips == ["1.2.3.4", "10.0.0.0/8", "geoip:ru", "2001:db8::/32"]
+    v = xray.parse_vless("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443"
+                         "?type=tcp&security=reality&pbk=key&sid=ab#x")
+    opts = {"cert_blocked": ["evil.com"], "rules_block": ["bad.com"],
+            "rules_proxy": ["geosite:youtube"], "rules_direct": ["1.1.1.0/24"],
+            "block_quic": True, "route_ru": True}
+    rules = xray.build_config(v, "proxy", options=opts)["routing"]["rules"]
+    tags = [(r.get("domain") or r.get("ip") or r.get("network"), r["outboundTag"])
+            for r in rules]
+    # блокировки раньше «через VPN» и «напрямую», свои — раньше российских сайтов
+    assert tags[0] == (["full:evil.com"], "block")
+    assert tags[1] == (["domain:bad.com"], "block")
+    assert tags.index((["geosite:youtube"], "proxy")) < tags.index((["1.1.1.0/24"], "direct"))
+    assert {"type": "field", "network": "udp", "port": "443", "outboundTag": "block"} in rules
+    assert tags.index((["geoip:ru"], "direct")) > tags.index((["1.1.1.0/24"], "direct"))
+    # весь UDP главнее QUIC
+    rules = xray.build_config(v, "proxy", options={"block_udp": True, "block_quic": True}
+                              )["routing"]["rules"]
+    assert {"type": "field", "network": "udp", "outboundTag": "block"} in rules
+    assert not any(r.get("port") == "443" for r in rules)
+
+
+def test_vpn_apps_classify(tmp_path):
+    """«Только приложения»: главная программа папки установки — да; .dll, установщики и
+    помощники — нет; ярлык в «Пуске» — да."""
+    from vpn import apps
+    root = str(tmp_path).lower()
+    games = [root + "\\games"]
+
+    def app(rel, sources=("folder",), name=""):
+        return apps.App(root + "\\" + rel, name=name, sources=set(sources))
+
+    assert apps.classify(app(r"aimp\aimp.exe"), [root], games)
+    assert not apps.classify(app(r"aimp\aimp.dll"), [root], games)
+    assert not apps.classify(app(r"aimp\uninstall.exe"), [root], games)
+    assert not apps.classify(app(r"aimp\bin\aimp.exe"), [root], games)  # служебная папка
+    assert not apps.classify(app(r"vendor\tool\x\y\vendor.exe"), [root], games)  # глубоко
+    assert not apps.classify(app(r"aimp\other.exe"), [root], games)
+    assert apps.classify(app(r"zzz\other.exe", ("start",)), [root], games)
+    assert not apps.classify(app(r"zzz\updater.exe", ("start",)), [root], games)
+    # игры — и по названию продукта
+    assert apps.classify(app(r"games\rust\rustclient.exe", name="Rust"), [root, *games], games)
+
+
+def test_vpn_checks_route():
+    from vpn import backends, checks
+    assert checks.route_for(None) == ("direct",)
+
+    class B:
+        state = backends.CONNECTED
+        mode = "local"
+        local_ports = {"http": 2081}
+
+    assert checks.route_for(B()) == ("http", 2081)
+    B.local_ports = {"socks": 2080, "http": 2081}
+    assert checks.route_for(B()) == ("socks", 2080)
+    B.mode = "proxy"
+    assert checks.route_for(B()) == ("http", 10809)
+    B.state = backends.DISCONNECTED
+    assert checks.route_for(B()) == ("direct",)

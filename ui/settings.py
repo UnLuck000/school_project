@@ -25,15 +25,26 @@ DEFAULTS = {
     "vpn/xray_path": "",            # xray.exe (пусто — искать самостоятельно, vpn/xray.py)
     "vpn/singbox_path": "",         # sing-box.exe (пусто — искать самостоятельно, vpn/singbox.py)
     "vpn/proxy_backup": "",         # прежний системный прокси, пока VPN его подменяет
-    "vpn/ipv6": False,              # IPv6 через туннель (выключено — IPv6 перекрыт в туннеле)
+    "vpn/ip_mode": "ipv4",          # ipv4 | prefer_ipv6 | ipv6 (vpn/xray.IP_MODES)
+    "vpn/block_quic": True,         # QUIC (UDP 443) блокируется — браузеры переходят на TCP
+    "vpn/block_udp": False,         # весь UDP блокируется (DNS через сервер — по TCP)
+    "vpn/dns_server": "1.1.1.1",    # DNS через сервер VPN (режим TUN)
+    "vpn/rules_direct": "",         # свои правила: домены, IP/CIDR, geosite:, geoip: — по строке
+    "vpn/rules_proxy": "",
+    "vpn/rules_block": "",
+    "vpn/cert_blocked": "",         # сайты с подменённым сертификатом (до разрешения)
+    "vpn/cert_watch": True,         # проверять сертификаты сайтов во время подключения
+    "vpn/last_profile": "",         # последний подключённый профиль (выбирается при открытии)
     "vpn/route_ru": True,           # российские сайты напрямую (vpn/xray.apply_options)
     "vpn/block_ads": False,         # реклама и трекеры блокируются
     "vpn/mux": False,               # Mux (не с flow=xtls-rprx-vision)
     "vpn/fragment": False,          # фрагментация ClientHello до сервера (обход DPI)
     "vpn/direct_apps": "",          # программы напрямую, мимо VPN (пути, по строке; TUN)
-    "vpn/local_proxy": True,        # локальный прокси для программ (SOCKS5 + HTTP, 127.0.0.1)
-    "vpn/local_port": 2080,
-    "vpn/killswitch": False,        # интернет только через туннель (брандмауэр Windows)
+    "vpn/socks_enabled": True,      # локальный SOCKS5-прокси для программ (127.0.0.1)
+    "vpn/socks_port": 2082,
+    "vpn/http_enabled": False,      # локальный HTTP-прокси для программ (127.0.0.1)
+    "vpn/http_port": 2081,
+    "vpn/killswitch": True,         # интернет только через VPN (брандмауэр Windows / прокси)
     "vpn/killswitch_backup": "",    # прежние действия брандмауэра, пока блокировка включена
     "vpn/dns_backup": "",           # прежний DNS адаптеров, пока VPN его подменяет
     "general/block_exit": False,    # запрет выхода из программы (кроме диспетчера задач)
