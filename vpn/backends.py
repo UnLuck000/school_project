@@ -50,12 +50,28 @@ def tunnel_name(name: str) -> str:
     return clean or "myav"
 
 
+def add_local_proxy(config: dict, log) -> int | None:
+    """Локальный прокси для программ, если включён и порт свободен (иначе — запись в журнал,
+    VPN подключается без него). Добавлять ДО apply_options: правила действуют и на него."""
+    from vpn import xray
+    port = xray.local_port()
+    if port is None:
+        return None
+    owner = xray.port_owner(port)
+    if owner:
+        log(f"Локальный прокси не запущен: порт {port} занят ({owner})")
+        return None
+    xray.add_local_inbound(config, port)
+    return port
+
+
 class Backend:
     available = True
     missing = ""  # что установить, если недоступен
 
     def __init__(self, log):
         self.log = log  # log(text) из любого потока
+        self.local_port: int | None = None  # локальный прокси для программ (Xray)
         self.state = DISCONNECTED
         self.since = 0.0
         self.adapter = ""
@@ -82,6 +98,9 @@ class Backend:
         self.state, self.error = state, error
         if state == CONNECTED:
             self.since = time.time()
+            if self.local_port:
+                self.log(f"Локальный прокси для программ: 127.0.0.1:{self.local_port} "
+                         "(SOCKS5 и HTTP)")
 
 
 class WireGuardBackend(Backend):
@@ -240,7 +259,7 @@ class XrayBackend(Backend):
     def connect(self, profile) -> None:
         self._set(CONNECTING)
         x = self.x
-        self.mode = "tun" if profile.mode == "tun-xray" else "proxy"
+        self.mode = {"tun-xray": "tun", "local": "local"}.get(profile.mode, "proxy")
         try:
             v = x.parse_vless(profile.config)
             interface = ""
@@ -250,13 +269,33 @@ class XrayBackend(Backend):
                     raise OSError("не найден маршрут по умолчанию")
                 self.server = x.server_ip(v["address"])
                 self.log(f"Xray TUN: шлюз {gateway} ({interface}), сервер {self.server}")
-            self.config_path = x.write_config(x.build_config(v, self.mode, interface),
-                                              TUNNEL_DIR)
+            if self.mode == "local":
+                # только программы с прокси 127.0.0.1:порт: ни туннеля, ни системного прокси;
+                # без порта у режима нет смысла — занят или выключен, подключения нет
+                port = x.local_port()
+                if port is None:
+                    raise OSError("в режиме «Только локальный прокси» включите локальный прокси "
+                                  "и укажите порт")
+                owner = x.port_owner(port)
+                if owner:
+                    raise OSError(f"порт {port} занят ({owner}) — закройте программу или "
+                                  "выберите другой порт")
+                config = x.build_config(v, "proxy")
+                config["inbounds"] = []
+                x.add_local_inbound(config, port)
+                self.local_port = port
+            else:
+                config = x.build_config(v, self.mode, interface)
+                self.local_port = add_local_proxy(config, self.log)
+            x.apply_options(config, v, x.options_from_settings(), self.log)
+            self.config_path = x.write_config(config, TUNNEL_DIR)
         except (OSError, ValueError) as e:
             self._set(ERROR, f"Xray: {e}")
             self.log(self.error)
             return
-        self.log(f"Xray: запуск ({'TUN' if self.mode == 'tun' else 'системный прокси'})...")
+        title = {"tun": "TUN", "local": "только локальный прокси"}.get(self.mode,
+                                                                         "системный прокси")
+        self.log(f"Xray: запуск ({title})...")
         self.proc = subprocess.Popen([self.exe, "run", "-c", str(self.config_path)],
                                      cwd=str(Path(self.exe).parent), stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -268,6 +307,12 @@ class XrayBackend(Backend):
                 self._fail(f"Xray TUN: маршруты не настроены: {error}")
                 return
             self.adapter = x.TUN_NAME
+        elif self.mode == "local":
+            if not x.wait_port(self.local_port):
+                self._fail("Xray не открыл локальный прокси (смотрите журнал)")
+                return
+            self.log("Через VPN идут только программы с прокси "
+                     f"127.0.0.1:{self.local_port}, остальной трафик — как без VPN")
         else:
             if not x.wait_port(x.HTTP_PORT):
                 self._fail("Xray не открыл локальный прокси (смотрите журнал)")
@@ -350,6 +395,9 @@ class SingBoxBackend(Backend):
         self.proc: subprocess.Popen | None = None       # sing-box
         self.xray_proc: subprocess.Popen | None = None
         self.paths: list[Path] = []
+        self.killswitch = False   # блокировка брандмауэра включена этим подключением
+        self.dns_changed = False  # DNS адаптеров подменён (vpn/dnsguard.py)
+        self.blocked = False      # VPN оборвался, интернет перекрыт до решения пользователя
 
     def _write(self, config: dict, name: str) -> Path:
         TUNNEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -361,12 +409,29 @@ class SingBoxBackend(Backend):
     def connect(self, profile) -> None:
         self._set(CONNECTING)
         x = self.x
+        from ui import settings as cfg
+        ipv6, kill = bool(cfg.get("vpn/ipv6")), bool(cfg.get("vpn/killswitch"))
         try:
-            xconfig = x.build_config(x.parse_vless(profile.config), "proxy")
+            v = x.parse_vless(profile.config)
+            # адрес сервера — заранее, пока туннеля нет: потом системный DNS идёт через
+            # туннель, а туннель — через ещё не подключённый Xray
+            host = v["address"]
+            v["address"] = x.server_ip(host)
+            if v["sni"] == "" and v["security"] in ("tls", "reality"):
+                v["sni"] = host
+            # частные адреса и программы «напрямую» решает sing-box; у Xray — только правила
+            # из настроек (российские сайты, реклама), без своих DNS-запросов (AsIs)
+            xconfig = x.build_config(v, "proxy")
             xconfig["inbounds"] = [i for i in xconfig["inbounds"] if i["protocol"] == "socks"]
+            xconfig["inbounds"][0].pop("sniffing", None)
+            xconfig["routing"] = {"domainStrategy": "AsIs", "rules": []}
+            self.local_port = add_local_proxy(xconfig, self.log)
+            x.apply_options(xconfig, v, x.options_from_settings(), self.log)
             xpath = self._write(xconfig, "xray-tun.json")
-            spath = self._write(self.sb.build_config(x.SOCKS_PORT, self.xray_exe),
+            apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
+            spath = self._write(self.sb.build_config(x.SOCKS_PORT, self.xray_exe, ipv6, apps),
                                 "sing-box.json")
+            self._log_options(apps)
         except (OSError, ValueError) as e:
             self._fail(f"VLESS: {e}")
             return
@@ -389,8 +454,39 @@ class SingBoxBackend(Backend):
             self._fail(self.error or "sing-box не создал адаптер TUN (смотрите журнал)")
             return
         self.adapter = self.sb.TUN_NAME
+        from vpn import dnsguard
+        try:
+            changed = dnsguard.protect()
+            self.dns_changed = bool(changed)
+            if changed:
+                self.log(f"DNS {', '.join(changed)} на время VPN — "
+                         f"{', '.join(dnsguard.PUBLIC_DNS)} (через туннель, без утечки)")
+        except OSError as e:
+            self._fail(f"DNS не защищён, VPN отключён: {e}")
+            return
+        if kill:
+            from vpn import killswitch
+            try:
+                killswitch.enable(self.sb.TUN_NAME, [self.xray_exe, self.exe])
+                self.killswitch = True
+                self.log("Kill switch: интернет только через туннель")
+            except OSError as e:
+                self._fail(f"Kill switch не включён, VPN отключён: {e}")
+                return
         self._set(CONNECTED)
-        self.log(f"Подключено: весь трафик через {self.sb.TUN_NAME} → Xray → сервер")
+        self.log(f"Подключено: весь трафик через {self.sb.TUN_NAME} → Xray → сервер"
+                 + (", IPv6 через туннель" if ipv6 else ", IPv6 перекрыт"))
+
+    def _log_options(self, apps: list[str]) -> None:
+        o = self.x.options_from_settings()
+        parts = [title for key, title in (("route_ru", "российские сайты напрямую"),
+                                          ("block_ads", "реклама блокируется"),
+                                          ("mux", "Mux"), ("fragment", "фрагментация"))
+                 if o.get(key)]
+        if apps:
+            parts.append(f"программ напрямую: {len(apps)}")
+        if parts:
+            self.log("Настройки: " + ", ".join(parts))
 
     def _wait_adapter(self, timeout: float = 10.0) -> bool:
         import psutil
@@ -412,15 +508,40 @@ class SingBoxBackend(Backend):
             if "FATAL" in line or "Failed to start" in line:
                 self.error = f"{title}: " + line.split("FATAL", 1)[-1].strip()[-200:]
         if self.state in (CONNECTED, CONNECTING) and proc in (self.proc, self.xray_proc):
-            self._cleanup()
-            self._set(ERROR, self.error or f"{title} завершился")
+            dropped = self.killswitch
+            self._cleanup(keep_block=dropped)  # обрыв: блокировка остаётся — в этом смысл
+            self.blocked = dropped
+            reason = self.error or f"{title} завершился"
+            if dropped:
+                reason += ". Интернет перекрыт kill switch — «Снять блокировку» в окне VPN"
+            self._set(ERROR, reason)
+            self.log(reason)
 
     def _fail(self, text: str) -> None:
         self._cleanup()
         self._set(ERROR, text)
         self.log(text)
 
-    def _cleanup(self) -> None:
+    def release_block(self) -> bool:
+        """Снять блокировку после обрыва (кнопка в окне VPN)."""
+        from vpn import dnsguard, killswitch
+        self.blocked = False
+        if self.dns_changed:
+            dnsguard.restore()
+            self.dns_changed = False
+        return killswitch.disable()
+
+    def _cleanup(self, keep_block: bool = False) -> None:
+        if self.killswitch and not keep_block:
+            from vpn import killswitch
+            killswitch.disable()
+            self.log("Kill switch снят")
+        self.killswitch = False
+        if self.dns_changed and not keep_block:
+            from vpn import dnsguard
+            dnsguard.restore()
+            self.log("DNS адаптеров возвращён")
+            self.dns_changed = False
         for attr in ("proc", "xray_proc"):  # sing-box первым: он убирает адаптер и маршруты
             proc = getattr(self, attr)
             setattr(self, attr, None)
@@ -442,7 +563,7 @@ class SingBoxBackend(Backend):
 
 
 def backend_for(kind: str, log, mode: str = "") -> Backend:
-    if kind == "vless":
+    if kind == "vless":  # tun — sing-box + Xray; proxy, tun-xray, local — один Xray
         return SingBoxBackend(log) if mode in ("tun", "") else XrayBackend(log)
     return {"wireguard": WireGuardBackend, "openvpn": OpenVPNBackend}.get(kind, DemoBackend)(log)
 

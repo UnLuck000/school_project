@@ -54,6 +54,48 @@ class PasteDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class DirectAppsDialog(QDialog):
+    """Программы, которые идут напрямую, мимо VPN (режим TUN): игры, торренты, банки."""
+
+    def __init__(self, parent, apps: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("Программы напрямую, мимо VPN")
+        self.resize(640, 380)
+        layout = QVBoxLayout(self)
+        hint = QLabel("Трафик этих программ не идёт через сервер VPN (только в режиме TUN). "
+                      "Программа узнаётся по полному пути к файлу.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.list = QListWidget()
+        self.list.addItems(apps)
+        layout.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        add = QPushButton("Добавить программу...")
+        add.clicked.connect(self._add)
+        remove = QPushButton("Убрать выбранную")
+        remove.clicked.connect(lambda: self.list.takeItem(self.list.currentRow()))
+        row.addWidget(add)
+        row.addWidget(remove)
+        row.addStretch()
+        layout.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add(self) -> None:
+        import os
+        path, _ = QFileDialog.getOpenFileName(self, "Программа", "", "Программы (*.exe)")
+        if path:
+            path = os.path.normpath(path)
+            if not self.list.findItems(path, Qt.MatchFlag.MatchFixedString):
+                self.list.addItem(path)
+
+    def apps(self) -> list[str]:
+        return [self.list.item(i).text() for i in range(self.list.count())]
+
+
 class VpnWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,7 +172,9 @@ class VpnWindow(QDialog):
             "настраивает sing-box, соединение с сервером ведёт Xray (нужны права "
             "администратора). Системный прокси — "
             "браузеры и программы, которые слушаются прокси Windows (Xray). TUN через Xray — "
-            "запасной вариант (wintun.dll рядом с xray.exe, экспериментально).")
+            "запасной вариант (wintun.dll рядом с xray.exe, экспериментально). Только "
+            "локальный прокси — через VPN идут лишь программы с прокси 127.0.0.1:порт "
+            "(Telegram, переменная HTTPS_PROXY), остальное — как без VPN.")
         self.cmb_mode.currentIndexChanged.connect(self._on_mode)
         mode_row.addWidget(self.mode_label)
         mode_row.addWidget(self.cmb_mode, 1)
@@ -139,11 +183,83 @@ class VpnWindow(QDialog):
                                   "включено в настройках)")
         self.chk_auto.toggled.connect(self._on_auto)
         right.addWidget(self.chk_auto)
-        kill = QCheckBox("Блокировать интернет при обрыве VPN (kill switch)")
-        kill.setEnabled(False)
-        kill.setToolTip("В прототипе не реализовано: нужны правила брандмауэра на время "
-                        "подключения (с откатом через журнал).")
-        right.addWidget(kill)
+        from ui import settings as cfg
+        self.chk_kill = QCheckBox("Kill switch: интернет только через VPN, при обрыве — "
+                                  "блокировка")
+        self.chk_kill.setToolTip(
+            "Режим TUN: пока VPN подключён, брандмауэр Windows разрешает выход в интернет "
+            "только через туннель (локальная сеть — можно). Если VPN оборвётся, интернет "
+            "останется перекрытым, пока вы не снимете блокировку. Включение и снятие — в "
+            "журнале действий с откатом.")
+        self.chk_kill.setChecked(cfg.get("vpn/killswitch"))
+        self.chk_kill.toggled.connect(lambda on: cfg.set_("vpn/killswitch", on))
+        right.addWidget(self.chk_kill)
+        self.chk_ipv6 = QCheckBox("IPv6 через VPN")
+        self.chk_ipv6.setToolTip(
+            "Режим TUN. Включено — IPv6 идёт через туннель (если сервер его поддерживает). "
+            "Выключено — IPv6 перекрыт, программы работают по IPv4; мимо VPN он не идёт ни в "
+            "каком случае.")
+        self.chk_ipv6.setChecked(cfg.get("vpn/ipv6"))
+        self.chk_ipv6.toggled.connect(lambda on: cfg.set_("vpn/ipv6", on))
+        right.addWidget(self.chk_ipv6)
+        self.unblock_btn = QPushButton("Снять блокировку интернета (kill switch)")
+        self.unblock_btn.setStyleSheet("color: #c0392b; font-weight: 600;")
+        self.unblock_btn.clicked.connect(self._release_block)
+        self.unblock_btn.setVisible(False)
+        right.addWidget(self.unblock_btn)
+
+        # ----- маршрутизация, Mux, фрагментация -----
+        route = QGridLayout()
+        route.setContentsMargins(0, 4, 0, 4)
+        self.route_boxes = {}
+        for i, (key, text, tip) in enumerate((
+                ("route_ru", "Российские сайты напрямую",
+                 "Сайты в зонах .ru, .рф, .su, из списка российских сайтов и с российскими "
+                 "адресами идут напрямую, без сервера VPN: Госуслуги, банки и маркетплейсы "
+                 "работают быстрее и не ругаются на зарубежный IP."),
+                ("block_ads", "Блокировать рекламу и трекеры",
+                 "Список рекламных и следящих доменов (geosite:category-ads-all) — "
+                 "соединения к ним не устанавливаются."),
+                ("mux", "Mux (несколько соединений в одном)",
+                 "Меньше рукопожатий с сервером — быстрее открываются сайты с множеством "
+                 "запросов. Не работает со ссылками flow=xtls-rprx-vision (для них не "
+                 "включается). Минус: одна потеря пакета тормозит все соединения внутри."),
+                ("fragment", "Фрагментация (обход DPI)",
+                 "Начало TLS-соединения с сервером режется на кусочки 100–200 байт с паузой "
+                 "10–20 мс, чтобы DPI провайдера не распознал его. Нужно, если провайдер "
+                 "режет или тормозит соединение с сервером VPN."))):
+            box = QCheckBox(text)
+            box.setToolTip(tip)
+            box.setChecked(cfg.get(f"vpn/{key}"))
+            box.toggled.connect(lambda on, k=key: cfg.set_(f"vpn/{k}", on))
+            route.addWidget(box, i // 2, i % 2)
+            self.route_boxes[key] = box
+        local_row = QHBoxLayout()
+        self.chk_local = QCheckBox("Локальный прокси для программ (SOCKS5 и HTTP), порт:")
+        self.chk_local.setToolTip(
+            "Пока VPN подключён, программы с настройкой прокси 127.0.0.1:порт (Telegram, "
+            "браузеры, переменная HTTPS_PROXY) ходят через VPN — по тем же правилам "
+            "маршрутизации. Доступен только с этого компьютера. Если порт занят другой "
+            "программой (например, Throne), VPN подключится без локального прокси.")
+        self.chk_local.setChecked(cfg.get("vpn/local_proxy"))
+        self.chk_local.toggled.connect(lambda on: cfg.set_("vpn/local_proxy", on))
+        from PySide6.QtWidgets import QSpinBox
+        self.spn_port = QSpinBox()
+        self.spn_port.setRange(1024, 65535)
+        self.spn_port.setValue(cfg.get("vpn/local_port"))
+        self.spn_port.valueChanged.connect(lambda v: cfg.set_("vpn/local_port", v))
+        local_row.addWidget(self.chk_local)
+        local_row.addWidget(self.spn_port)
+        local_row.addStretch()
+        route.addLayout(local_row, 3, 0, 1, 2)
+        self.apps_btn = QPushButton()
+        self.apps_btn.setToolTip("Программы, которые идут напрямую, мимо VPN (режим TUN)")
+        self.apps_btn.clicked.connect(self._edit_apps)
+        route.addWidget(self.apps_btn, 2, 0, 1, 2)
+        right.addLayout(route)
+        self._apps_text()
+        from ui.widgets import guard_wheel
+        guard_wheel(self)  # порт и режим меняются колесом только после щелчка
 
         right.addWidget(QLabel("Журнал"))
         self.log_view = QPlainTextEdit()
@@ -304,6 +420,11 @@ class VpnWindow(QDialog):
         self.state_label.setStyleSheet(f"font-size: 18pt; font-weight: 600; color: {color};")
         busy = state in (backends.CONNECTED, backends.CONNECTING)
         self.connect_btn.setText("Отключить" if busy else "Подключить")
+        from vpn import killswitch
+        self.unblock_btn.setVisible(not busy and killswitch.active())
+        for box in (self.chk_kill, self.chk_ipv6, self.apps_btn, self.chk_local, self.spn_port,
+                    *self.route_boxes.values()):
+            box.setEnabled(not busy)  # действуют со следующего подключения
         self.cmb_mode.setEnabled(not busy)
         p = self.active if busy else self._current()
         self.info["server"].setText(p.server if p else "—")
@@ -358,6 +479,34 @@ class VpnWindow(QDialog):
         if self.backend is not None and self.backend.state == backends.CONNECTED:
             self.bridge.log.emit("Окно закрыто, VPN остаётся подключённым")
         super().closeEvent(event)
+
+    def _apps_text(self) -> None:
+        from ui import settings as cfg
+        apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
+        self.apps_btn.setText(f"Программы напрямую, мимо VPN ({len(apps)})...")
+
+    def _edit_apps(self) -> None:
+        from ui import settings as cfg
+        apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
+        dialog = DirectAppsDialog(self, apps)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            cfg.set_("vpn/direct_apps", "\n".join(dialog.apps()))
+            self._apps_text()
+
+    def _release_block(self) -> None:
+        from vpn import dnsguard, killswitch
+        dns = dnsguard.restore()
+        done = killswitch.disable()
+        if self.backend is not None:
+            self.backend.blocked = False
+            if hasattr(self.backend, "dns_changed"):
+                self.backend.dns_changed = False
+        text = "Блокировка снята, интернет без VPN" if done else "Блокировки не было"
+        if dns:
+            text += "; DNS адаптеров возвращён"
+        self._append_log(text)
+        activity.record("vpn", text)
+        self._tick()
 
     def shutdown(self) -> None:
         if self.backend is not None and self.backend.state != backends.DISCONNECTED:

@@ -118,29 +118,128 @@ def outbound(v: dict, interface: str = "") -> dict:
             "streamSettings": stream}
 
 
-def build_config(v: dict, mode: str, interface: str = "") -> dict:
+# маршрутизация (vpn/route_ru, vpn/block_ads), Mux (vpn/mux), фрагментация (vpn/fragment)
+RU_DOMAINS = ["geosite:category-ru", r"regexp:\.ru$", r"regexp:\.xn--p1ai$", r"regexp:\.su$"]
+ADS = ["geosite:category-ads-all"]
+FRAGMENT = {"packets": "tlshello", "length": "100-200", "interval": "10-20"}
+MUX = {"enabled": True, "concurrency": 8, "xudpConcurrency": 16, "xudpProxyUDP443": "reject"}
+
+
+LOCAL_TAG = "local-in"
+
+
+def local_port() -> int | None:
+    """Порт локального прокси для программ (vpn/local_proxy, vpn/local_port) или None."""
+    try:
+        from ui import settings as cfg
+        if not cfg.get("vpn/local_proxy"):
+            return None
+        port = int(cfg.get("vpn/local_port"))
+    except Exception:
+        return None
+    return port if 1024 <= port <= 65535 and port not in (SOCKS_PORT, HTTP_PORT) else None
+
+
+def port_owner(port: int) -> str | None:
+    """Кто занял 127.0.0.1:port (имя процесса, «другая программа»); None — порт свободен."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return None
+        except OSError:
+            pass
+    try:
+        import psutil
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN and c.pid:
+                return psutil.Process(c.pid).name()
+    except Exception:
+        pass
+    return "другая программа"
+
+
+def add_local_inbound(config: dict, port: int) -> None:
+    """Локальный прокси для программ: SOCKS5 и HTTP на одном порту (входящее mixed), только
+    127.0.0.1 — снаружи к нему не подключиться. Трафик идёт по тем же правилам, что и туннель."""
+    config["inbounds"].append({"tag": LOCAL_TAG, "listen": "127.0.0.1", "port": port,
+                               "protocol": "mixed", "settings": {"udp": True}})
+
+
+def options_from_settings() -> dict:
+    try:
+        from ui import settings as cfg
+        return {key: bool(cfg.get(f"vpn/{key}"))
+                for key in ("route_ru", "block_ads", "mux", "fragment")}
+    except Exception:
+        return {}
+
+
+def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
+    """Маршрутизация, Mux и фрагментация в готовой конфигурации Xray.
+
+    • route_ru — российские сайты напрямую (geosite:category-ru, зоны .ru/.рф/.su, geoip:ru):
+      домен берётся из трафика (sniffing routeOnly), IP — из адреса назначения, сам Xray адреса
+      не спрашивает (domainStrategy AsIs);
+    • block_ads — реклама и трекеры (geosite:category-ads-all) в blackhole;
+    • mux — несколько соединений в одном до сервера; с flow=xtls-rprx-vision несовместим и не
+      включается;
+    • fragment — ClientHello соединения с сервером режется на кусочки (обход DPI): исходящее
+      «fragment» и dialerProxy у прокси."""
+    say = log or (lambda text: None)
+    rules = config.setdefault("routing", {"domainStrategy": "AsIs", "rules": []})["rules"]
+    if options.get("block_ads"):
+        rules.insert(0, {"type": "field", "domain": list(ADS), "outboundTag": "block"})
+    if options.get("route_ru"):
+        rules.append({"type": "field", "domain": list(RU_DOMAINS), "outboundTag": "direct"})
+        rules.append({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})
+    if options.get("route_ru") or options.get("block_ads"):
+        for inbound in config["inbounds"]:  # домен для правил — из трафика, без своего DNS
+            if inbound["protocol"] in ("socks", "http", "mixed"):
+                inbound["sniffing"] = {"enabled": True, "routeOnly": True,
+                                       "destOverride": ["http", "tls", "quic"]}
+    proxy = next(o for o in config["outbounds"] if o["tag"] == "proxy")
+    if options.get("mux"):
+        if v.get("flow"):
+            say("Mux не включён: с flow=" + v["flow"] + " он несовместим")
+        else:
+            proxy["mux"] = dict(MUX)
+    if options.get("fragment"):
+        config["outbounds"].append({"tag": "fragment", "protocol": "freedom",
+                                    "settings": {"fragment": dict(FRAGMENT)}})
+        proxy.setdefault("streamSettings", {}).setdefault("sockopt", {})["dialerProxy"] = \
+            "fragment"
+    return config
+
+
+def build_config(v: dict, mode: str, interface: str = "", options: dict | None = None,
+                 log=None) -> dict:
     if mode == "tun":
         inbounds = [{"tag": "tun-in", "protocol": "tun",
                      "settings": {"name": TUN_NAME, "MTU": 1500}}]
     else:
         inbounds = [
+            # routeOnly: имя сайта — только для правил, соединение идёт по исходному адресу
             {"tag": "socks-in", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks",
-             "settings": {"udp": True}, "sniffing": {"enabled": True,
+             "settings": {"udp": True}, "sniffing": {"enabled": True, "routeOnly": True,
                                                       "destOverride": ["http", "tls"]}},
             {"tag": "http-in", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http"}]
     direct = {"tag": "direct", "protocol": "freedom"}
     if interface:
         direct["streamSettings"] = {"sockopt": {"interface": interface}}
-    return {
+    config = {
         "log": {"loglevel": "warning"},
         "inbounds": inbounds,
         "outbounds": [outbound(v, interface if mode == "tun" else ""), direct,
                       {"tag": "block", "protocol": "blackhole"}],
-        "routing": {"domainStrategy": "IPIfNonMatch", "rules": [
+        # AsIs: Xray не спрашивает IP сам. С IPIfNonMatch он узнавал адрес по своему DNS
+        # (в связке с sing-box — по кругу через туннель, с обрывами), и часть соединений
+        # к заблокированным сайтам уходила по правилу «частные адреса» напрямую
+        "routing": {"domainStrategy": "AsIs", "rules": [
             {"type": "field", "ip": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
                                      "192.168.0.0/16", "169.254.0.0/16"],
              "outboundTag": "direct"}]},
     }
+    return apply_options(config, v, options or {}, log)
 
 
 # ---------- системный прокси ----------

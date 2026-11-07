@@ -25,6 +25,17 @@ DEFAULTS = {
     "vpn/xray_path": "",            # xray.exe (пусто — искать самостоятельно, vpn/xray.py)
     "vpn/singbox_path": "",         # sing-box.exe (пусто — искать самостоятельно, vpn/singbox.py)
     "vpn/proxy_backup": "",         # прежний системный прокси, пока VPN его подменяет
+    "vpn/ipv6": False,              # IPv6 через туннель (выключено — IPv6 перекрыт в туннеле)
+    "vpn/route_ru": True,           # российские сайты напрямую (vpn/xray.apply_options)
+    "vpn/block_ads": False,         # реклама и трекеры блокируются
+    "vpn/mux": False,               # Mux (не с flow=xtls-rprx-vision)
+    "vpn/fragment": False,          # фрагментация ClientHello до сервера (обход DPI)
+    "vpn/direct_apps": "",          # программы напрямую, мимо VPN (пути, по строке; TUN)
+    "vpn/local_proxy": True,        # локальный прокси для программ (SOCKS5 + HTTP, 127.0.0.1)
+    "vpn/local_port": 2080,
+    "vpn/killswitch": False,        # интернет только через туннель (брандмауэр Windows)
+    "vpn/killswitch_backup": "",    # прежние действия брандмауэра, пока блокировка включена
+    "vpn/dns_backup": "",           # прежний DNS адаптеров, пока VPN его подменяет
     "general/block_exit": False,    # запрет выхода из программы (кроме диспетчера задач)
     "general/on_top": False,        # окна поверх остальных
     "lock/restore_point": True,     # запреты из дополнительных настроек (ui/access.py)

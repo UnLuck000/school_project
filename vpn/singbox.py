@@ -15,7 +15,7 @@ from pathlib import Path
 
 TUN_NAME = "myav-tun"
 TUN_ADDRESS = "172.19.0.1/30"
-PRIVATE = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+TUN_ADDRESS6 = "fdfe:dcba:9876::1/126"
 SEARCH = [r"%ProgramFiles%\sing-box", r"%ProgramFiles%\FlyFrogLLC\Happ\tun",
           r"%LOCALAPPDATA%\Programs\sing-box"]
 
@@ -35,24 +35,37 @@ def find_singbox() -> str:
     return next((c for c in candidates if c and os.path.isfile(c)), "")
 
 
-def build_config(socks_port: int, xray_exe: str) -> dict:
-    """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray). xray_exe — его соединения напрямую."""
+def build_config(socks_port: int, xray_exe: str, ipv6: bool = False,
+                 direct_apps: list[str] | None = None) -> dict:
+    """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray).
+
+    xray_exe — полный путь: мимо туннеля пропускается только этот файл (не любой xray.exe).
+    Локальная сеть идёт напрямую правилом ip_is_private. DNS-запросы к роутеру в туннель по
+    маршрутам не попадают (маршрут к своей подсети точнее, а адрес шлюза sing-box в туннель
+    не берёт) — поэтому на время подключения DNS адаптеров подменяется (vpn/dnsguard.py).
+    ipv6 — IPv6 через туннель; выключено — IPv6 тоже заходит в туннель, но отклоняется
+    (иначе он шёл бы мимо VPN), программы сразу переходят на IPv4.
+    direct_apps — программы (полные пути), которые идут напрямую, мимо VPN."""
+    address = [TUN_ADDRESS, TUN_ADDRESS6]
+    ipv6_rule = [] if ipv6 else [{"ip_version": 6, "action": "reject"}]
     return {
         "log": {"level": "warn", "timestamp": True},
         "dns": {
             "servers": [
-                {"type": "https", "tag": "dns-remote", "server": "1.1.1.1",
+                # обычный DNS по UDP через сервер: DoH держит одно долгое соединение HTTP/2,
+                # оно через туннель обрывается, и все запросы на нём разом падают
+                {"type": "udp", "tag": "dns-remote", "server": "1.1.1.1",
                  "detour": "proxy"},
                 {"type": "local", "tag": "dns-local"},
             ],
             "final": "dns-remote",
-            "strategy": "ipv4_only",
+            "strategy": "prefer_ipv4" if ipv6 else "ipv4_only",
         },
         "inbounds": [{
             "type": "tun", "tag": "tun-in", "interface_name": TUN_NAME,
-            "address": [TUN_ADDRESS], "mtu": 9000,
+            "address": address, "mtu": 9000,
             "auto_route": True, "strict_route": True,
-            "route_exclude_address": ["127.0.0.0/8", "255.255.255.255/32", *PRIVATE],
+            "route_exclude_address": ["127.0.0.0/8", "255.255.255.255/32", "::1/128"],
         }],
         "outbounds": [
             {"type": "socks", "tag": "proxy", "server": "127.0.0.1",
@@ -63,9 +76,11 @@ def build_config(socks_port: int, xray_exe: str) -> dict:
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
-                {"process_name": [os.path.basename(xray_exe) or "xray.exe"],
-                 "outbound": "direct"},
+                {"process_path": [os.path.normpath(xray_exe)], "outbound": "direct"},
+                *([{"process_path": [os.path.normpath(a) for a in direct_apps],
+                    "outbound": "direct"}] if direct_apps else []),
                 {"ip_is_private": True, "outbound": "direct"},
+                *ipv6_rule,
             ],
             "final": "proxy",
             "auto_detect_interface": True,

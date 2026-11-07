@@ -311,6 +311,8 @@ def test_vless_profile_and_xray_config():
     assert out["settings"]["vnext"][0]["users"][0]["flow"] == "xtls-rprx-vision"
     assert out["streamSettings"]["wsSettings"]["headers"] == {"Host": "cdn.example.com"}
     assert {i["port"] for i in config["inbounds"]} == {xray.SOCKS_PORT, xray.HTTP_PORT}
+    # Xray не решает маршрут по своему DNS (иначе часть соединений уходила напрямую)
+    assert config["routing"]["domainStrategy"] == "AsIs"
     tun = xray.build_config(xray.parse_vless(uri), "tun", "Ethernet")
     assert tun["inbounds"][0]["protocol"] == "tun"
     assert tun["outbounds"][0]["streamSettings"]["sockopt"] == {"interface": "Ethernet"}
@@ -383,13 +385,21 @@ def test_singbox_config_and_modes():
     assert tun["type"] == "tun" and tun["auto_route"] and tun["strict_route"]
     assert config["outbounds"][0] == {"type": "socks", "tag": "proxy", "server": "127.0.0.1",
                                       "server_port": xray.SOCKS_PORT, "version": "5"}
-    # соединения самого Xray — напрямую, иначе петля через туннель
-    assert {"process_name": ["xray.exe"], "outbound": "direct"} in config["route"]["rules"]
+    # мимо туннеля — только наш xray.exe по полному пути, не любой файл с таким именем
+    assert {"process_path": [r"C:\x\xray.exe"], "outbound": "direct"} in config["route"]["rules"]
+    # IPv6: выключен — заходит в туннель и отклоняется; включён — идёт через сервер
+    assert {"ip_version": 6, "action": "reject"} in config["route"]["rules"]
+    assert config["dns"]["strategy"] == "ipv4_only"
+    with6 = singbox.build_config(xray.SOCKS_PORT, r"C:\x\xray.exe", ipv6=True)
+    assert {"ip_version": 6, "action": "reject"} not in with6["route"]["rules"]
+    assert any(":" in a for a in with6["inbounds"][0]["address"])
     assert config["route"]["auto_detect_interface"] and config["route"]["find_process"]
     assert profiles.from_text("x", reality).mode == "tun"  # по умолчанию — TUN
     assert isinstance(backends.backend_for("vless", print, "tun"), backends.SingBoxBackend)
     assert isinstance(backends.backend_for("vless", print, "tun-xray"), backends.XrayBackend)
     assert isinstance(backends.backend_for("vless", print, "proxy"), backends.XrayBackend)
+    assert isinstance(backends.backend_for("vless", print, "local"), backends.XrayBackend)
+    assert "local" in profiles.MODES
 
 
 def test_release_trusted_files():
@@ -401,3 +411,95 @@ def test_release_trusted_files():
     assert {"winws.exe", "WinDivert64.sys", "WinDivert.dll", "MsIo64.sys"} <= names
     assert {e["title"] for e in data["drivers"].values()} == {"WinDivert64.sys", "MsIo64.sys"}
     assert set(data["programs"]) <= trusted_hashes()
+
+
+def test_vpn_guards_restore(monkeypatch):
+    """Kill switch и подмена DNS: копия прежних значений, возврат и запись в журнал."""
+    from vpn import dnsguard, killswitch
+    store = {}
+    from ui import settings as cfg
+    monkeypatch.setattr(cfg, "set_", lambda k, v: store.__setitem__(k, v))
+    monkeypatch.setattr(cfg, "get", lambda k: store.get(k, ""))
+    calls, logged = [], []
+    monkeypatch.setattr(killswitch, "_powershell", lambda script, env=None: (
+        calls.append((script, env)),
+        type("R", (), {"returncode": 0, "stdout": "Public|True|NotConfigured\n", "stderr": ""})())[1])
+    monkeypatch.setattr(killswitch.journal, "log_action", lambda *a: logged.append(a[1]))
+    killswitch.enable("myav-tun", [r"C:\x\xray.exe", r"C:\x\sing-box.exe"])
+    assert killswitch.active() and logged == ["vpn_killswitch_off"]
+    script, env = calls[-1]
+    assert "DefaultOutboundAction Block" in script and env["KS_TUN"] == "myav-tun"
+    assert r"C:\x\xray.exe" in env["KS_PROGRAMS"] and "192.168.0.0/16" in env["KS_LAN"]
+    assert killswitch.disable() and not killswitch.active()
+    assert '"Public": "NotConfigured"' in calls[-1][1]["KS_OLD"]
+    # DNS: адаптер с DHCP возвращается к DHCP
+    monkeypatch.setattr(dnsguard, "_powershell", lambda script, env=None: (
+        calls.append((script, env)),
+        type("R", (), {"returncode": 0, "stdout": "6|Wi-Fi|10.0.0.1|True\n", "stderr": ""})())[1])
+    monkeypatch.setattr(dnsguard.journal, "log_action", lambda *a: logged.append(a[1]))
+    assert dnsguard.protect() == ["Wi-Fi"] and logged[-1] == "vpn_dns_restore"
+    assert any(env and env.get("DNS") == "1.1.1.1,1.0.0.1" for _, env in calls)
+    assert dnsguard.restore()
+    assert any("ResetServerAddresses" in s for s, _ in calls)
+
+
+def test_vpn_routing_mux_fragment():
+    from vpn import singbox, xray
+    plain = xray.parse_vless("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443"
+                             "?type=tcp&security=reality&pbk=key&sid=ab#x")
+    vision = dict(plain, flow="xtls-rprx-vision")
+    opts = {"route_ru": True, "block_ads": True, "mux": True, "fragment": True}
+    said = []
+    c = xray.build_config(plain, "proxy", options=opts, log=said.append)
+    rules = c["routing"]["rules"]
+    assert rules[0] == {"type": "field", "domain": xray.ADS, "outboundTag": "block"}
+    assert {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"} in rules
+    assert any("geosite:category-ru" in r.get("domain", []) for r in rules)
+    assert c["routing"]["domainStrategy"] == "AsIs"  # без своих DNS-запросов
+    assert all(i["sniffing"]["routeOnly"] for i in c["inbounds"])
+    proxy = c["outbounds"][0]
+    assert proxy["mux"]["enabled"] and proxy["streamSettings"]["sockopt"]["dialerProxy"] == \
+        "fragment"
+    assert any(o["tag"] == "fragment" and o["settings"]["fragment"] for o in c["outbounds"])
+    # Vision и Mux несовместимы: Mux не включается
+    cv = xray.build_config(vision, "proxy", options={"mux": True}, log=said.append)
+    assert "mux" not in cv["outbounds"][0] and any("Mux" in t for t in said)
+    # без опций — правил маршрутизации, кроме частных адресов, нет
+    assert len(xray.build_config(plain, "proxy")["routing"]["rules"]) == 1
+    # программы напрямую — в sing-box по полному пути
+    sb = singbox.build_config(10808, r"C:\x\xray.exe", direct_apps=[r"C:\Games\game.exe"])
+    assert {"process_path": [r"C:\Games\game.exe"], "outbound": "direct"} in sb["route"]["rules"]
+
+
+def test_vpn_local_proxy(monkeypatch):
+    """Локальный прокси для программ: SOCKS5 и HTTP на одном порту, только 127.0.0.1;
+    занятый порт — VPN без него, с записью в журнал."""
+    import socket
+    from vpn import backends, xray
+    from ui import settings as cfg
+    values = {"vpn/local_proxy": True, "vpn/local_port": 0}
+    monkeypatch.setattr(cfg, "get", lambda k: values.get(k, False))
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen(1)
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    free_port = free.getsockname()[1]
+    free.close()
+    try:
+        values["vpn/local_port"] = busy.getsockname()[1]
+        if values["vpn/local_port"] < 1024:
+            return
+        config, said = {"inbounds": []}, []
+        assert backends.add_local_proxy(config, said.append) is None
+        assert config["inbounds"] == [] and "занят" in said[0]
+        values["vpn/local_port"] = free_port
+        assert backends.add_local_proxy(config, said.append) == free_port
+        inbound = config["inbounds"][0]
+        assert (inbound["protocol"], inbound["listen"]) == ("mixed", "127.0.0.1")
+        values["vpn/local_proxy"] = False
+        assert xray.local_port() is None
+        values.update({"vpn/local_proxy": True, "vpn/local_port": xray.SOCKS_PORT})
+        assert xray.local_port() is None  # свой внутренний порт не отдаём
+    finally:
+        busy.close()

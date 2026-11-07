@@ -18,7 +18,8 @@ KINDS = {"vless": "VLESS (Xray)", "wireguard": "WireGuard", "openvpn": "OpenVPN"
          "demo": "Демо (без сервера)"}
 MODES = {"tun": "TUN: sing-box + Xray (весь трафик)",
          "proxy": "Системный прокси (Xray)",
-         "tun-xray": "TUN через Xray (запасной, экспериментально)"}
+         "tun-xray": "TUN через Xray (запасной, экспериментально)",
+         "local": "Только локальный прокси (программы с 127.0.0.1:порт)"}
 
 
 @dataclass

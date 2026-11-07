@@ -1199,9 +1199,16 @@ class MainWindow(QMainWindow):
     def start_vpn_on_launch(self):
         """Прокси, оставшийся после сбоя, возвращается; VPN подключается, если включено
         «Подключать VPN при запуске программы» (vpn/autostart) и инструмент разрешён."""
-        from vpn import xray
+        from vpn import dnsguard, killswitch, xray
         if xray.recover_proxy():
             self.add_event("Системный прокси возвращён (VPN был отключён аварийно)", "info")
+        # программа закрылась с подключённым VPN или упала: интернет не должен остаться
+        # перекрытым, DNS — подменённым
+        if killswitch.recover():
+            self.add_event("Kill switch снят: VPN был отключён аварийно", "info")
+            activity.record("vpn", "Kill switch снят при запуске (VPN был отключён аварийно)")
+        if dnsguard.recover():
+            self.add_event("DNS адаптеров возвращён (VPN был отключён аварийно)", "info")
         if not cfg.get("vpn/autostart") or not access.allowed("btnVpn"):
             return
         from vpn.window import VpnWindow
