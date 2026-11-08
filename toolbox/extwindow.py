@@ -65,12 +65,13 @@ class ExtensionsWindow(QDialog):
         layout.addLayout(row)
 
         self.tabs = QTabWidget()
-        self.tree = make_tree(["Риск", "Браузер", "Профиль", "Расширение", "Вкл.", "Откуда",
-                               "Причины", "Папка на диске", "ID"],
-                              [90, 120, 150, 220, 50, 200, 280, 320, 230], multi=False)
+        # причины, папка и ID — в описании (двойной щелчок или правая кнопка → «Описание»)
+        self.tree = make_tree(["Риск", "Браузер", "Профиль", "Расширение", "Версия", "Вкл.",
+                               "Откуда"], [90, 130, 160, 280, 90, 50, 260], multi=False)
         self.tree.setSortingEnabled(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._ext_menu)
+        self.tree.itemDoubleClicked.connect(lambda item, col: self.describe())
         self.tabs.addTab(self.tree, "Расширения")
         sites_page = QWidget()
         sites_layout = QVBoxLayout(sites_page)
@@ -132,18 +133,15 @@ class ExtensionsWindow(QDialog):
                 continue
             if level == "removed" and not self.chk_removed.isChecked():
                 continue
-            item = SortItem([RISK_TEXT[level], e.browser, e.profile, e.name,
-                             "да" if e.enabled else "нет", e.source, "; ".join(reasons),
-                             e.path, e.ext_id])
+            item = SortItem([RISK_TEXT[level], e.browser, e.profile, e.name, e.version,
+                             "да" if e.enabled else "нет", e.source])
             item.setData(0, SortItem.SORT_ROLE, RISK_ORDER[level])
             item.setData(0, INDEX_ROLE, i)
-            perms = ", ".join(e.permissions) or "нет"
-            item.setToolTip(3, f"{e.name} {e.version}\nПрава: {perms}")
-            for col in (5, 6, 7):
-                item.setToolTip(col, item.text(col))
+            item.setToolTip(0, "; ".join(reasons))
+            item.setToolTip(6, e.source)
             color = COLORS.get(level)
             if level == "removed":
-                for col in range(9):
+                for col in range(7):
                     item.setForeground(col, QBrush(QColor(color)))
             elif color:
                 item.setForeground(0, QBrush(QColor(color)))
@@ -176,6 +174,8 @@ class ExtensionsWindow(QDialog):
         import os
         menu = QMenu(self)
         exists = bool(e.path) and os.path.exists(e.path)
+        menu.addAction("Описание", self.describe)
+        menu.addSeparator()
         folder = menu.addAction("Показать папку в проводнике",
                                 lambda: fileops.show_in_explorer(e.path))
         folder.setEnabled(exists)
@@ -188,6 +188,39 @@ class ExtensionsWindow(QDialog):
         remove.setEnabled(not e.removed or bool(e.registry))
         menu.addAction("Копировать ID", lambda: QApplication.clipboard().setText(e.ext_id))
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def describe(self) -> None:
+        """Всё о расширении: причины риска, папка, ID, права, браузер и профиль; действия."""
+        e = self._current(self.tree, self.items)
+        if e is None:
+            return
+        import os
+        from analyzer import fileops
+        from ui.details import show_details
+        level, reasons = e.risk
+        rows = [("Расширение", e.name), ("Версия", e.version), ("ID", e.ext_id),
+                ("Риск", RISK_TEXT[level]), ("Причины", "; ".join(reasons)),
+                ("Браузер", e.browser), ("Профиль", e.profile),
+                ("Включено", "да" if e.enabled else "нет"), ("Откуда установлено", e.source),
+                ("Из магазина", "да" if e.from_store else "нет"),
+                ("Установлено принудительно", "да (политика или реестр)" if e.forced else "нет"),
+                ("Доступ ко всем сайтам", "да" if e.all_sites else "нет"),
+                ("Права", ", ".join(e.permissions) or "нет"),
+                ("Папка на диске", e.path), ("Папка профиля", e.prefs),
+                ("Программа браузера", e.exe),
+                ("Записи реестра", "; ".join("\\".join(r[:2]) + (f" ({r[2]})" if r[2] else "")
+                                             for r in e.registry))]
+        exists = bool(e.path) and os.path.exists(e.path)
+        actions = []
+        if exists:
+            actions.append(("Показать папку", lambda d: fileops.show_in_explorer(e.path)))
+            if self.window_ref is not None:
+                actions.append(("Проверить папку сканером",
+                                lambda d: self.window_ref.open_analyzer(e.path)))
+        if not e.removed or e.registry:
+            actions.append(("Удалить полностью", lambda d: (d.accept(), self._remove(e))))
+        actions.append(("Копировать ID", lambda d: QApplication.clipboard().setText(e.ext_id)))
+        show_details(self, f"Расширение {e.name or e.ext_id}", rows, actions, width=860)
 
     def _remove(self, e: ext_mod.Extension) -> None:
         parts = []

@@ -121,7 +121,7 @@ def _apply(app, theme: str) -> None:
     finally:
         _applying = False
     # новый объект стиля: Qt заново оформляет все виджеты, старые цвета не остаются
-    app.setStyle(QStyleFactory.create("Fusion"))
+    app.setStyle(_make_style())
     palette = build_palette(spec)
     app.setPalette(palette)
     QToolTip.setPalette(palette)
@@ -142,6 +142,53 @@ def _apply(app, theme: str) -> None:
     from PySide6.QtCore import QTimer
     for delay in (100, 400):
         QTimer.singleShot(delay, lambda: _refresh_title_bars(app))
+
+
+def _make_style():
+    """Fusion с флажками строк списков, видными на любом фоне (_ItemCheckStyle)."""
+    from PySide6.QtWidgets import QProxyStyle, QStyle
+
+    class _ItemCheckStyle(QProxyStyle):
+        """Флажок в строке дерева или таблицы: светлый квадрат с тёмной рамкой, отмеченный —
+        синий с белой галочкой. У Fusion флажок берёт цвета палитры: в тёмных темах на
+        цветных строках («Политики и блокировки») чёрная галочка не видна."""
+
+        def drawPrimitive(self, element, option, painter, widget=None):
+            if element != QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck:
+                return super().drawPrimitive(element, option, painter, widget)
+            from PySide6.QtCore import QPointF, QRectF
+            from PySide6.QtGui import QPainter, QPainterPath, QPen
+            rect = QRectF(option.rect)
+            side = min(rect.width(), rect.height(), 16.0) - 2
+            box = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
+            on = bool(option.state & QStyle.StateFlag.State_On)
+            partial = bool(option.state & QStyle.StateFlag.State_NoChange)
+            enabled = bool(option.state & QStyle.StateFlag.State_Enabled)
+            accent = QColor("#2f7ed8") if enabled else QColor("#8a9bb0")
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(accent if on or partial else QColor("#5f6368"), 1.2))
+            painter.setBrush(accent if on or partial else QColor("#ffffff"))
+            painter.drawRoundedRect(box, 3, 3)
+            painter.setPen(QPen(QColor("#ffffff"), max(1.6, side / 8)))
+            if on:
+                path = QPainterPath(QPointF(box.left() + side * 0.22, box.top() + side * 0.52))
+                path.lineTo(box.left() + side * 0.42, box.top() + side * 0.72)
+                path.lineTo(box.left() + side * 0.78, box.top() + side * 0.30)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(path)
+            elif partial:
+                y = box.center().y()
+                painter.drawLine(QPointF(box.left() + side * 0.25, y),
+                                 QPointF(box.right() - side * 0.25, y))
+            painter.restore()
+
+    global _style
+    _style = _ItemCheckStyle(QStyleFactory.create("Fusion"))
+    return _style
+
+
+_style = None
 
 
 def _refresh_title_bars(app) -> None:

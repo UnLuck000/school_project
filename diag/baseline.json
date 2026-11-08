@@ -1,0 +1,173 @@
+{
+ "app.start": {
+  "verified_at": "2026-11-08 21:15:34",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 1.27,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "db.update": {
+  "verified_at": "2026-11-08 19:22:54",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "scan.file": {
+  "verified_at": "2026-11-08 19:23:58",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.64,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "protect.schedule": {
+  "verified_at": "2026-11-08 19:41:22",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "protect.decoys": {
+  "verified_at": "2026-11-08 19:41:39",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "net.monitor": {
+  "verified_at": "2026-11-08 19:41:55",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.03,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "net.block": {
+  "verified_at": "2026-11-08 19:42:35",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "settings.change": {
+  "verified_at": "2026-11-08 23:26:24",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.0,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.resource_report": {
+  "verified_at": "2026-11-08 23:25:39",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 1.43,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "debug.bench": {
+  "verified_at": "2026-11-08 23:25:33",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.04,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.autoruns": {
+  "verified_at": "2026-11-08 22:34:18",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 3.38,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.password": {
+  "verified_at": "2026-11-08 22:22:21",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 22.92,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.link": {
+  "verified_at": "2026-11-08 22:22:17",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 52.23,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.usb": {
+  "verified_at": "2026-11-08 20:06:52",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "win.process_manager": {
+  "verified_at": "2026-11-08 22:27:18",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 4.18,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.recovery": {
+  "verified_at": "2026-11-08 22:38:33",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 1.36,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.memory": {
+  "verified_at": "2026-11-08 22:27:48",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 92.13,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.injection": {
+  "verified_at": "2026-11-08 22:27:52",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 12.95,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.false_positives": {
+  "verified_at": "2026-11-08 23:25:35",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 21.89,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ }
+}

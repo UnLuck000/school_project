@@ -1,0 +1,125 @@
+{
+  "files": {
+    "4067aaf36a1d7fd45b94d40c2886f213f1520e9e4493fdd3e708156f9809c7a5": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "C:\\WINDOWS\\assembly\\NativeImages_v2.0.50727_32\\System.Web\\d88548af6dcc90ecdf1323d460e94100\\System.Web.ni.dll"
+    },
+    "6c9b3dd142a09dc468e23ad39aad6f75a0f2b85125104469f026e52a474e464f": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%USERPROFILE%\\.gradle\\caches\\modules-2\\files-2.1\\org.apache.httpcomponents\\httpcore\\4.4.16\\51cf043c87253c9f58b539c9f7e44c8894223850\\httpcore-4.4.16.jar"
+    },
+    "715768c94cf1b3a7d2587409158ed566d8032db77e6769002e3961bf7d912d5a": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Steam\\Rust.url"
+    },
+    "79be63f17a7b5aec4d6ea5ba987047bb9781096e9e3031d6d911587f05398d22": {
+      "added_at": "2026-11-08T23:25:22",
+      "layers": [
+        "yara"
+      ],
+      "note": "",
+      "path": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Steam\\Русы не против Ящерок.url"
+    },
+    "979234fa74a5408072150b20e10f89da29864db5b32e47962c5024b03fd7833c": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "C:\\WINDOWS\\assembly\\NativeImages_v4.0.30319_32\\System.Web\\b1d38135c6fcfb3571da5383bed1442c\\System.Web.ni.dll"
+    },
+    "afe5a5c026d66b9453a7548215a74aae83abfd00903f8168eb0fc644e0d19d4d": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "C:\\WINDOWS\\assembly\\NativeImages_v4.0.30319_64\\System.Web\\d8062fc067157b799111da0a85c6210e\\System.Web.ni.dll"
+    },
+    "cc2ec00c73700f25a93905dde9b0f18a9a84a4e60e9ad4559e3f71ff89686709": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "C:\\WINDOWS\\assembly\\NativeImages_v4.0.30319_32\\System.Web\\3d83873d913b153ee37d86bad174c6ff\\System.Web.ni.dll"
+    },
+    "cf0704039c532170356ef4d98ff8b55357c5f9ef557f5c52b1ba491175ea479c": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Steam\\Tricky Towers.url"
+    },
+    "cfcf32f5662791f1f22a77acb6dddfbc970fe6e99506969b3ea67c03f67687ab": {
+      "added_at": "2026-11-08T21:20:25",
+      "layers": [
+        "yara"
+      ],
+      "note": "",
+      "path": "C:\\Windows\\system32\\drivers\\MsIo64.sys"
+    },
+    "e27ad7f632cee31b3f99f4185057421ff565b53256acd281a447e8696285cb36": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "C:\\WINDOWS\\assembly\\NativeImages_v2.0.50727_64\\System.Web\\a57326619ba901dc138a46623393f1c7\\System.Web.ni.dll"
+    },
+    "e3835d49668acd8eb2c1501d19ac6d481bf826b8d39fcfbd09c411d72548899a": {
+      "added_at": "2026-11-08T21:26:22",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Steam\\Soundpad.url"
+    },
+    "f625cd3e2dc9a0e2b8f166d4b000ca71c972c670ac989eae3925d7c6a8079738": {
+      "added_at": "2026-11-08T21:42:43",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Steam\\Human Fall Flat.url"
+    }
+  },
+  "hashes": {
+    "6c9b3dd142a09dc468e23ad39aad6f75a0f2b85125104469f026e52a474e464f": {
+      "added_at": "2026-11-08T21:20:19",
+      "note": "",
+      "path": "%USERPROFILE%\\.gradle\\caches\\modules-2\\files-2.1\\org.apache.httpcomponents\\httpcore\\4.4.16\\51cf043c87253c9f58b539c9f7e44c8894223850\\httpcore-4.4.16.jar",
+      "source": "threatfox.txt"
+    },
+    "affb4f69d2ea302a7abccd5325d81826e140ddae014f1e070bc4a6c0dd555188": {
+      "added_at": "2026-11-02T21:42:52",
+      "note": "",
+      "path": "C:\\zapret-discord-youtube-1.10.4\\bin\\winws.exe",
+      "source": "threatfox.txt"
+    }
+  },
+  "rules": {}
+}

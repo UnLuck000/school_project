@@ -59,11 +59,15 @@ class DriversWindow(QDialog):
         row.addWidget(self.status, 1)
         layout.addLayout(row)
 
-        self.tree = make_tree(["Драйвер", "Служба", "Состояние", "Запуск", "Вердикт", "Описание",
-                               "Путь"], [170, 140, 110, 110, 330, 300, 300], multi=False)
+        # путь, хэш и версия — только в «Описании»
+        self.tree = make_tree(["Драйвер", "Служба", "Состояние", "Запуск", "Вердикт"],
+                              [200, 160, 110, 110, 420], multi=False)
         self.tree.setSortingEnabled(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.itemDoubleClicked.connect(lambda item, col: self.describe())
+        layout.addWidget(QLabel("Двойной щелчок или правая кнопка → «Описание»: хэш, версия, "
+                                "описание из базы, к чему относится драйвер и что с ним делать."))
         layout.addWidget(self.tree, 1)
         self._show_windows_state()
 
@@ -135,14 +139,12 @@ class DriversWindow(QDialog):
             state = "загружен" if d.running or d.loaded else (
                 "не загружен" if d.service else "без службы")
             start = drivers.START_TEXT.get(d.start, "") if d.start is not None else ""
-            desc = d.entry.description if d.entry else d.error
-            item = SortItem([d.name, d.service, state, start, d.verdict(), desc, d.path])
+            item = SortItem([d.name, d.service, state, start, d.verdict()])
             item.setData(0, PATH_ROLE, d.path)
-            for col, text in ((5, desc), (6, d.path), (4, d.verdict())):
-                item.setToolTip(col, text)
+            item.setToolTip(4, d.verdict())
             color = COLORS.get(d.level)
             if color:
-                for col in range(7):
+                for col in range(5):
                     item.setForeground(col, QBrush(QColor(color)))
             self.tree.addTopLevelItem(item)
         self.tree.setSortingEnabled(True)
@@ -163,6 +165,12 @@ class DriversWindow(QDialog):
             return
         menu = QMenu(self)
         from analyzer import fileops
+        menu.addAction("Описание", self.describe)
+        menu.addSeparator()
+        menu.addAction("Открыть в анализаторе", lambda: self._analyze(d))
+        menu.addAction("Найти в интернете по названию", lambda: self._search(d))
+        menu.addAction("Проверить на VirusTotal (по хэшу)",
+                       lambda: self._online(d)).setEnabled(bool(d.sha256))
         menu.addAction("Показать в проводнике", lambda: fileops.show_in_explorer(d.path))
         if d.service:
             act = menu.addAction("Отключить службу драйвера", lambda: self._disable(d))
@@ -176,13 +184,69 @@ class DriversWindow(QDialog):
         menu.addAction("Копировать SHA-256", lambda: self._copy(d.sha256))
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
+    def describe(self) -> None:
+        """Всё о драйвере: хэши, версия, производитель, описание из базы, устройства и
+        программы, к которым он относится, и действия."""
+        d = self._selected()
+        if d is None:
+            return
+        from ui.details import show_details
+        state = "загружен" if d.running or d.loaded else (
+            "не загружен" if d.service else "без службы")
+        rows = [("Драйвер", d.name), ("Путь", d.path), ("Вердикт", d.verdict()),
+                ("Версия файла", d.version), ("Версия продукта", d.info.get("ProductVersion", "")),
+                ("Производитель", d.info.get("CompanyName", "")),
+                ("Продукт", d.info.get("ProductName", "")),
+                ("Описание файла", d.info.get("FileDescription", "")),
+                ("SHA-256", d.sha256),
+                ("Служба", f"{d.service} ({d.display})" if d.display else d.service),
+                ("Состояние", state),
+                ("Запуск", drivers.START_TEXT.get(d.start, "") if d.start is not None else ""),
+                ("Ошибка чтения", d.error)]
+        if d.entry is not None:
+            rows += [("В базе LOLDrivers", f"{d.entry.category}: {d.entry.name}"),
+                     ("Описание из базы", d.entry.description)]
+        rows += [("Устройство", "; ".join(drivers.devices(d.service)) if d.service else ""),
+                 ("Относится к программе", "; ".join(drivers.related_programs(d))
+                  or "не найдено (драйвер Windows или устройства)")]
+        actions = [("Открыть в анализаторе", lambda dialog: self._analyze(d)),
+                   ("Найти в интернете по названию", lambda dialog: self._search(d))]
+        if d.sha256:
+            actions.append(("VirusTotal (по хэшу)", lambda dialog: self._online(d)))
+        if d.service and d.start != 4:
+            actions.append(("Отключить службу", lambda dialog: self._disable(d)))
+        show_details(self, f"Драйвер {d.name}", rows, actions, width=820)
+
+    def _analyze(self, d: drivers.Driver) -> None:
+        from ui.details import main_window
+        main = main_window()
+        if main is not None:
+            main.open_analyzer(d.path)
+
+    @staticmethod
+    def _online(d: drivers.Driver) -> None:
+        """Страница файла на VirusTotal по SHA-256 (уходит только хэш, не сам файл)."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(f"https://www.virustotal.com/gui/file/{d.sha256}"))
+
+    @staticmethod
+    def _search(d: drivers.Driver) -> None:
+        """Поиск в интернете по имени файла драйвера (и производителю, если он известен)."""
+        from urllib.parse import quote_plus
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        words = [d.name, d.info.get("CompanyName", ""), "драйвер"]
+        query = " ".join(w for w in words if w)
+        QDesktopServices.openUrl(QUrl(f"https://www.google.com/search?q={quote_plus(query)}"))
+
     def _exclude(self, d: drivers.Driver, on: bool) -> None:
         if on:
             answer = QMessageBox.question(
                 self, "Исключения",
                 f"{d.name}: {d.verdict()}.\n\nДоверять этому драйверу (по хэшу файла)? Он "
                 "перестанет показываться как уязвимый; исключение попадёт в релиз программы. "
-                "Убрать: правый клик здесь или «Журнал действий» → «Исключения».")
+                "Убрать: правый клик здесь или «Журнал» → «Исключения».")
             if answer != QMessageBox.StandardButton.Yes:
                 return
             drivers.exclude(d)

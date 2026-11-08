@@ -99,6 +99,7 @@ def disable() -> bool:
         return False
     _restore(backup)
     _save_backup(None)
+    journal.forget("vpn_killswitch_off")  # снята обычным путём: в журнале отменять нечего
     return True
 
 
@@ -109,6 +110,11 @@ def _restore(outbound: dict[str, str]) -> None:
         "foreach ($p in $old.PSObject.Properties) { "
         "Set-NetFirewallProfile -Name $p.Name -DefaultOutboundAction $p.Value }; "
         "Remove-NetFirewallRule -Group $env:KS_GROUP -EA SilentlyContinue", env)
+
+
+@journal.active_check("vpn_killswitch_off")
+def _active(d: dict) -> bool:
+    return _load_backup() is not None  # копии нет — блокировку уже сняли
 
 
 @journal.undo_op("vpn_killswitch_off")

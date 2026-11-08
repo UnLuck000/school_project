@@ -97,7 +97,13 @@ def restore() -> bool:
         return False
     _restore(adapters)
     _save_backup(None)
+    journal.forget("vpn_dns_restore")
     return True
+
+
+@journal.active_check("vpn_dns_restore")
+def _active(d: dict) -> bool:
+    return bool(_load_backup())
 
 
 @journal.undo_op("vpn_dns_restore")

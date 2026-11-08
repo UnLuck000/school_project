@@ -33,6 +33,7 @@ class Hit:
     verdict: str      # оценка: ложное / вероятно ложное / проверить
     weak: bool = False    # слабое срабатывание (эвристика, правило класса PUA и т. п.)
     partner: str = ""     # связь с подписанным файлом из той же папки (scanner.relations)
+    sha256: str = ""      # SHA-256 файла (исключение программы)
 
     @property
     def active(self) -> bool:
@@ -71,12 +72,14 @@ def explain_file(path: Path, signatures, rules) -> list[Hit]:
             if digest in signatures:
                 source = signatures.source(digest) if hasattr(signatures, "source") else ""
                 raw.append(("hash", digest, source, "MD5" if len(digest) == 32 else "SHA-256",
-                            overrides.hash_ignored(digest), False))
+                            overrides.hash_ignored(digest)
+                            or overrides.file_excluded(sha256, "hash"), False))
     if rules is not None:
         for m in match_details(rules, path, raw=True):
             description = str(m.meta.get("description", "")) if m.meta else ""
             raw.append(("yara", m.rule, rule_source(m), description,
-                        overrides.rule_disabled(m.rule), weak_match(m)))
+                        overrides.rule_disabled(m.rule)
+                        or overrides.file_excluded(sha256, "yara"), weak_match(m)))
     report = analyze_pe(path)
     if report.score >= get_threshold():
         raw.append(("heuristic", f"{report.score} баллов", "эвристика PE", report.summary(),
@@ -94,7 +97,7 @@ def explain_file(path: Path, signatures, rules) -> list[Hit]:
     hits = []
     for layer, value, source, detail, excluded, weak in raw:
         hit = Hit(str(path), layer, value, source, detail, describe(sig), sig.status == VALID,
-                  excluded, "", weak, partner)
+                  excluded, "", weak, partner, sha256)
         hit.verdict = _assess(hit)
         hits.append(hit)
     return hits

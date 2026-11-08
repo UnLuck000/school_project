@@ -37,3 +37,7 @@ signatures/hashes.txt
 # словарь орфографии PyCharm и заметки для Claude Code — не для репозитория
 dictionaries/
 CLAUDE.md
+
+# релизная сборка (python build_release.py)
+dist/
+release/

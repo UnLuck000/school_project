@@ -67,8 +67,9 @@ def check_file(p: Path, signatures, rules=None,
         digest, md5 = data_hashes(data) if data is not None else file_hashes(p)
         if whitelist and digest in whitelist:
             return None
-        reason = hash_verdict(st.st_size, digest, md5, signatures) or (
-            None if kind else analyze(p, rules, heuristics, data=data))
+        reason = overrides.filter_reason(digest, hash_verdict(st.st_size, digest, md5, signatures)
+                                         or (None if kind else analyze(p, rules, heuristics,
+                                                                       data=data)))
     if version:
         verdict_cache.put(p, st, version, digest, reason)
     return reason

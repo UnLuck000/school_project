@@ -63,7 +63,7 @@ def get(path, st: os.stat_result, version: str) -> tuple[str, str | None] | None
                 found = conn.execute(
                     "SELECT size, mtime, version, sha256, reason FROM verdicts WHERE path = ?",
                     (key,)).fetchone()
-            except sqlite3.Error:
+            except (sqlite3.Error, OverflowError, ValueError):
                 return None
             row = found and (found[0], found[1], found[2], found[3], found[4])
         if row and row[0] == st.st_size and row[1] == st.st_mtime_ns and row[2] == version:
@@ -73,7 +73,14 @@ def get(path, st: os.stat_result, version: str) -> tuple[str, str | None] | None
         return None
 
 
+INT64 = 2 ** 63
+
+
 def put(path, st: os.stat_result, version: str, sha256: str, reason: str | None) -> None:
+    # время изменения за пределами 64-битного числа SQLite (бывает у файлов с «битой» датой):
+    # такой файл просто не кэшируется
+    if not (-INT64 <= st.st_mtime_ns < INT64 and 0 <= st.st_size < INT64):
+        return
     with _lock:
         _pending[_key(path)] = (st.st_size, st.st_mtime_ns, version, sha256, reason)
         if len(_pending) >= FLUSH_EVERY or time.monotonic() - _last_flush > FLUSH_SECONDS:
@@ -97,7 +104,7 @@ def flush() -> None:
         try:
             conn.executemany("INSERT OR REPLACE INTO verdicts VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
             conn.commit()
-        except sqlite3.Error:
+        except (sqlite3.Error, OverflowError, ValueError):
             pass
 
 

@@ -1,5 +1,8 @@
 """Окно «Ложные срабатывания»: разбор срабатываний по файлу или папке и ручная правка баз
-(убрать хэш, отключить правило YARA). Открывается с вкладки «Отладка»."""
+(убрать хэш, отключить правило YARA, исключить программу из хэшей или YARA). Файлы можно не
+искать вручную: «Найти по журналам» берёт всё, что находили защита, проверки дисков, контроль
+запуска и мониторинг сети за 30 дней. Оценка, подпись и путь — в описании (двойной щелчок
+или правая кнопка). Открывается с вкладки «Отладка»."""
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +12,8 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from analyzer import fileops
@@ -18,8 +22,9 @@ from scanner import overrides
 from scanner.fpcheck import LAYER_TEXT, Hit, explain_file, iter_files
 from ui.textutil import elide
 
-COLUMNS = [("Файл", 260), ("Слой", 80), ("Что сработало", 230), ("Источник", 170),
-           ("Подпись", 220), ("Оценка", 330), ("Путь", 400)]
+COLUMNS = [("Файл", 260), ("Слой", 80), ("Что сработало", 300), ("Источник", 200),
+           ("Угроза сейчас", 110)]
+LOG_DAYS = 30  # «Найти по журналам»: за сколько дней
 HIT_ROLE = Qt.ItemDataRole.UserRole
 COLORS = {"active": (231, 76, 60), "suppressed": (127, 140, 141)}
 
@@ -85,6 +90,11 @@ class FalsePositiveWindow(QMainWindow):
             button = QPushButton(title)
             button.clicked.connect(lambda checked=False, p=path, r=recursive: self.start(p, r))
             presets.addWidget(button)
+        from_logs = QPushButton("Найти по журналам")
+        from_logs.setToolTip(f"Файлы, которые за {LOG_DAYS} дней находили защита, проверки "
+                             "дисков, контроль запуска и мониторинг сети")
+        from_logs.clicked.connect(self.start_from_logs)
+        presets.addWidget(from_logs)
         self.only_active_cb = QCheckBox("Только то, что сейчас считается угрозой")
         self.only_active_cb.toggled.connect(self._apply_filter)
         presets.addStretch()
@@ -104,11 +114,15 @@ class FalsePositiveWindow(QMainWindow):
         self.tree.setRootIsDecorated(False)
         self.tree.setSortingEnabled(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.tree.itemDoubleClicked.connect(lambda *_: self._open_selected())
+        self.tree.itemDoubleClicked.connect(lambda *_: self.describe())
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._menu)
         hits_layout.addWidget(self.tree)
         actions = QHBoxLayout()
-        for text, handler in (("Убрать хэш из базы", self.ignore_hashes),
+        for text, handler in (("Описание", self.describe),
+                              ("Убрать хэш из базы", self.ignore_hashes),
                               ("Отключить правило", self.disable_rules),
+                              ("Исключить программу", lambda: self.exclude_programs(None)),
                               ("Открыть в сканере", self._open_selected),
                               ("Показать в проводнике", self._show_selected)):
             button = QPushButton(text)
@@ -121,7 +135,7 @@ class FalsePositiveWindow(QMainWindow):
         excluded_tab = QWidget()
         excluded_layout = QVBoxLayout(excluded_tab)
         self.excluded = QTreeWidget()
-        self.excluded.setHeaderLabels(["Что", "Значение", "Источник", "Файл", "Когда"])
+        self.excluded.setHeaderLabels(["Что", "Значение", "Источник / слои", "Файл", "Когда"])
         for i, width in enumerate((110, 420, 170, 380, 150)):
             self.excluded.setColumnWidth(i, width)
         self.excluded.setRootIsDecorated(False)
@@ -154,6 +168,10 @@ class FalsePositiveWindow(QMainWindow):
             self.path_edit.setText(path)
         if recursive is not None:
             self.recursive_cb.setChecked(recursive)
+        if not isinstance(path, str) and self.path_edit.text().startswith("Из журналов:"):
+            self.start_from_logs()  # «Проверить» после «Найти по журналам» — то же самое
+            return
+        self._from_logs = False
         target = Path(self.path_edit.text().strip().strip('"'))
         if not target.exists():
             QMessageBox.warning(self, "Ложные срабатывания", "Файл или папка не найдены")
@@ -170,7 +188,27 @@ class FalsePositiveWindow(QMainWindow):
                          args=(self._request, target, self.recursive_cb.isChecked(),
                                self._cancel)).start()
 
-    def _job(self, request: int, target: Path, recursive: bool, cancel: threading.Event):
+    def start_from_logs(self):
+        """Проверить всё, что находили защита и сеть: журнал защиты и события за LOG_DAYS дней."""
+        self._from_logs = True
+        paths = found_in_logs()
+        if not paths:
+            QMessageBox.information(self, "Ложные срабатывания",
+                                    f"За {LOG_DAYS} дней в журналах нет файлов, которые ещё на месте")
+            return
+        self._cancel.set()
+        self._cancel = threading.Event()
+        self._request += 1
+        self.tree.clear()
+        self.path_edit.setText(f"Из журналов: {len(paths)} файлов")
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.status.setText(f"Проверяю файлы из журналов: {len(paths)}...")
+        threading.Thread(target=self._job, daemon=True,
+                         args=(self._request, None, False, self._cancel, paths)).start()
+
+    def _job(self, request: int, target: Path | None, recursive: bool, cancel: threading.Event,
+             paths: list[Path] | None = None):
         try:
             signatures, rules, _ = rules_and_bases()
         except OSError:
@@ -188,8 +226,9 @@ class FalsePositiveWindow(QMainWindow):
 
         checked = found = 0
         batch: list[Hit] = []
+        files = paths if paths is not None else iter_files(target, recursive)
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
-            for hits in pool.map(one, iter_files(target, recursive)):
+            for hits in pool.map(one, files):
                 if cancel.is_set():
                     break
                 checked += 1
@@ -211,10 +250,10 @@ class FalsePositiveWindow(QMainWindow):
         for hit in hits:
             item = QTreeWidgetItem([
                 os.path.basename(hit.path), LAYER_TEXT.get(hit.layer, hit.layer),
-                elide(hit.value, 80), hit.source, hit.signature, hit.verdict, hit.path])
+                elide(hit.value, 80), hit.source, "да" if hit.active else "нет"])
             item.setData(0, HIT_ROLE, hit)
+            item.setToolTip(0, hit.path)
             item.setToolTip(2, f"{hit.value}\n{hit.detail}".strip())
-            item.setToolTip(6, hit.path)
             color = QColor(*COLORS["active" if hit.active else "suppressed"])
             for col in range(len(COLUMNS)):
                 item.setForeground(col, QBrush(color))
@@ -245,7 +284,88 @@ class FalsePositiveWindow(QMainWindow):
     def _selected_hits(self) -> list[Hit]:
         return [item.data(0, HIT_ROLE) for item in self.tree.selectedItems()]
 
+    # ---------- описание и меню ----------
+    def _menu(self, pos):
+        hits = self._selected_hits()
+        if not hits:
+            return
+        menu = QMenu(self)
+        menu.addAction("Описание", self.describe)
+        menu.addSeparator()
+        menu.addAction("Убрать хэш из базы", self.ignore_hashes).setEnabled(
+            any(h.layer == "hash" and not h.excluded for h in hits))
+        menu.addAction("Отключить правило YARA", self.disable_rules).setEnabled(
+            any(h.layer == "yara" and not h.excluded for h in hits))
+        sub = menu.addMenu("Исключить программу")
+        sub.addAction("Из правил YARA", lambda: self.exclude_programs(["yara"]))
+        sub.addAction("Из базы хэшей", lambda: self.exclude_programs(["hash"]))
+        sub.addAction("Из YARA и хэшей", lambda: self.exclude_programs(["yara", "hash"]))
+        menu.addSeparator()
+        menu.addAction("Открыть в сканере", self._open_selected)
+        menu.addAction("Показать в проводнике", self._show_selected)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def describe(self):
+        hits = self._selected_hits()
+        if not hits:
+            return
+        hit = hits[0]
+        from ui.details import show_details
+        rows = [("Файл", hit.path), ("SHA-256", hit.sha256),
+                ("Слой", LAYER_TEXT.get(hit.layer, hit.layer)), ("Что сработало", hit.value),
+                ("Источник (база или правила)", hit.source), ("Подробности", hit.detail),
+                ("Подпись", hit.signature),
+                ("Связь с подписанной программой", hit.partner),
+                ("Слабое срабатывание", "да (PUA, HackTool, эвристика...)" if hit.weak else "нет"),
+                ("Исключено вручную", "да" if hit.excluded else "нет"),
+                ("Считается угрозой сейчас", "да" if hit.active else "нет"),
+                ("Оценка", hit.verdict)]
+        actions = []
+        if hit.layer == "hash" and not hit.excluded:
+            actions.append(("Убрать хэш из базы", lambda d: self._ignore([hit])))
+        if hit.layer == "yara" and not hit.excluded:
+            actions.append(("Отключить правило", lambda d: self._disable({hit.value: hit.source})))
+        if hit.layer in ("hash", "yara") and not hit.excluded:
+            actions.append(("Исключить программу из этого слоя",
+                            lambda d: self.exclude_programs([hit.layer], [hit])))
+        actions += [("Открыть в сканере", lambda d: self._open_path(hit.path)),
+                    ("Показать в проводнике", lambda d: fileops.show_in_explorer(hit.path))]
+        show_details(self, f"Срабатывание: {os.path.basename(hit.path)}", rows, actions,
+                     width=880)
+
     # ---------- действия ----------
+    def exclude_programs(self, layers: list[str] | None, hits: list[Hit] | None = None):
+        """Исключить файл (по SHA-256) из слоя хэшей и/или YARA: остальные слои действуют."""
+        hits = hits or self._selected_hits()
+        files = {h.sha256: h.path for h in hits if h.sha256}
+        if not files:
+            QMessageBox.information(self, "Исключить программу", "Выберите срабатывания")
+            return
+        if layers is None:
+            layers = sorted({h.layer for h in hits if h.layer in ("hash", "yara")}) or ["yara"]
+        what = " и ".join(overrides.FILE_LAYERS[x] for x in layers)
+        names = "\n".join(f"• {os.path.basename(p)}" for p in list(files.values())[:10])
+        answer = QMessageBox.question(
+            self, "Исключить программу",
+            f"Не проверять эти файлы по: {what}?\n\n{names}\n\nИсключение действует, пока "
+            "файл не изменится (по SHA-256); эвристика и другие слои продолжают работать. "
+            "Отменить можно в журнале действий или на вкладке «Убрано из баз».")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for digest, path in files.items():
+            overrides.exclude_file(digest, path, layers)
+        self._after_change()
+
+    def _ignore(self, hits):
+        for h in hits:
+            overrides.ignore_hash(h.value, h.path, h.source)
+        self._after_change()
+
+    def _disable(self, rules: dict):
+        for name, source in rules.items():
+            overrides.disable_rule(name, source)
+        self._after_change()
+
     def ignore_hashes(self):
         hits = [h for h in self._selected_hits() if h.layer == "hash" and not h.excluded]
         if not hits:
@@ -284,8 +404,11 @@ class FalsePositiveWindow(QMainWindow):
     def _after_change(self):
         self.refresh_excluded()
         self.journal_changed.emit()
-        # оценки в таблице пересчитываются повторной проверкой
-        if self.path_edit.text().strip():
+        # оценки в таблице пересчитываются повторной проверкой того же, что проверялось
+        # (после «Найти по журналам» в поле пути — подпись, а не путь)
+        if getattr(self, "_from_logs", False):
+            self.start_from_logs()
+        elif self.path_edit.text().strip():
             self.start()
 
     def refresh_excluded(self):
@@ -301,6 +424,12 @@ class FalsePositiveWindow(QMainWindow):
                                     info.get("added_at", "").replace("T", " ")])
             item.setData(0, HIT_ROLE, ("rule", name))
             self.excluded.addTopLevelItem(item)
+        for digest, info in data.get("files", {}).items():
+            layers = ", ".join(overrides.FILE_LAYERS.get(x, x) for x in info.get("layers", []))
+            item = QTreeWidgetItem(["Программа", digest, layers, info.get("path", ""),
+                                    info.get("added_at", "").replace("T", " ")])
+            item.setData(0, HIT_ROLE, ("file", digest))
+            self.excluded.addTopLevelItem(item)
 
     def restore_selected(self):
         chosen = [item.data(0, HIT_ROLE) for item in self.excluded.selectedItems()]
@@ -309,6 +438,8 @@ class FalsePositiveWindow(QMainWindow):
         for kind, value in chosen:
             if kind == "hash":
                 overrides.restore_hash(value)
+            elif kind == "file":
+                overrides.include_file(value)
             else:
                 overrides.enable_rule(value)
         self.refresh_excluded()
@@ -316,10 +447,16 @@ class FalsePositiveWindow(QMainWindow):
 
     def _open_selected(self):
         hits = self._selected_hits()
-        parent = self.parent()
-        if hits and parent is not None and hasattr(parent, "open_analyzer"):
-            parent.open_analyzer(hits[0].path)
-            parent.show_main()
+        if hits:
+            self._open_path(hits[0].path)
+
+    @staticmethod
+    def _open_path(path: str):
+        from ui.details import main_window
+        main = main_window()
+        if main is not None:
+            main.open_analyzer(path)
+            main.show_main()
 
     def _show_selected(self):
         hits = self._selected_hits()
@@ -329,3 +466,31 @@ class FalsePositiveWindow(QMainWindow):
     def closeEvent(self, event):
         self._cancel.set()
         super().closeEvent(event)
+
+
+def found_in_logs(days: int = LOG_DAYS) -> list[Path]:
+    """Файлы, которые находили защита (журнал защиты), проверки дисков, контроль запуска и
+    мониторинг сети (события recovery/activity) за days дней — только те, что ещё на месте."""
+    import time
+    from recovery import activity, threatlog
+    seen, result = set(), []
+
+    def add(path: str):
+        path = (path or "").strip().strip('"')
+        key = os.path.normcase(path)
+        if path and key not in seen and os.path.isfile(path):
+            seen.add(key)
+            result.append(Path(path))
+
+    for r in threatlog.merged(include_done=True):
+        if r["status"] != threatlog.DELETED:
+            add(r.get("path", ""))
+    for e in activity.read_events(since=time.time() - days * 86400):
+        details = e.get("details") or {}
+        if details.get("exe"):
+            add(details["exe"])
+        if e.get("kind") in ("threat", "launch"):
+            add(e.get("text", "").split(": ")[0])
+        for line in details.get("found") or []:
+            add(str(line).split(": ")[0])
+    return result

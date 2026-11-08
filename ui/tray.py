@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
@@ -5,6 +6,12 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 import appinfo
+from diag.log import get
+
+log = get("tray")
+# меню открывается над курсором, «Выход» — последний пункт, прямо под ним: отпускание
+# кнопки или второй щелчок сразу после открытия меню выходом не считаются
+EXIT_GUARD_SEC = 0.6
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -40,6 +47,28 @@ def load_app_icon() -> QIcon:
     return _draw_icon()
 
 
+RECOVERY = "recovery"  # центр восстановления целиком (вкладки — отдельные инструменты)
+RECOVERY_TOOLS = ("btnRestorePoint", "btnSfcDism", "btnSystemChecks")
+# все инструменты страницы «Инструменты»; первыми — восстановление, автозапуск, процессы
+TRAY_TOOLS = ((RECOVERY, "Восстановление системы"),
+              ("btnAutoruns", "Сканер автозапуска"),
+              ("btnProcessManager", "Диспетчер процессов"),
+              ("-", ""),
+              ("btnFileAnalyzer", "Сканирование папки/файла"),
+              ("btnMemoryDeep", "Поиск внедрённого кода"),
+              ("btnUsb", "USB-накопители"),
+              ("btnDrivers", "Уязвимые драйверы"),
+              ("btnExtensions", "Расширения браузеров"),
+              ("btnLinkCheck", "Проверка ссылки и файла"),
+              ("btnPasswordLeak", "Проверка пароля по утечкам"),
+              ("btnVpn", "VPN"),
+              ("-", ""),
+              ("btnRestorePoint", "Создать точку восстановления"),
+              ("btnSfcDism", "Проверка целостности (SFC/DISM)"),
+              ("btnSystemChecks", "Проверка системы"),
+              ("btnUndoJournal", "Журнал"))
+
+
 class TrayIcon(QSystemTrayIcon):
     def __init__(self, window, icon: QIcon):
         super().__init__(icon, window)
@@ -56,13 +85,16 @@ class TrayIcon(QSystemTrayIcon):
 
         tools = menu.addMenu("Инструменты")  # подменю раскрывается при наведении
         self.tool_actions = {}  # кнопка инструмента → пункт меню (скрыт, если запрещён)
-        for button_id, text in (("btnAutoruns", "Сканер автозапуска"),
-                                ("btnProcessManager", "Диспетчер процессов"),
-                                ("btnFileAnalyzer", "Сканирование папки/файла"),
-                                ("btnSystemChecks", "Проверка системы"),
-                                ("btnUsb", "USB-накопители")):
+        for button_id, text in TRAY_TOOLS:
+            if button_id == "-":
+                tools.addSeparator()
+                continue
             action = tools.addAction(text)
-            action.triggered.connect(lambda checked=False, b=button_id: window.run_feature(b))
+            if button_id == RECOVERY:
+                action.triggered.connect(lambda checked=False: window.open_recovery_center())
+            else:
+                action.triggered.connect(
+                    lambda checked=False, b=button_id: window.run_feature(b))
             self.tool_actions[button_id] = action
 
         self.settings_action = menu.addAction("Настройки")
@@ -70,18 +102,39 @@ class TrayIcon(QSystemTrayIcon):
             lambda checked=False: window.show_main("Настройки"))
         menu.addSeparator()
         self.exit_action = menu.addAction("Выход")
-        self.exit_action.triggered.connect(lambda checked=False: window.quit_app())
+        self.exit_action.triggered.connect(self._on_exit)
+        self._menu_shown = 0.0
+        menu.aboutToShow.connect(self._on_menu_shown)
 
         self.setContextMenu(menu)
         self._menu = menu  # меню должно жить, пока жив значок
         self.activated.connect(self._on_activated)
+
+    def apply_access(self, allowed) -> None:
+        """Запрещённые инструменты (ui/access.allowed) в меню не показываются."""
+        for button_id, action in self.tool_actions.items():
+            visible = any(map(allowed, RECOVERY_TOOLS)) if button_id == RECOVERY                 else allowed(button_id)
+            action.setVisible(visible)
 
     def set_exit_allowed(self, allowed: bool) -> None:
         """Запрет закрытия программы (general/block_exit): пункт «Выход» неактивен."""
         self.exit_action.setEnabled(allowed)
         self.exit_action.setText("Выход" if allowed else "Выход (запрещён в настройках)")
 
+    def _on_menu_shown(self):
+        self._menu_shown = time.monotonic()
+        log.info("Открыто меню значка в трее")
+
+    def _on_exit(self, checked=False):
+        since = time.monotonic() - self._menu_shown
+        if since < EXIT_GUARD_SEC:
+            log.warning("«Выход» нажат через %.2f с после открытия меню — похоже на случайный "
+                        "щелчок, не выходим", since)
+            return
+        self.window_ref.quit_app()
+
     def _on_activated(self, reason):
+        log.debug("Значок в трее: %s", getattr(reason, "name", reason))
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
                       QSystemTrayIcon.ActivationReason.DoubleClick):
             self.window_ref.show_main()

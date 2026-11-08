@@ -402,6 +402,14 @@ def enable_system_proxy(path: str = INTERNET_SETTINGS) -> dict:
 def restore_system_proxy(old: dict, path: str = INTERNET_SETTINGS) -> None:
     write_proxy(old, path)
     _save_backup(None)
+    if path == INTERNET_SETTINGS:
+        journal.forget("vpn_proxy_restore")
+
+
+@journal.active_check("vpn_proxy_restore")
+def _proxy_active(d: dict) -> bool:
+    from ui import settings as cfg
+    return bool(cfg.get("vpn/proxy_backup"))
 
 
 @journal.undo_op("vpn_proxy_restore")

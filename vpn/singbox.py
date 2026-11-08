@@ -37,7 +37,8 @@ def find_singbox() -> str:
 
 def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
                  direct_apps: list[str] | None = None, block_quic: bool = False,
-                 block_udp: bool = False, dns_server: str = "1.1.1.1") -> dict:
+                 block_udp: bool = False, dns_server: str = "1.1.1.1",
+                 windows_dns: dict | None = None) -> dict:
     """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray).
 
     xray_exe — полный путь: мимо туннеля пропускается только этот файл (не любой xray.exe).
@@ -50,7 +51,23 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
     xray.server_address).
     direct_apps — программы (полные пути), которые идут напрямую, мимо VPN.
     block_quic — UDP 443 отклоняется (браузер переходит на TCP); block_udp — весь UDP
-    отклоняется, а DNS через сервер идёт по TCP (иначе он тоже был бы UDP)."""
+    отклоняется, а DNS через сервер идёт по TCP (иначе он тоже был бы UDP).
+    windows_dns — DNS, заданный вручную в Windows 11 (vpn/windns.py): A-запросы — на его
+    сервер IPv4, AAAA — на сервер IPv6 (тоже через туннель); dns_server — для остального."""
+    net = "tcp" if block_udp else "udp"
+    windows_dns = windows_dns or {}
+    servers = [
+        # обычный DNS по UDP через сервер: DoH держит одно долгое соединение HTTP/2,
+        # оно через туннель обрывается, и все запросы на нём разом падают
+        {"type": net, "tag": "dns-remote", "server": dns_server, "detour": "proxy"},
+        {"type": "local", "tag": "dns-local"},
+    ]
+    dns_rules = []
+    for family, query, tag in (("v4", "A", "dns-win4"), ("v6", "AAAA", "dns-win6")):
+        chosen = (windows_dns.get(family) or [None])[0]
+        if chosen and not (family == "v6" and ip_mode == "ipv4"):  # IPv6 в туннеле закрыт
+            servers.append({"type": net, "tag": tag, "server": chosen, "detour": "proxy"})
+            dns_rules.append({"query_type": [query], "action": "route", "server": tag})
     address = [TUN_ADDRESS, TUN_ADDRESS6]
     extra = [] if ip_mode in ("prefer_ipv6", "ipv6") else [{"ip_version": 6, "action": "reject"}]
     if block_udp:
@@ -60,13 +77,8 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
     return {
         "log": {"level": "warn", "timestamp": True},
         "dns": {
-            "servers": [
-                # обычный DNS по UDP через сервер: DoH держит одно долгое соединение HTTP/2,
-                # оно через туннель обрывается, и все запросы на нём разом падают
-                {"type": "tcp" if block_udp else "udp", "tag": "dns-remote",
-                 "server": dns_server, "detour": "proxy"},
-                {"type": "local", "tag": "dns-local"},
-            ],
+            "servers": servers,
+            **({"rules": dns_rules} if dns_rules else {}),
             "final": "dns-remote",
             "strategy": "ipv4_only" if ip_mode == "ipv4" else "prefer_ipv6",
         },

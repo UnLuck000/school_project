@@ -6,11 +6,12 @@
 """
 import ipaddress
 import json
+import os
 import uuid
 from dataclasses import dataclass
 
 from recovery import journal
-from recovery.journal import undo_op
+from recovery.journal import active_check, undo_op
 from recovery.system import run_powershell
 
 GROUP = "myav"
@@ -82,6 +83,36 @@ def _remove(names: list[str]) -> None:
         raise OSError(err.strip() or f"код {code}")
 
 
+RULES_KEY = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+
+
+def rules_present(names: list[str]) -> list[bool]:
+    """Есть ли правила с такими именами (быстро: по реестру, без PowerShell)."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, RULES_KEY) as key:
+            found = []
+            for name in names:
+                try:
+                    winreg.QueryValueEx(key, name)
+                    found.append(True)
+                except OSError:
+                    found.append(False)
+            return found
+    except OSError:
+        return [True] * len(names)  # не прочитали — считаем, что есть
+
+
+@active_check("firewall_remove")
+def _block_active(d: dict) -> bool:
+    return any(rules_present(d["names"]))
+
+
+@active_check("firewall_restore")
+def _unblock_active(d: dict) -> bool:
+    return not any(rules_present([r["name"] for r in d["rules"]]))
+
+
 @undo_op("firewall_remove")
 def _undo_block(d: dict) -> str:
     _remove(d["names"])
@@ -93,6 +124,9 @@ def unblock(rule_names: list[str], target: str) -> None:
     rules = {r.name: r for r in list_rules()}
     saved = [rules[n] for n in rule_names if n in rules]
     _remove(rule_names)
+    # блокировка из журнала снята здесь — её запись убирается, второй не появляется
+    if journal.forget("firewall_remove", lambda d: set(d["names"]) & set(rule_names)):
+        return
     journal.log_action(f"Брандмауэр: снята блокировка {target}", "firewall_restore",
                        {"rules": [r.__dict__ for r in saved], "target": target})
 
@@ -110,6 +144,87 @@ def _undo_unblock(d: dict) -> str:
         if code != 0:
             raise OSError(err.strip() or f"код {code}")
     return f"Блокировка возвращена: {d['target']}"
+
+
+@dataclass
+class SystemRule:
+    """Правило брандмауэра Windows (встроенное или другой программы) — только для просмотра."""
+    name: str
+    title: str
+    direction: str     # Входящее | Исходящее
+    action: str        # Разрешить | Блокировать
+    target: str        # программа, служба, адреса, порты
+    enabled: bool
+    group: str
+    own: bool          # создано этой программой (группа myav)
+
+
+_indirect: dict[str, str] = {}
+
+
+def _resolve(text: str) -> str:
+    """«@FirewallAPI.dll,-28502» → текст из ресурсов (SHLoadIndirectString)."""
+    if not text.startswith("@"):
+        return text
+    if text not in _indirect:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        ok = ctypes.windll.shlwapi.SHLoadIndirectString(text, buf, 1024, None) == 0
+        _indirect[text] = buf.value if ok and buf.value else text
+    return _indirect[text]
+
+
+def parse_rule_string(raw: str) -> dict[str, list[str]]:
+    """«v2.33|Action=Block|Dir=Out|App=...|» → {поле: [значения]} (поля повторяются)."""
+    fields: dict[str, list[str]] = {}
+    for part in raw.split("|")[1:]:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            fields.setdefault(key, []).append(value)
+    return fields
+
+
+def list_system_rules() -> list[SystemRule]:
+    """Все правила брандмауэра Windows (встроенные, других программ и свои) — из реестра,
+    за доли секунды: Get-NetFirewallRule с фильтрами адресов на тысячах правил идёт минутами."""
+    import winreg
+    rules = []
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, RULES_KEY)
+    except OSError:
+        return rules
+    with key:
+        i = 0
+        while True:
+            try:
+                rule_id, raw, _ = winreg.EnumValue(key, i)
+            except OSError:
+                break
+            i += 1
+            if not isinstance(raw, str):
+                continue
+            f = parse_rule_string(raw)
+            first = lambda k: (f.get(k) or [""])[0]  # noqa: E731
+            parts = []
+            if first("App"):
+                parts.append(os.path.expandvars(first("App")))
+            if first("Svc"):
+                parts.append("служба " + first("Svc"))
+            addresses = f.get("RA4", []) + f.get("RA6", [])
+            if addresses:
+                parts.append("адреса " + ", ".join(addresses[:4]) +
+                             ("…" if len(addresses) > 4 else ""))
+            ports = f.get("RPort", []) + f.get("LPort", [])
+            if ports:
+                parts.append("порты " + ", ".join(ports[:4]))
+            group = _resolve(first("EmbedCtxt"))
+            rules.append(SystemRule(
+                rule_id, _resolve(first("Name")) or rule_id,
+                "Исходящее" if first("Dir") == "Out" else "Входящее",
+                "Блокировать" if first("Action") == "Block" else "Разрешить",
+                "; ".join(parts) or "все", first("Active").upper() == "TRUE",
+                group, rule_id.startswith("myav-") or group == GROUP))
+    return rules
 
 
 def list_rules() -> list[Rule]:

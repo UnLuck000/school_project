@@ -72,16 +72,18 @@ reports\\activity рядом с программой, его можно откр
   не сохраняются и никуда не передаются;
 • изменения настроек программы, успешный и неудачный ввод пароля дополнительных настроек;
 • время запуска и завершения программы, обновления баз;
-• версия программы и версия Windows.
+• версия программы и Windows, характеристики компьютера: процессор, видеокарта, память,
+  накопители, сетевые адаптеры (без IP- и MAC-адресов), антивирусы и брандмауэр;
+• технический журнал logs\\app.log: нажатия кнопок, открытие окон, ошибки, внешние команды,
+  время работы функций — для поиска неисправностей.
 
 Чего в отчёте нет: содержимого ваших файлов, паролей, истории браузера, переписки,
 нажатий клавиш, снимков экрана. Имя вашей учётной записи и компьютера в отчёт не
 попадает: путь вида C:\\Users\\<имя> записывается как %USERPROFILE%, само имя — как
 %USERNAME%, имя компьютера — как %COMPUTERNAME%, папки других пользователей —
-%OTHERUSER%. Имена ваших файлов и папок заменяются случайным набором из 8
-букв и цифр (расширение остаётся: «Договор Иванова.docx» → «k3f9a1zq.docx»); коды
-свои в каждом отчёте. Не заменяются стандартные папки (Загрузки, Рабочий стол, AppData)
-и файлы в системных папках (Windows, Program Files, ProgramData).
+%OTHERUSER%. IP-адреса компьютера (локальные и внешний) и MAC-адреса не записываются
+(%MYIP%, %LANIP%, %MAC%); у VPN — ни адреса сервера (%VPNSERVER1%), ни имени профиля
+(%PROFILE1%), только адреса сайтов, к которым шли запросы. Имена файлов остаются.
 
 Раз в {PERIOD_DAYS} дня (отсчёт от первого запуска) программа готовит отчёт за прошедший
 период для отправки автору программы — для исследования качества обнаружения и ложных
@@ -115,6 +117,13 @@ def record(kind: str, text: str, **details) -> None:
     item = {"time": time.time(), "kind": kind, "text": text}
     if details:
         item["details"] = details
+    try:
+        from diag.log import get
+        get("activity").info("[%s] %s%s", kind, text,
+                             f" {json.dumps(details, ensure_ascii=False, default=str)}"
+                             if details else "")
+    except Exception:
+        pass
     try:
         with _lock:
             ACTIVITY_DIR.mkdir(parents=True, exist_ok=True)
@@ -177,109 +186,19 @@ def _detail_lines(details: dict) -> list[str]:
     return lines
 
 
-ANON_FOLDERS = ("LOCALAPPDATA", "APPDATA", "TEMP", "USERPROFILE", "PUBLIC")
-OTHER_USER = "%OTHERUSER%"  # профиль другого пользователя
-
-
 def anonymize(text: str, env: dict | None = None) -> str:
-    """Убирает из текста имя учётной записи и компьютера: папки профиля → %USERPROFILE% и
-    т. п., имена → %USERNAME%, %COMPUTERNAME%, профили других пользователей → OTHER_USER."""
-    env = os.environ if env is None else env
-    pairs = []
-    for name in ANON_FOLDERS:  # сначала длинные пути: %LOCALAPPDATA% внутри %USERPROFILE%
-        value = (env.get(name) or "").rstrip("\\/")
-        if len(value) > 3:
-            pairs.append((value, f"%{name}%"))
-    pairs.sort(key=lambda p: len(p[0]), reverse=True)
-    for value, token in pairs:
-        text = re.sub(re.escape(value) + r"(?=[\\/\s\"';:,)]|$)", lambda m: token, text,
-                      flags=re.I | re.M)
-    text = re.sub(r"(?i)\b([a-z]:\\users\\)(?!%|public\\|default\\|all users\\)[^\\\s\"]+",
-                  lambda m: m.group(1) + OTHER_USER, text)
-    names = [(env.get(n) or "", n) for n in ("USERNAME", "COMPUTERNAME", "USERDOMAIN")]
-    for value, name in sorted(names, key=lambda p: len(p[0]), reverse=True):  # IVAN-PC до Ivan
-        if len(value) >= 3:
-            text = re.sub(r"(?<![\w%])" + re.escape(value) + r"(?![\w%])", f"%{name}%", text,
-                          flags=re.I)
-    return text
-
-
-# Имена файлов и папок пользователя заменяются случайными 8 символами (своими в каждом
-# отчёте; одно имя — один и тот же код, расширение остаётся). Не заменяются системные
-# места (там имена служебные, а для разбора срабатываний важны) и стандартные папки.
-TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-SYSTEM_PREFIXES = ("c:\\windows\\", "c:\\program files\\", "c:\\program files (x86)\\",
-                   "c:\\programdata\\", "%localappdata%\\programs\\",
-                   "%localappdata%\\microsoft\\", "%appdata%\\microsoft\\")
-STANDARD_DIRS = {
-    "users", "appdata", "local", "locallow", "roaming", "temp", "desktop", "downloads",
-    "documents", "pictures", "music", "videos", "onedrive", "microsoft", "windows",
-    "start menu", "programs", "startup", "packages", "cache",
-    "рабочий стол", "загрузки", "документы", "изображения", "музыка", "видео",
-}
-PATH_RE = re.compile(r'(?:[A-Za-z]:\\|%[A-Z]+%\\|\\\\)[^:;"|<>*?\r\n\t]*')
-QUOTED_RE = re.compile(r"«([^«»\\/:]+\.[A-Za-z0-9]{1,8})»")  # «имя.ext» в заголовках журнала
-CUTS = (" — ", " → ", ", ", "  ")
-
-
-class NameHider:
-    def __init__(self):
-        import secrets
-        self._names: dict[str, str] = {}
-        self._choice = secrets.choice
-
-    def token(self, name: str) -> str:
-        stem, dot, ext = name.rpartition(".")
-        if not dot or not stem or " " in ext or len(ext) > 8:
-            stem, ext = name, ""
-        key = stem.lower()
-        if key not in self._names:
-            code = "".join(self._choice(TOKEN_ALPHABET) for _ in range(8))
-            while code in self._names.values():
-                code = "".join(self._choice(TOKEN_ALPHABET) for _ in range(8))
-            self._names[key] = code
-        return self._names[key] + (f".{ext.lower()}" if ext else "")
-
-    def _path(self, path: str) -> str:
-        low = path.lower()
-        if low.startswith(SYSTEM_PREFIXES) or low.rstrip("\\") in ("c:\\windows",
-                                                                    "c:\\program files"):
-            return path
-        head, _, rest = path.partition("\\")
-        if path.startswith("\\\\"):  # \\сервер\папка: имя сервера тоже личное
-            head, rest = "\\\\", path[2:]
-            parts = rest.split("\\")
-            return head + "\\".join(self.token(p) if p else p for p in parts)
-        parts = rest.split("\\")
-        out = [p if (not p or p.lower() in STANDARD_DIRS or p.startswith("%")) else self.token(p)
-               for p in parts]
-        return head + "\\" + "\\".join(out)
-
-    def __call__(self, text: str) -> str:
-        def path_sub(m):
-            raw = m.group(0)
-            cut = min([raw.find(c) for c in CUTS if c in raw] + [len(raw)])
-            paren = raw.find(" (")
-            while paren != -1 and paren < cut and raw.startswith(" (x86)", paren):
-                paren = raw.find(" (", paren + 1)
-            if paren != -1:
-                cut = min(cut, paren)
-            path = raw[:cut].rstrip(" .")
-            tail = raw[len(path):]
-            return self._path(path) + tail
-
-        text = PATH_RE.sub(path_sub, text)
-        return QUOTED_RE.sub(lambda m: f"«{self.token(m.group(1))}»", text)
-
-
-def hide_names(text: str) -> str:
-    return NameHider()(text)
+    """Имя учётной записи, компьютера и папки профиля (diag.anon.anonymize_user)."""
+    from diag import anon
+    return anon.anonymize_user(text, env)
 
 
 def build_report(since: float = 0.0, until: float | None = None) -> str:
-    """Текст отчёта без имён пользователя и компьютера (anonymize) и без имён его файлов
-    и папок (hide_names)."""
-    return hide_names(anonymize(_build_report(since, until)))
+    """Текст отчёта без имени пользователя и компьютера, без IP-адресов компьютера и
+    адресов VPN-серверов, имена профилей VPN — %PROFILEn% (diag.anon.scrub). Имена файлов
+    остаются как есть."""
+    from diag import anon
+    anon.register_vpn_profiles()
+    return anon.scrub(_build_report(since, until))
 
 
 def _build_report(since: float, until: float | None) -> str:
@@ -290,10 +209,14 @@ def _build_report(since: float, until: float | None) -> str:
     from scanner.whitelist import load_whitelist
 
     shown_until = until or time.time()  # без until — все события, даже этой миллисекунды
-    out = [f"Отчёт {appinfo.APP_NAME} {appinfo.VERSION}",
+    from diag import edition, specs
+    out = [f"Отчёт {appinfo.APP_NAME} {appinfo.VERSION} ({edition.title()} версия)",
            f"Windows: {platform.platform()}",
            f"Период: {_when(since) if since else 'с начала'} — {_when(shown_until)}",
-           f"Составлен: {_when(time.time())}", ""]
+           f"Составлен: {_when(time.time())}"]
+    cached = specs.cached()
+    out += ["", "== Компьютер =="] + (specs.describe(cached) if cached else
+                                      ["характеристики ещё не собраны"]) + [""]
 
     events = read_events(since, until)
     groups: dict[str, list[dict]] = {}

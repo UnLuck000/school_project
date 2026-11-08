@@ -174,6 +174,8 @@ class FileView(QWidget):
         self.status.emit("", 0)
 
     def on_done(self, report: FileReport):
+        from diag import features
+        features.end_if_active("scan.file", True, verdict=getattr(report, "verdict", ""))
         self._busy = False
         self.busy_changed.emit(False)
         self.report = report

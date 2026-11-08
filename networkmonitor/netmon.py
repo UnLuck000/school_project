@@ -12,6 +12,7 @@ from networkmonitor.dns_etw import DnsQuery, DnsWatcher
 from networkmonitor.domains import load_domains, load_ja3, looks_generated, lookup
 from networkmonitor.ioc import load_ip_blocklist
 from networkmonitor.tls import TlsEvent, TlsWatcher
+from scanner import exclusions
 from scanner.engine import check_file, revocation_enabled
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist, trusted_hashes
@@ -79,7 +80,9 @@ class NetworkMonitor:
         self._rules = None
         self._reported: set[tuple] = set()
         self._verdicts: dict[tuple, str] = {}
-        self._sigs: dict[tuple, tuple[str, bool]] = {}
+        self._sigs: dict[tuple, tuple[str, bool, str | None]] = {}  # текст, действ., издатель
+        self._digests: dict[tuple, str] = {}
+        self._excl: tuple[float, dict] = (0.0, {})
 
         self._domains: dict[str, str] = {}
         self._ja3: dict[str, str] = {}
@@ -160,10 +163,46 @@ class NetworkMonitor:
                 info = inspect_signature(path)
                 if revocation_enabled():
                     info = check_revocation(path, info)
-                self._sigs[key] = (describe(info), info.status == VALID)
+                valid = info.status == VALID
+                self._sigs[key] = (describe(info), valid, info.publisher if valid else None)
             except Exception:
-                self._sigs[key] = ("", False)
-        return self._sigs[key]
+                self._sigs[key] = ("", False, None)
+        return self._sigs[key][:2]
+
+    def program_key(self, exe: str) -> str:
+        """Ключ исключения программы (scanner.exclusions.program_key): издатель подписи
+        или SHA-256 файла."""
+        if not exe:
+            return ""
+        self._signature(exe)
+        try:
+            key = (exe, Path(exe).stat().st_mtime)
+        except OSError:
+            return ""
+        publisher = self._sigs.get(key, ("", False, None))[2]
+        if publisher:
+            return exclusions.program_key(exe, publisher)
+        if key not in self._digests:
+            import hashlib
+            digest = hashlib.sha256()
+            try:
+                with open(exe, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        digest.update(chunk)
+            except OSError:
+                return ""
+            self._digests[key] = digest.hexdigest()
+        return exclusions.program_key(exe, sha256=self._digests[key])
+
+    def excluded(self, exe: str) -> bool:
+        """Программа в исключениях мониторинга сети (перечитываются раз в 5 с)."""
+        if not exe:
+            return False
+        stamp, data = self._excl
+        if time.monotonic() - stamp > 5:
+            data = exclusions.load().get("network", {})
+            self._excl = (time.monotonic(), data)
+        return bool(data) and self.program_key(exe) in data
 
     def _signature_text(self, exe: str) -> str:
         return self._signature(exe)[0]
@@ -213,6 +252,8 @@ class NetworkMonitor:
         if rule in QUIET_RULES and self.quiet_reason(pid, name, exe):
             return
         verdict = self._verdict(exe)
+        if not verdict and self.excluded(exe):
+            return  # исключена пользователем (кроме случая, когда файл распознан угрозой)
         if verdict:
             level = "critical"
             detail += f"; файл программы распознан: {verdict}"

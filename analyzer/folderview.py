@@ -1,6 +1,7 @@
 """Сканирование папки: файлы и папки этого уровня, проверка каждого файла движком, действия
-по правой кнопке и свойства папки. Вложенная папка до 128 МБ проверяется целиком (со всеми
-файлами внутри), крупнее — только считается её размер."""
+по правой кнопке и свойства папки. Вложенная папка до 16 МБ проверяется целиком (со всеми
+файлами внутри); у более тяжёлой подсчёт останавливается, как только она перевалила за 16 МБ
+(в столбце размера — «> 16 МБ»), и она не проверяется."""
 import os
 import queue
 import threading
@@ -28,7 +29,8 @@ SORT_ROLE = Qt.ItemDataRole.UserRole + 2
 IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 3
 COLORS = {"threat": (255, 128, 128), "suspicious": (255, 190, 110), "error": (255, 255, 170)}
 COLUMNS = ["Имя", "Тип", "Размер", "Изменён", "Проверка"]
-DIR_LIMIT = 128 * 1024 ** 2  # вложенная папка тяжелее — не проверяется
+DIR_LIMIT = 16 * 1024 ** 2  # вложенная папка тяжелее — не проверяется (и не досчитывается)
+LIMIT_TEXT = "16 МБ"
 
 
 class _Bridge(QObject):
@@ -208,7 +210,7 @@ class FolderView(QWidget):
         folders = len(entries) - len(files)
         self.summary.setStyleSheet("padding: 8px; border-radius: 6px; font-size: 11pt;")
         self.summary.setText(f"Папка {self.folder}: файлов {len(files)}, папок {folders}. "
-                             "Проверяю файлы и вложенные папки до 128 МБ...")
+                             f"Проверяю файлы и вложенные папки до {LIMIT_TEXT}...")
         self.props_tree.clear()
         self.props_tree.addTopLevelItem(QTreeWidgetItem(["Считаю...", ""]))
         sized: queue.Queue = queue.Queue()  # папки с посчитанным размером → проверка
@@ -226,7 +228,8 @@ class FolderView(QWidget):
         for folder in dirs:
             if cancel.is_set():
                 break
-            files, size, count, opened = fileops.folder_files(folder, DIR_LIMIT, cancel)
+            files, size, count, opened = fileops.folder_files(folder, DIR_LIMIT, cancel,
+                                                                stop_over=True)
             if cancel.is_set():
                 break
             self.bridge.dir_size.emit(request, folder, size, count, opened)
@@ -334,13 +337,18 @@ class FolderView(QWidget):
             item.setText(2, "")
             item.setText(4, "Нет доступа")
             return
+        item.setData(2, SORT_ROLE, size)
+        if size > DIR_LIMIT:  # подсчёт остановлен на пороге: точный размер неизвестен
+            self._big += 1
+            item.setText(2, f"> {LIMIT_TEXT}")
+            item.setToolTip(2, f"Больше {LIMIT_TEXT}: дальше не считалось")
+            text = f"Вес > {LIMIT_TEXT}, не проверена"
+            item.setText(4, text)
+            item.setToolTip(4, text)
+            return
         item.setText(2, fileops.human_size(size))
         item.setToolTip(2, f"{fileops.exact_size(size)}, файлов: {count}")
-        item.setData(2, SORT_ROLE, size)
-        if size > DIR_LIMIT:
-            self._big += 1
-            text = "Вес > 128 МБ, не проверена"
-        elif count == 0:
+        if count == 0:
             text = "Пустая"
         else:
             text = "Ожидает проверки"
@@ -381,7 +389,7 @@ class FolderView(QWidget):
         self.summary.setStyleSheet(
             f"padding: 8px; border-radius: 6px; font-size: 11pt; font-weight: 600; "
             f"background: rgb{rgb}; color: {text_color(rgb).name()};")
-        skipped = (f" Не проверены вложенные папки тяжелее 128 МБ: {self._big}." if self._big
+        skipped = (f" Не проверены вложенные папки тяжелее {LIMIT_TEXT}: {self._big}." if self._big
                    else "")
         self.summary.setText(f"{self.folder}: {text}.{skipped}")
         from recovery import activity

@@ -297,8 +297,11 @@ class BeaconPanel(QWidget):
 
 
 class BlockPanel(QWidget):
-    """Правила брандмауэра, созданные программой."""
+    """Правила брандмауэра, созданные программой, и (галочка) все правила Windows и других
+    программ — их только смотреть: снимать можно лишь свои блокировки."""
     COLUMNS = [("Правило", 330), ("Направление", 100), ("Цель", 320), ("Включено", 80)]
+    SYSTEM_COLUMNS = [("Правило", 300), ("Направление", 100), ("Действие", 100),
+                      ("Цель", 330), ("Включено", 80), ("Группа", 220)]
 
     def __init__(self):
         super().__init__()
@@ -324,6 +327,63 @@ class BlockPanel(QWidget):
         self.table = _table(self.COLUMNS)
         layout.addWidget(self.table, 1)
 
+        # все правила брандмауэра: встроенные Windows и других программ
+        from PySide6.QtWidgets import QCheckBox, QComboBox, QLineEdit
+        system_row = QHBoxLayout()
+        self.chk_system = QCheckBox("Показать правила Windows и других программ")
+        self.chk_system.toggled.connect(self._toggle_system)
+        self.system_filter = QComboBox()
+        self.system_filter.addItems(["Блокирующие", "Все", "Только включённые"])
+        self.system_filter.currentIndexChanged.connect(lambda _: self._fill_system())
+        self.system_search = QLineEdit()
+        self.system_search.setPlaceholderText("Поиск: имя, программа, адрес, группа")
+        self.system_search.textChanged.connect(lambda _: self._fill_system())
+        system_row.addWidget(self.chk_system)
+        system_row.addWidget(self.system_filter)
+        system_row.addWidget(self.system_search, 1)
+        layout.addLayout(system_row)
+        self.system_status = QLabel("")
+        layout.addWidget(self.system_status)
+        self.system_table = _table(self.SYSTEM_COLUMNS)
+        layout.addWidget(self.system_table, 2)
+        self.system_rules: list = []
+        for w in (self.system_filter, self.system_search, self.system_status, self.system_table):
+            w.setVisible(False)
+
+    def _toggle_system(self, on: bool) -> None:
+        for w in (self.system_filter, self.system_search, self.system_status, self.system_table):
+            w.setVisible(on)
+        if on:
+            self.system_rules = firewall.list_system_rules()
+            self._fill_system()
+
+    def _fill_system(self) -> None:
+        mode, query = self.system_filter.currentIndex(), self.system_search.text().lower()
+        shown = []
+        for r in self.system_rules:
+            if mode == 0 and r.action != "Блокировать":
+                continue
+            if mode == 2 and not r.enabled:
+                continue
+            if query and query not in f"{r.title} {r.target} {r.group}".lower():
+                continue
+            shown.append(r)
+        self.system_table.setSortingEnabled(False)
+        self.system_table.setRowCount(len(shown))
+        for row, r in enumerate(shown):
+            group = r.group + (" (эта программа)" if r.own else "")
+            for col, text in enumerate([r.title, r.direction, r.action, r.target,
+                                        "да" if r.enabled else "нет", group]):
+                item = QTableWidgetItem(text)
+                item.setToolTip(text)
+                self.system_table.setItem(row, col, item)
+        self.system_table.setSortingEnabled(True)
+        blocked = sum(r.action == "Блокировать" for r in self.system_rules)
+        self.system_status.setText(
+            f"Правил брандмауэра всего: {len(self.system_rules)}, блокирующих: {blocked}, "
+            f"показано: {len(shown)}. Правила Windows и других программ здесь только видны; "
+            "менять их — в «Мониторе брандмауэра Защитника Windows» (wf.msc).")
+
     def refresh(self) -> None:
         self.status.setText("Читаю правила брандмауэра...")
         threading.Thread(target=lambda: self.bridge.rules.emit(firewall.list_rules()),
@@ -341,6 +401,9 @@ class BlockPanel(QWidget):
                 item.setToolTip(text)
                 self.table.setItem(row, col, item)
         self.status.setText(f"Блокировок программы: {len(rules)}")
+        if self.chk_system.isChecked():
+            self.system_rules = firewall.list_system_rules()
+            self._fill_system()
 
     def _block_ip(self) -> None:
         text, ok = QInputDialog.getText(self, "Блокировка", "Внешний IP-адрес:")

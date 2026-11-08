@@ -12,6 +12,11 @@ from analyzer.folderview import FolderView
 from analyzer.window import FileView
 
 
+def _folder_done(*_):
+    from diag import features
+    features.end_if_active("scan.folder", True)
+
+
 class ScanPage(QWidget):
     status = Signal(str, int)
     quarantine_changed = Signal()
@@ -65,6 +70,7 @@ class ScanPage(QWidget):
         self.folder_view.scan_file.connect(self.scan)
         self.folder_view.scan_folder.connect(self.scan)
         self.folder_view.scan_done.connect(self.folder_scanned.emit)
+        self.folder_view.scan_done.connect(_folder_done)
         self.file_view.busy_changed.connect(lambda busy: self.btn_scan.setEnabled(not busy))
         self._current: str | None = None
         self.btn_up.setEnabled(False)
@@ -99,12 +105,15 @@ class ScanPage(QWidget):
     def scan(self, path: str) -> None:
         """Файл: подробный анализ; папка: список и проверка её файлов."""
         path = os.path.normpath(os.path.expandvars(path))
+        from diag import features
         if os.path.isdir(path):
+            features.begin("scan.folder")
             self._current = path
             self.path_edit.setText(path)
             self.stack.setCurrentWidget(self.folder_view)
             self.folder_view.set_folder(path)
         elif os.path.isfile(path):
+            features.begin("scan.file")
             if self.file_view.load_file(path):
                 self._current = path
                 self.path_edit.setText(path)

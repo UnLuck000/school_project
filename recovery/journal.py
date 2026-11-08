@@ -13,12 +13,22 @@ BACKUP_DIR = JOURNAL_DIR / "backup"
 
 _lock = threading.Lock()
 UNDO_HANDLERS: dict[str, Callable[[dict], str]] = {}
+# op → проверка «действие ещё в силе» (False — его уже сняли без журнала: отменять нечего)
+ACTIVE_CHECKS: dict[str, Callable[[dict], bool]] = {}
 
 
 def undo_op(name: str):
     """Декоратор: регистрирует функцию отката для операции с таким именем."""
     def decorator(func):
         UNDO_HANDLERS[name] = func
+        return func
+    return decorator
+
+
+def active_check(name: str):
+    """Декоратор: проверка, что действие операции name ещё в силе (см. cleanup)."""
+    def decorator(func):
+        ACTIVE_CHECKS[name] = func
         return func
     return decorator
 
@@ -47,6 +57,11 @@ def log_action(title: str, op: str, data: dict) -> str:
     """Записывает выполненное действие. op и data нужны для его отмены."""
     record = {"id": uuid.uuid4().hex, "time": datetime.now().isoformat(timespec="seconds"),
               "title": title, "op": op, "data": data, "undone": False, "undone_at": ""}
+    try:
+        from diag.log import get
+        get("journal").info("Действие: %s (%s)", title, op)
+    except Exception:
+        pass
     with _lock:
         JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
         with JOURNAL_FILE.open("a", encoding="utf-8") as f:
@@ -57,6 +72,64 @@ def log_action(title: str, op: str, data: dict) -> str:
 def read_all() -> list[dict]:
     with _lock:
         return _read()
+
+
+def forget(op: str, match: Callable[[dict], bool] | None = None) -> int:
+    """Убрать неотменённые записи операции op (match(data) — какие именно): действие снято
+    обычным путём (VPN отключился, блокировку сняли на странице «Сеть»), отменять нечего."""
+    with _lock:
+        records = _read()
+        kept = [r for r in records if r["undone"] or r["op"] != op
+                or (match is not None and not _safe(match, r["data"]))]
+        if len(kept) != len(records):
+            _write(kept)
+        return len(records) - len(kept)
+
+
+def _safe(func, data) -> bool:
+    try:
+        return bool(func(data))
+    except Exception:
+        return False
+
+
+def _still_active(record: dict) -> bool:
+    check = ACTIVE_CHECKS.get(record["op"])
+    if check is None:
+        return True
+    try:
+        return bool(check(record["data"]))
+    except Exception:  # проверить не удалось — запись остаётся
+        return True
+
+
+def cleanup() -> int:
+    """Убирает неотменённые записи, отмена которых ничего не сделает: действие уже снято
+    другим путём (ACTIVE_CHECKS) или это повтор того же действия с теми же данными (остаётся
+    последний). Возвращает, сколько записей убрано."""
+    with _lock:
+        records = _read()
+    seen: set[str] = set()
+    drop: set[str] = set()
+    for r in reversed(records):  # с конца: остаётся последняя запись из повторов
+        if r["undone"]:
+            continue
+        key = r["op"] + json.dumps(r["data"], sort_keys=True, ensure_ascii=False)
+        if key in seen or not _still_active(r):
+            drop.add(r["id"])
+        seen.add(key)
+    if not drop:
+        return 0
+    with _lock:
+        records = [r for r in _read() if r["id"] not in drop]
+        _write(records)
+    try:
+        from diag.log import get
+        get("journal").info("Журнал: убрано записей, которые уже сняты или повторяются: %d",
+                            len(drop))
+    except Exception:
+        pass
+    return len(drop)
 
 
 def undo(record_id: str) -> str:
@@ -71,7 +144,10 @@ def undo(record_id: str) -> str:
     if handler is None:
         raise ValueError("Для этого действия откат не поддерживается")
 
-    message = handler(record["data"])
+    from diag import features
+    with features.track("journal.undo") as run:
+        run.fact("op", record["op"])
+        message = handler(record["data"])
 
     with _lock:
         records = _read()

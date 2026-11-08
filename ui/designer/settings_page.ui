@@ -14,7 +14,6 @@
      <property name="title"><string>Запуск</string></property>
      <layout class="QVBoxLayout" name="layoutStartup">
       <item><widget class="QCheckBox" name="chkAutostart"><property name="toolTip"><string>Задание планировщика Windows при входе в систему, с наивысшими правами: программа запускается от администратора без окна UAC. Создать или убрать задание можно только из программы, запущенной от администратора.</string></property><property name="text"><string>Запускать вместе с Windows (с правами администратора)</string></property></widget></item>
-      <item><widget class="QCheckBox" name="chkVpnAutostart"><property name="toolTip"><string>При запуске программы VPN подключается к профилю, отмеченному «Профиль для автоподключения» в окне VPN. Если инструмент «VPN» запрещён, подключения не будет.</string></property><property name="text"><string>Подключать VPN при запуске программы</string></property></widget></item>
      </layout>
     </widget>
    </item>
@@ -52,8 +51,8 @@
    <item>
     <widget class="QPushButton" name="btnAdvanced">
      <property name="minimumSize"><size><width>0</width><height>34</height></size></property>
-     <property name="toolTip"><string>Раздел «Проверка» с дополнительными настройками и вкладка «Отладка». Нужен пароль администратора программы.</string></property>
-     <property name="text"><string>Открыть дополнительные настройки и отладку</string></property>
+     <property name="toolTip"><string>Режим администратора: разделы «Запуск», «Плановая проверка», «Проверка», «Запреты» и «Пароль администратора», отчёт о работе на странице «О программе». Нужен пароль администратора.</string></property>
+     <property name="text"><string>Режим администратора</string></property>
     </widget>
    </item>
    <item>
@@ -80,7 +79,7 @@
    </item>
    <item>
     <widget class="QGroupBox" name="groupLocks">
-     <property name="title"><string>Запреты (снять можно только с паролем администратора)</string></property>
+     <property name="title"><string>Запреты</string></property>
      <layout class="QVBoxLayout" name="layoutLocks">
       <item><widget class="QCheckBox" name="chkBlockExit"><property name="text"><string>Запретить закрытие программы</string></property><property name="toolTip"><string>Пункт «Выход» в меню значка в трее неактивен, закрытие окна сворачивает программу в трей. Завершить её можно только через диспетчер задач Windows.</string></property></widget></item>
       <item><widget class="QCheckBox" name="chkLockProtection"><property name="toolTip"><string>Кнопки «Выключить защиту» неактивны. Защита включается при каждом запуске программы.</string></property><property name="text"><string>Запретить выключать защиту файлов</string></property></widget></item>

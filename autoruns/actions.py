@@ -7,23 +7,23 @@ from pathlib import Path
 from autoruns.model import Entry
 from autoruns.scanner import HIVES, SYSTEM_ROOT, winreg
 from recovery import journal
-from recovery.journal import undo_op
+from recovery.journal import active_check, undo_op
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # (текст кнопки, пояснение в окне подтверждения)
 REMEDIATION = {
     "run": ("Удалить запись",
-            "Запись будет удалена из реестра. Вернуть её можно на вкладке «Журнал действий»."),
+            "Запись будет удалена из реестра. Вернуть её можно на странице «Журнал», вкладка «Действия»."),
     "startup": ("Убрать из автозагрузки",
                 "Файл будет перемещён в резервную папку. Вернуть его можно на вкладке "
-                "«Журнал действий»."),
+                "«Журнал», вкладка «Действия»."),
     "service": ("Отключить службу",
                 "Тип запуска службы станет «Отключена» (вступит в силу после остановки "
-                "службы или перезагрузки). Вернуть можно на вкладке «Журнал действий»."),
+                "службы или перезагрузки). Вернуть можно на странице «Журнал», вкладка «Действия»."),
     "task": ("Отключить задачу",
              "Задача будет отключена в планировщике. Вернуть можно на вкладке "
-             "«Журнал действий»."),
+             "«Журнал», вкладка «Действия»."),
 }
 
 
@@ -89,7 +89,17 @@ def remove_registry_value(e: Entry) -> str:
         f"Удалена запись автозапуска «{e.name}» ({x['hive']}\\{x['path']})", "reg_set",
         {"hive": x["hive"], "path": x["path"], "value": x["value"],
          "type": reg_type, "data": _ser(data), "entry_key": e.key})
-    return f"Запись «{e.name}» удалена. Отменить можно на вкладке «Журнал действий»."
+    return f"Запись «{e.name}» удалена. Отменить можно на странице «Журнал», вкладка «Действия»."
+
+
+@active_check("reg_set")
+def _reg_set_active(d: dict) -> bool:
+    try:
+        with winreg.OpenKey(HIVES[d["hive"]], d["path"]) as key:
+            winreg.QueryValueEx(key, d["value"])
+        return False  # значение уже на месте: возвращать нечего
+    except OSError:
+        return True
 
 
 @undo_op("reg_set")
@@ -130,6 +140,16 @@ def disable_service(e: Entry) -> str:
     return f"Служба «{name}» отключена. Отменить можно в журнале."
 
 
+@active_check("service_start")
+def _service_active(d: dict) -> bool:
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            "SYSTEM\\CurrentControlSet\\Services\\" + d["name"]) as key:
+            return winreg.QueryValueEx(key, "Start")[0] == 4  # 4 — отключена
+    except OSError:
+        return False  # службы больше нет
+
+
 @undo_op("service_start")
 def _undo_service(d: dict) -> str:
     _run(["sc.exe", "config", d["name"], "start=", d["mode"]])
@@ -142,6 +162,18 @@ def disable_task(e: Entry) -> str:
     _run(["schtasks.exe", "/Change", "/TN", name, "/DISABLE"])
     journal.log_action(f"Задача планировщика «{name}» отключена", "task_enable", {"name": name, "entry_key": e.key})
     return f"Задача «{name}» отключена. Отменить можно в журнале."
+
+
+@active_check("task_enable")
+def _task_active(d: dict) -> bool:
+    import re
+    path = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "Tasks" / \
+        d["name"].lstrip("\\")
+    try:
+        text = path.read_text(encoding="utf-16", errors="ignore")
+    except OSError:
+        return False  # задачи больше нет
+    return bool(re.search(r"<Enabled>\s*false\s*</Enabled>", text, re.IGNORECASE))
 
 
 @undo_op("task_enable")
@@ -158,6 +190,15 @@ def quarantine_target(e: Entry) -> str:
     journal.log_action(f"Файл «{path.name}» перемещён в карантин (автозапуск: {e.name})",
                        "quarantine_restore", {"id": item_id, "entry_key": e.key})
     return f"Файл «{path.name}» перемещён в карантин. Отменить можно в журнале."
+
+
+@active_check("quarantine_restore")
+def _quarantine_active(d: dict) -> bool:
+    from quarantine import STATUS_QUARANTINED, _read_meta
+    try:
+        return _read_meta(d["id"])["status"] == STATUS_QUARANTINED
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 @undo_op("quarantine_restore")

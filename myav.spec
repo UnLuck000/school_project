@@ -1,0 +1,64 @@
+# Сборка StretchBIT в папку dist/StretchBIT (PyInstaller 6+). Запускать через build_release.py:
+# он ещё кладёт рядом ядра VPN и базы и упаковывает архив.
+#
+# contents_directory="app" — рядом с .exe только папка app, в ней всё остальное: библиотеки,
+# базы, ядра VPN, а потом и журнал, кэш, карантин. В коде данные ищутся от расположения модулей
+# (Path(__file__).parent.parent / "signatures", "journal", "cache"), а рабочая папка в собранной
+# программе — app (gui.py: sys._MEIPASS): так оба пути указывают на одно место.
+# Папка, не один файл: рабочие процессы проверки (gui.py --scan-worker) запускаются часто,
+# а однофайловый .exe распаковывал бы себя при каждом запуске.
+import sys
+from pathlib import Path
+
+ROOT = Path(SPECPATH)
+sys.path.insert(0, str(ROOT))
+import appinfo  # noqa: E402
+
+datas = [
+    (str(ROOT / "ui" / "designer"), "ui/designer"),
+    (str(ROOT / "ui" / "assets"), "ui/assets"),
+    (str(ROOT / "signatures" / "release_exclusions.json"), "signatures"),
+    (str(ROOT / "diag" / "baseline.json"), "diag"),  # эталон исправных функций (diag/features)
+]
+
+a = Analysis(
+    [str(ROOT / "gui.py")],
+    pathex=[str(ROOT)],
+    datas=datas,
+    hiddenimports=[
+        "scanner._native",   # importlib.import_module в processmanager/memscan.py
+        "scanner.worker",
+    ],
+    excludes=["tkinter", "pytest", "_pytest", "IPython", "matplotlib", "pybind11"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+
+version_file = ROOT / "build" / "version_info.txt"
+version_file.parent.mkdir(exist_ok=True)
+v = tuple(int(x) for x in appinfo.VERSION.split(".")) + (0,) * (4 - len(appinfo.VERSION.split(".")))
+version_file.write_text(f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={v}, prodvers={v}),
+  kids=[StringFileInfo([StringTable('041904B0', [
+    StringStruct('FileDescription', '{appinfo.APP_NAME}'),
+    StringStruct('ProductName', '{appinfo.APP_NAME}'),
+    StringStruct('FileVersion', '{appinfo.VERSION}'),
+    StringStruct('ProductVersion', '{appinfo.VERSION}'),
+    StringStruct('LegalCopyright', '{appinfo.YEAR} {appinfo.AUTHOR}'),
+    StringStruct('OriginalFilename', '{appinfo.APP_NAME}.exe')])]),
+    VarFileInfo([VarStruct('Translation', [1049, 1200])])])
+""", encoding="utf-8")
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name=appinfo.APP_NAME,
+    icon=str(ROOT / "ui" / "assets" / "icon.ico"),
+    version=str(version_file),
+    console=False,
+    upx=False,
+    contents_directory="app",
+)
+coll = COLLECT(exe, a.binaries, a.datas, name=appinfo.APP_NAME, upx=False)

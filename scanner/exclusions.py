@@ -8,6 +8,9 @@
   MSI): drivers — для окна уязвимых драйверов, programs — для всех проверок файлов
   (whitelist.trusted_hashes). Хранится в Git и попадает в релиз. Белый список пользователя
   (signatures/whitelist.json: файлы, возвращённые из карантина) — только на этом компьютере.
+• TEST_TO_RELEASE (network — программы без оповещений мониторинга сети): в тестовой версии
+  пишутся в релизный файл (разработчик исключает их для всех), в релизной — локально;
+  читаются из обоих.
 """
 import json
 import os
@@ -18,8 +21,10 @@ from pathlib import Path
 EXCLUSIONS_FILE = Path(__file__).resolve().parent.parent / "signatures" / "exclusions.json"
 RELEASE_FILE = EXCLUSIONS_FILE.with_name("release_exclusions.json")
 RELEASE_CATEGORIES = {"drivers", "programs"}
+TEST_TO_RELEASE = {"network"}
 CATEGORY_TEXT = {"autoruns": "Автозапуск", "checks": "Проверка системы",
-                 "drivers": "Драйверы (в релизе)", "programs": "Программы (в релизе)"}
+                 "drivers": "Драйверы (в релизе)", "programs": "Программы (в релизе)",
+                 "network": "Мониторинг сети"}
 _lock = threading.Lock()
 
 
@@ -47,7 +52,12 @@ def hit_key(h) -> str:
 
 
 def _file(category: str) -> Path:
-    return RELEASE_FILE if category in RELEASE_CATEGORIES else EXCLUSIONS_FILE
+    if category in RELEASE_CATEGORIES:
+        return RELEASE_FILE
+    if category in TEST_TO_RELEASE:
+        from diag import edition
+        return RELEASE_FILE if edition.is_test() else EXCLUSIONS_FILE
+    return EXCLUSIONS_FILE
 
 
 def _read_file(path: Path) -> dict:
@@ -59,11 +69,13 @@ def _read_file(path: Path) -> dict:
 
 
 def _read() -> dict:
-    """Оба файла вместе: категории в них не пересекаются."""
+    """Оба файла вместе (TEST_TO_RELEASE — записи из обоих)."""
     data = _read_file(EXCLUSIONS_FILE)
     for category, entries in _read_file(RELEASE_FILE).items():
         if category in RELEASE_CATEGORIES:
             data[category] = entries
+        elif category in TEST_TO_RELEASE and isinstance(entries, dict):
+            data[category] = {**entries, **data.get(category, {})}
     return data
 
 
@@ -97,12 +109,23 @@ def add(category: str, key: str, title: str, detail: str = "", fp=None) -> None:
 
 def remove(category: str, key: str) -> bool:
     with _lock:
-        path = _file(category)
-        data = _read_file(path)
-        if data.get(category, {}).pop(key, None) is None:
-            return False
-        _save(data, path)
-        return True
+        paths = [_file(category)]
+        if category in TEST_TO_RELEASE:  # запись могла быть сделана в другой версии
+            paths = [EXCLUSIONS_FILE, RELEASE_FILE]
+        removed = False
+        for path in paths:
+            data = _read_file(path)
+            if data.get(category, {}).pop(key, None) is not None:
+                _save(data, path)
+                removed = True
+        return removed
+
+
+def program_key(exe: str, publisher: str | None = None, sha256: str = "") -> str:
+    """Ключ программы, одинаковый на любом компьютере: имя файла и издатель подписи, а у
+    неподписанной — имя файла и SHA-256 (обновится файл — исключение перестанет действовать)."""
+    name = os.path.basename(exe).lower()
+    return f"{name}|pub:{publisher}" if publisher else f"{name}|sha256:{sha256.lower()}"
 
 
 def items() -> list[dict]:

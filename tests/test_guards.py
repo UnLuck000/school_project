@@ -170,29 +170,29 @@ def test_schedule_next_run():
 
 
 # ---------- быстрая проверка ----------
-def test_quick_scan_filter(tmp_path, monkeypatch):
-    windows = tmp_path / "Windows"
-    other = tmp_path / "Games2"
-    windows.mkdir()
-    other.mkdir()
-    (windows / "notes.txt").write_text("x")             # Windows: проверяется всё
-    (other / "tool.exe").write_bytes(b"MZ")              # .exe до 16 МБ
-    (other / "hidden.png").write_bytes(b"MZ" + b"\0" * 10)  # программа под видом картинки
-    (other / "data.png").write_bytes(b"\x89PNG")         # настоящая картинка
-    (other / "photo.jpg").write_bytes(b"MZ")             # .jpg на MZ не открывается
-    (other / "lib.bin").write_bytes(b"MZ")               # .bin — тоже
-    (other / "mod.pyd").write_bytes(b"\0")               # библиотека: без открытия
-    big = other / "big.exe"
-    with open(big, "wb") as f:
-        f.truncate(fullscan.QUICK_LIMIT)
-    monkeypatch.setattr(fullscan, "full_roots", lambda: [str(windows)])
+def test_quick_scan_plan(tmp_path, monkeypatch):
+    drive, windows, home = tmp_path / "C", tmp_path / "C" / "Windows", tmp_path / "home"
+    (windows / "System32" / "deep").mkdir(parents=True)
+    (home / "Downloads").mkdir(parents=True)
+    (drive / "root.exe").write_bytes(b"MZ")
+    (windows / "notes.txt").write_text("x")
+    (windows / "System32" / "a.dll").write_bytes(b"MZ")
+    (windows / "System32" / "deep" / "inner.dll").write_bytes(b"MZ")  # вложенная — нет
+    (home / "Downloads" / "setup.exe").write_bytes(b"MZ")             # профиль — целиком
+    with open(windows / "big.exe", "wb") as f:
+        f.truncate(fullscan.QUICK_SYSTEM_LIMIT)                         # 16 МБ — пропуск
+    with open(home / "Downloads" / "mid.exe", "wb") as f:
+        f.truncate(fullscan.QUICK_SYSTEM_LIMIT)                         # в профиле до 32 МБ
+    monkeypatch.setenv("SystemDrive", str(drive))
+    monkeypatch.setenv("SystemRoot", str(windows))
+    monkeypatch.setattr(os.path, "expanduser", lambda p: str(home))
     stats, cancel = fullscan.Stats(), threading.Event()
     found = []
-    for root, quick in fullscan.quick_plan([str(tmp_path)]):
-        found += list(fullscan.walk(root, stats, cancel, quick,
-                                    {str(windows)} if quick else None))
+    for item in fullscan.quick_plan():
+        found += list(fullscan.walk(item.path, stats, cancel, item.recursive, item.limit))
     names = sorted(os.path.basename(p) for p in found)
-    assert names == ["hidden.png", "mod.pyd", "notes.txt", "tool.exe"]
+    assert names == ["a.dll", "mid.exe", "notes.txt", "root.exe", "setup.exe"]
+    assert fullscan.is_system_drive(str(drive) + os.sep)
 
 
 # ---------- расширения ----------

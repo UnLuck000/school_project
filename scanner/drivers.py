@@ -53,6 +53,8 @@ class Driver:
     entry: DbEntry | None = None
     error: str = ""
     excluded: bool = False   # пользователь доверяет (исключения, категория drivers)
+    version: str = ""        # FileVersion из ресурсов файла
+    info: dict = field(default_factory=dict)  # CompanyName, ProductName, FileDescription
 
     @property
     def name(self) -> str:
@@ -349,6 +351,8 @@ def _check(driver: Driver, db: Database) -> Driver:
             driver.entry, driver.match = entry, MATCH_NAME
         return driver
     driver.sha256 = hashlib.sha256(data).hexdigest()
+    driver.info = file_info(driver.path)
+    driver.version = driver.info.get("FileVersion", "")
     entry = db.by_hash.get(driver.sha256)
     if entry:
         driver.entry, driver.match = entry, MATCH_HASH
@@ -361,6 +365,106 @@ def _check(driver: Driver, db: Database) -> Driver:
     if entry:
         driver.entry, driver.match = entry, MATCH_NAME
     return driver
+
+
+def file_info(path: str) -> dict[str, str]:
+    """Версия, производитель и продукт из ресурсов файла драйвера."""
+    try:
+        from vpn.apps import version_info
+        return version_info(path, ("FileVersion", "ProductVersion", "CompanyName",
+                                   "ProductName", "FileDescription"))
+    except (OSError, AttributeError, ValueError):
+        return {}
+
+
+def devices(service: str) -> list[str]:
+    """Устройства, которые обслуживает драйвер: Services/<служба>/Enum → имена из Enum."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    names = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SERVICES_KEY + "\\" + service + "\\Enum") as key:
+            count = int(winreg.QueryValueEx(key, "Count")[0])
+            ids = [winreg.QueryValueEx(key, str(i))[0] for i in range(count)]
+    except (OSError, ValueError):
+        return []
+    for device_id in ids:
+        name = device_id
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SYSTEM\CurrentControlSet\Enum" + "\\" + device_id) as key:
+                for value in ("FriendlyName", "DeviceDesc"):
+                    try:
+                        text = winreg.QueryValueEx(key, value)[0]
+                    except OSError:
+                        continue
+                    name = text.split(";")[-1] if text.startswith("@") else text
+                    break
+        except OSError:
+            pass
+        names.append(name)
+    return names
+
+
+def installed_programs() -> list[dict]:
+    """Установленные программы («Приложения»): имя, издатель, папка."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    keys = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall")]
+    found = []
+    for hive, path in keys:
+        try:
+            root = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        with root:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(root, i)
+                except OSError:
+                    break
+                i += 1
+                item = {}
+                try:
+                    with winreg.OpenKey(root, sub) as key:
+                        for value in ("DisplayName", "Publisher", "InstallLocation"):
+                            try:
+                                item[value] = str(winreg.QueryValueEx(key, value)[0] or "")
+                            except OSError:
+                                item[value] = ""
+                except OSError:
+                    continue
+                if item.get("DisplayName"):
+                    found.append(item)
+    return found
+
+
+def related_programs(driver: Driver, programs: list[dict] | None = None) -> list[str]:
+    """Программы, к которым, скорее всего, относится драйвер: в чьей папке лежит файл,
+    или чей издатель совпадает с производителем драйвера (CompanyName)."""
+    programs = installed_programs() if programs is None else programs
+    path = os.path.normcase(driver.path)
+    company = (driver.info.get("CompanyName") or "").lower()
+    word = company.replace(",", " ").split()[0] if company.split() else ""
+    result = []
+    for p in programs:
+        location = os.path.normcase(p.get("InstallLocation", "").rstrip("\\/"))
+        publisher = p.get("Publisher", "").lower()
+        by_folder = location and path.startswith(location + os.sep)
+        by_vendor = word and len(word) > 2 and word not in ("microsoft",) and word in publisher
+        if by_folder or by_vendor:
+            name = p["DisplayName"] + (f" ({p['Publisher']})" if p.get("Publisher") else "")
+            if name not in result:
+                result.append(name + (" — драйвер в её папке" if by_folder else ""))
+    return result[:8]
 
 
 def blocklist_status() -> dict[str, bool | None]:

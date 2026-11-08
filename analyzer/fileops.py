@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from recovery import journal
-from recovery.journal import undo_op
+from recovery.journal import active_check, undo_op
 from scanner.whitelist import add_to_whitelist, remove_from_whitelist
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -170,11 +170,12 @@ def folder_stats(path: str, cancel=None) -> tuple[int, int, int, int]:
     return files, folders, size, on_disk
 
 
-def folder_files(path: str, limit: int, cancel=None) -> tuple[list[str] | None, int, int, bool]:
+def folder_files(path: str, limit: int, cancel=None,
+                 stop_over: bool = False) -> tuple[list[str] | None, int, int, bool]:
     """Все файлы папки с вложенными: (список файлов или None, если папка весит больше limit,
-    размер, число файлов, открылась ли папка). Размер считается целиком и у крупной папки,
-    список файлов перестаёт копиться, как только превышен limit. Ссылки на папки
-    (junction, symlink) не раскрываются."""
+    размер, число файлов, открылась ли папка). Список файлов перестаёт копиться, как только
+    превышен limit; stop_over — и подсчёт останавливается (размер тогда «больше limit»),
+    иначе размер считается целиком. Ссылки на папки (junction, symlink) не раскрываются."""
     files: list[str] | None = []
     size = count = 0
     stack = [path]
@@ -201,6 +202,8 @@ def folder_files(path: str, limit: int, cancel=None) -> tuple[list[str] | None, 
                         files.append(entry.path)
                         if size > limit:
                             files = None
+                    if files is None and stop_over:
+                        return None, size, count, opened
             except OSError:
                 continue
     return files, size, count, opened
@@ -349,6 +352,12 @@ def whitelist_file(path: str) -> bool:
     journal.log_action(f"Файл «{os.path.basename(path)}» добавлен в белый список",
                        "whitelist_remove", {"sha256": sha256, "path": path})
     return True
+
+
+@active_check("whitelist_remove")
+def _whitelist_active(d: dict) -> bool:
+    from scanner.whitelist import load_whitelist
+    return d["sha256"] in load_whitelist()
 
 
 @undo_op("whitelist_remove")

@@ -44,8 +44,12 @@ class App:
 _version = ctypes.WinDLL("version") if os.name == "nt" else None
 
 
-def version_info(path: str) -> dict[str, str]:
-    """ProductName, FileDescription, CompanyName из ресурсов файла (пусто — нет сведений)."""
+VERSION_KEYS = ("ProductName", "FileDescription", "CompanyName")
+
+
+def version_info(path: str, keys: tuple[str, ...] = VERSION_KEYS) -> dict[str, str]:
+    """ProductName, FileDescription, CompanyName (или другие keys: FileVersion,
+    ProductVersion...) из ресурсов файла (пусто — нет сведений)."""
     if _version is None:
         return {}
     size = _version.GetFileVersionInfoSizeW(path, None)
@@ -65,7 +69,7 @@ def version_info(path: str) -> dict[str, str]:
             langs.append(f"{lang:04x}{cp:04x}")
     langs += ["040904b0", "040904e4", "041904b0"]
     result = {}
-    for key in ("ProductName", "FileDescription", "CompanyName"):
+    for key in keys:
         for lang in langs:
             if _version.VerQueryValueW(data, f"\\StringFileInfo\\{lang}\\{key}",
                                        ctypes.byref(ptr), ctypes.byref(length)) and length.value:

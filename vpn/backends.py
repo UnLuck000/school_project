@@ -106,6 +106,11 @@ class Backend:
 
     def _set(self, state: str, error: str = "") -> None:
         self.state, self.error = state, error
+        from diag import features
+        if state == CONNECTED:
+            features.end_if_active("vpn.connect", True, backend=type(self).__name__)
+        elif state == ERROR:
+            features.end_if_active("vpn.connect", False, error=error or "ошибка подключения")
         if state == CONNECTED:
             self.since = time.time()
             for kind, port in self.local_ports.items():
@@ -452,6 +457,8 @@ class SingBoxBackend(Backend):
             # туннель, а туннель — через ещё не подключённый Xray
             host = v["address"]
             v["address"] = x.server_address(host, ip_mode)
+            from diag import anon
+            anon.register_vpn_server(v["address"])  # разрешённый адрес сервера — не в журналы
             if v["sni"] == "" and v["security"] in ("tls", "reality"):
                 v["sni"] = host
             # частные адреса и программы «напрямую» решает sing-box; у Xray — только правила
@@ -464,13 +471,19 @@ class SingBoxBackend(Backend):
             x.apply_options(xconfig, v, opts, self.log)
             xpath = self._write(xconfig, "xray-tun.json")
             apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
+            from vpn import windns
+            win_dns = windns.manual_dns()  # до dnsguard.protect: он трогает только роутер
+            if win_dns["v4"] or win_dns["v6"]:
+                self.log(windns.describe(win_dns))
             spath = self._write(self.sb.build_config(
                 x.SOCKS_PORT, self.xray_exe, ip_mode, apps, opts["block_quic"], opts["block_udp"],
-                str(cfg.get("vpn/dns_server") or "1.1.1.1")), "sing-box.json")
+                str(cfg.get("vpn/dns_server") or "1.1.1.1"), win_dns), "sing-box.json")
             self._log_options(apps)
         except (OSError, ValueError) as e:
             self._fail(f"VLESS: {e}")
             return
+        from diag import features
+        features.step("vpn.connect", "конфигурация")
         self.log("Xray: запуск (VLESS, локальный SOCKS для туннеля)...")
         self.xray_proc = subprocess.Popen(
             [self.xray_exe, "run", "-c", str(xpath)], cwd=str(Path(self.xray_exe).parent),
@@ -481,6 +494,7 @@ class SingBoxBackend(Backend):
         if not x.wait_port(x.SOCKS_PORT):
             self._fail(self.error or "Xray не открыл локальный SOCKS (смотрите журнал)")
             return
+        features.step("vpn.connect", "xray")
         self.log("sing-box: запуск TUN (нужны права администратора)...")
         self.proc = subprocess.Popen(
             [self.exe, "run", "-c", str(spath)], cwd=str(Path(self.exe).parent),
@@ -492,6 +506,7 @@ class SingBoxBackend(Backend):
             self._fail(self.error or "sing-box не создал адаптер TUN (смотрите журнал)")
             return
         self.adapter = self.sb.TUN_NAME
+        features.step("vpn.connect", "адаптер TUN")
         from vpn import dnsguard
         try:
             changed = dnsguard.protect()
@@ -507,6 +522,7 @@ class SingBoxBackend(Backend):
             try:
                 killswitch.enable(self.sb.TUN_NAME, [self.xray_exe, self.exe])
                 self.killswitch = True
+                features.step("vpn.connect", "kill switch")
                 self.log("Kill switch: интернет только через туннель")
             except OSError as e:
                 self._fail(f"Kill switch не включён, VPN отключён: {e}")

@@ -23,7 +23,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scanner import cpucores, verdict_cache
+from scanner import cpucores, overrides, verdict_cache
 from scanner import media
 from scanner.engine import cache_version, hash_verdict, revocation_enabled
 from scanner.heuristics import get_threshold
@@ -416,7 +416,8 @@ def check_files(paths, signatures, rules, whitelist: set[str] | None = None,
                 (digest, md5), analyzed = job.parts["hash"], None
             else:
                 (digest, md5), analyzed = job.parts["hash"], job.parts["analyze"]
-            reason = hash_verdict(job.st.st_size, digest, md5, signatures) or analyzed
+            reason = overrides.filter_reason(
+                digest, hash_verdict(job.st.st_size, digest, md5, signatures) or analyzed)
             if version:
                 verdict_cache.put(job.p, job.st, version, digest, reason)
             yield job.path, None if whitelist and digest in whitelist else reason, None

@@ -5,7 +5,9 @@ import time
 from pathlib import Path
 import json
 
-os.chdir(Path(sys.executable).parent if getattr(sys, "frozen", False)
+# собранная программа: рабочая папка — app рядом с StretchBIT.exe (sys._MEIPASS), там же лежат
+# модули, поэтому пути от __file__ (signatures, journal, cache) и относительные пути совпадают
+os.chdir(Path(sys._MEIPASS) if getattr(sys, "frozen", False)
          else Path(__file__).resolve().parent)
 
 if "--scan-worker" in sys.argv:  # собранная программа: рабочий процесс проверки (scanner.pool)
@@ -18,6 +20,11 @@ if sys.stdout is None or sys.stderr is None:  # pythonw или exe без кон
     _log = open(Path("logs") / "gui.log", "a", encoding="utf-8", buffering=1)
     sys.stdout = sys.stdout or _log
     sys.stderr = sys.stderr or _log
+
+from diag import log as diag_log  # технический журнал logs/app.log (diag/log.py)
+diag_log.setup()
+_dlog = diag_log.get("app")
+from diag import features  # noqa: E402 — исправность функций (эталон «Исправно»)
 
 from PySide6.QtCore import Qt, Signal, QObject, QSettings, QTimer, QUrl
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
@@ -32,9 +39,8 @@ from scanner.whitelist import load_whitelist, remove_from_whitelist
 from scanner.hashing import load_all_signatures
 from scanner.yara_engine import count_rules
 import updater
-from quarantine import (
-    QUARANTINE_DIR, STATUS_QUARANTINED, list_quarantine, restore_file, delete_file,
-)
+from quarantine import QUARANTINE_DIR, list_quarantine
+from recovery import threatlog
 from monitor import RealtimeMonitor, system_folders
 from networkmonitor.connections import LEVEL_TEXT, terminate_process
 from networkmonitor.ioc import load_ip_blocklist
@@ -72,12 +78,6 @@ SIGNATURES = Path("signatures/hashes.txt")
 RULES_DIR = Path("signatures/rules")
 NETFEEDS_DIR = Path("signatures/netfeeds")
 ID_ROLE = Qt.ItemDataRole.UserRole
-STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
-STATUS_TEXT = {
-    "quarantined": "В карантине",
-    "restored": "Восстановлено",
-    "deleted": "Удалено",
-}
 DEFAULT_WATCH = [str(Path.home() / "Downloads")]
 
 
@@ -91,6 +91,7 @@ class MonitorBridge(QObject):
 
 
 SCAN_PAGE = "Сканирование папки/файла"
+LOG_PAGE = "Журнал"  # журнал защиты, действия, исключения
 
 
 class MainWindow(QMainWindow):
@@ -164,19 +165,26 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage()
         self.about_page = AboutPage()
 
-        # журнал, карантин, белый список и исключения: всё, что программа сделала или
-        # запомнила, на одной странице
+        # «Журнал»: найденное (журнал защиты, с карантином), действия программы и исключения.
+        # Белый список вкладкой не показывается: он пополняется восстановлением из карантина,
+        # а отмена этого действия во «Действиях» убирает файл из белого списка
+        from ui.protect_journal import ProtectJournalPage
+        self.protect_journal = ProtectJournalPage()
+        self.protect_journal.changed.connect(self._on_protect_journal_changed)
+        self.protect_journal.analyze.connect(lambda path: self.open_analyzer(path))
+        self.protect_journal.false_positive.connect(lambda path: self.open_false_positives(path))
         log_page = QWidget()
         log_layout = QVBoxLayout(log_page)
         log_layout.setContentsMargins(16, 12, 16, 12)
-        log_title = QLabel("Журнал действий")
+        log_title = QLabel(LOG_PAGE)
         log_title.setStyleSheet("font-size: 20pt; font-weight: 600;")
         log_layout.addWidget(log_title)
         self.log_tabs = QTabWidget()
+        self.log_tabs.addTab(self.protect_journal, "Журнал защиты")
         self.log_tabs.addTab(self.journal_page, "Действия")
-        self.log_tabs.addTab(self._build_quarantine_tab(), "Карантин")
-        self.log_tabs.addTab(self._build_whitelist_tab(), "Белый список")
         self.log_tabs.addTab(self.exclusions_page, "Исключения")
+        # таблица для refresh_whitelist: вкладки нет, ссылку держим, иначе Qt удалит виджет
+        self._whitelist_tab = self._build_whitelist_tab()
         self.log_tabs.currentChanged.connect(lambda _: self._refresh_log_tab())
         log_layout.addWidget(self.log_tabs, 1)
 
@@ -196,15 +204,19 @@ class MainWindow(QMainWindow):
         protection_scroll.setWidget(self._build_protection_tab())
         self.shell.add_page("Защита", protection_scroll)
         self.shell.add_page("Сеть", self._build_network_tab())
-        self.shell.add_page("Журнал действий", log_page)
+        self.shell.add_page(LOG_PAGE, log_page)
         self.shell.add_page("Инструменты", self.tools_page)
         # с дополнительными разделами страница выше окна: прокрутка, а не сжатие текста
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
         settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
         settings_scroll.setWidget(self.settings_page)
-        self.shell.add_page("Настройки", settings_scroll)  # «Проверка» в ней — только в отладке
+        self.shell.add_page("Настройки", settings_scroll)  # часть разделов — режим администратора
         self.shell.add_page("О программе", self.about_page)
+        # режим администратора: пароль — в «Настройках», отчёт о работе — в «О программе»;
+        # вкладка «Отладка» — только в тестовой версии
+        self.settings_page.add_admin_group(self.debug_page.group_access)
+        self.about_page.add_admin_group(self.debug_page.group_activity)
         self.shell.add_page("Отладка", self.debug_page, hidden=True)
         self.setCentralWidget(self.shell)
 
@@ -217,12 +229,13 @@ class MainWindow(QMainWindow):
         self.dashboard.check_updates.connect(self.check_updates)
         self.dashboard.open_processes.connect(self.open_process_manager)
         self.dashboard.open_scan.connect(lambda: self.shell.show_page(SCAN_PAGE))
-        self.dashboard.open_journal.connect(lambda: self.show_log("Действия"))
+        self.dashboard.open_journal.connect(lambda: self.show_log("Журнал защиты"))
         self.settings_page.changed.connect(self.on_setting_changed)
         self.update_finished.connect(self._on_update_finished)
         self.update_progress.connect(self._on_update_progress)
         self.shell.page_changed.connect(self._on_page_changed)
         self.journal_page.undone.connect(self.on_undone)
+        self.journal_page.goto.connect(self.goto_action_place)
 
         self._apply_tool_access()  # запреты инструментов действуют с запуска
         self.statusBar().showMessage("Готов к работе")
@@ -230,30 +243,80 @@ class MainWindow(QMainWindow):
         self.refresh_whitelist()
         self.refresh_dashboard()
 
+    def install_test_ui(self):
+        """Тестовая версия: страница «Тестирование» и панель «Исправно / Комментарий» в углу
+        страниц главного окна (окна инструментов получают её сами — testpanel.WindowAttacher)."""
+        from diag import testpanel
+        self.testing_page = testpanel.TestingPage()
+        self.shell.add_page("Тестирование", self.testing_page)
+        row = self.shell.nav.currentRow()
+        self.test_panel = testpanel.CornerPanel(self.shell.stack, self.shell._titles[max(row, 0)])
+        self.shell.page_changed.connect(self.test_panel.set_area)
+
     def _on_page_changed(self, title: str):
+        diag_log.get("ui").info("Страница «%s»", title)
         if title in ("Главная", "Отладка"):
             self.refresh_dashboard()
         elif title == "Защита":
             self.fill_drives()
-        elif title == "Журнал действий":
+        elif title == LOG_PAGE:
             self._refresh_log_tab()
 
     def _refresh_log_tab(self):
         widget = self.log_tabs.currentWidget()
-        if widget is self.journal_page:
+        if widget is self.protect_journal:
+            self.protect_journal.refresh()
+        elif widget is self.journal_page:
             self.journal_page.refresh()
         elif widget is self.exclusions_page:
             self.exclusions_page.refresh()
 
     def show_log(self, tab: str = "Действия"):
-        """Открывает страницу «Журнал действий» на нужной вкладке."""
+        """Открывает страницу «Журнал» на нужной вкладке."""
         if tab == "Действия" and not access.allowed("btnUndoJournal"):
-            tab = "Карантин"  # журнал запрещён: остальные вкладки страницы доступны
-        self.show_main("Журнал действий")
+            tab = "Журнал защиты"  # журнал действий запрещён: остальные вкладки доступны
+        self.show_main(LOG_PAGE)
         for i in range(self.log_tabs.count()):
             if self.log_tabs.tabText(i) == tab:
                 self.log_tabs.setCurrentIndex(i)
         self._refresh_log_tab()
+
+    def _on_protect_journal_changed(self):
+        self.journal_page.refresh()
+        self.refresh_whitelist()
+        self.refresh_dashboard()
+
+    def goto_action_place(self, place: str, record: dict):
+        """«Перейти к месту действия» из журнала действий (recovery/journal_page.PLACES)."""
+        data = record.get("data") or {}
+        if place == "net_block":
+            self.show_main("Сеть")
+            self.net_tabs.setCurrentWidget(self.block_panel)
+        elif place == "protect_journal":
+            self.show_log("Журнал защиты")
+        elif place == "autoruns":
+            self.open_autoruns()
+        elif place == "system_checks":
+            self.open_recovery(2)
+        elif place == "assoc":
+            self.open_recovery(3)
+        elif place == "false_positives":
+            self.open_false_positives(data.get("path") or None)
+        elif place in ("vpn_settings", "vpn_connect"):
+            self.open_tool("vpn")
+            window = self.tool_windows.get("vpn")
+            if window is not None and hasattr(window, "show_section"):
+                window.show_section("settings" if place == "vpn_settings" else "connect")
+        elif place in ("drivers", "extensions"):
+            self.open_tool(place)
+        elif place == "usb":
+            self.open_usb()
+        elif place == "protection":
+            self.show_main("Защита")
+        elif place == "file":
+            path = data.get("from") or data.get("to") or ""
+            if path:
+                self.open_analyzer(os.path.dirname(path))
 
     def on_undone(self, record: dict):
         """Действие отменено на странице журнала: обновляем окна, где оно было видно."""
@@ -278,6 +341,13 @@ class MainWindow(QMainWindow):
         self.recovery_window.set_allowed(access.allowed("btnRestorePoint"),
                                          access.allowed("btnSfcDism"),
                                          access.allowed("btnSystemChecks"))
+
+    def open_recovery_center(self):
+        """Центр восстановления из трея: первая разрешённая вкладка, без действий."""
+        for tab, button_id in self.TAB_TOOLS.items():
+            if access.allowed(button_id):
+                self.open_recovery(tab)
+                return
 
     def open_recovery(self, tab: int = 0, action: str | None = None):
         if tab in self.TAB_TOOLS and self.tool_blocked(self.TAB_TOOLS[tab]):
@@ -340,16 +410,16 @@ class MainWindow(QMainWindow):
         pass  # пароль по умолчанию действует всегда: режим отладки остаётся как есть
 
     def open_advanced(self):
-        """Кнопка в настройках: открыть (с паролем) или скрыть доп. настройки и отладку."""
+        """Кнопка в настройках: войти в режим администратора (с паролем) или выйти из него."""
         if self.debug_mode:
             self.toggle_debug_mode()
         elif ask_password(self, self.debug_gate):
-            activity.record("access", "Дополнительные настройки и отладка открыты по паролю")
+            activity.record("access", "Режим администратора открыт по паролю")
             if not cfg.get("advanced/warned"):  # один раз за всё время, не за каждый запуск
                 cfg.set_("advanced/warned", True)
                 from toolbox.windows import info_dialog
                 info_dialog(
-                    self, "Дополнительные настройки",
+                    self, "Режим администратора",
                     "Здесь собраны настройки, которые меняют работу защиты: автозапуск с "
                     "правами администратора, плановая проверка, слои проверки, контроль "
                     "запуска программ, запреты инструментов.\n\n"
@@ -376,8 +446,7 @@ class MainWindow(QMainWindow):
         if self.recovery_window is not None:
             self._apply_recovery_access()
         if self.tray is not None:
-            for button_id, action in self.tray.tool_actions.items():
-                action.setVisible(access.allowed(button_id))
+            self.tray.apply_access(access.allowed)
         # пути к запрещённым инструментам скрываются, открытые окна закрываются
         scan_ok = access.allowed("btnFileAnalyzer")
         self.shell.set_page_visible(SCAN_PAGE, scan_ok)
@@ -415,24 +484,28 @@ class MainWindow(QMainWindow):
         self.net_tabs.setCurrentWidget(self.beacon_panel)
 
     def toggle_debug_mode(self, quiet: bool = False):
+        """Режим администратора (флаг debug_mode): разделы настроек, пароль, отчёт о работе
+        в «О программе»; вкладка «Отладка» — только в тестовой версии."""
+        from diag import edition
         self.debug_mode = not self.debug_mode
-        self.shell.set_page_visible("Отладка", self.debug_mode)
-        self.settings_page.set_debug(self.debug_mode)  # раздел «Проверка» в настройках
+        self.shell.set_page_visible("Отладка", self.debug_mode and edition.is_test())
+        self.settings_page.set_debug(self.debug_mode)
+        self.about_page.set_admin(self.debug_mode)
         if self.debug_mode and not quiet:  # при запуске счётчики обновятся позже
             self.refresh_dashboard()
         title = f"{appinfo.APP_NAME} {appinfo.VERSION}"
-        self.setWindowTitle(title + ("  [режим отладки]" if self.debug_mode else ""))
+        self.setWindowTitle(title + ("  [режим администратора]" if self.debug_mode else ""))
         if quiet:
             return
+        extra = " Вкладка «Отладка» — в меню слева." if edition.is_test() else ""
         self.statusBar().showMessage(
-            "Режим отладки включён: в меню слева появилась вкладка «Отладка»"
-            if self.debug_mode else "Режим отладки выключен", 8000)
+            "Режим администратора включён." + extra
+            if self.debug_mode else "Режим администратора выключен", 8000)
 
     # ---------- системный трей ----------
     def setup_tray(self, icon):
         self.tray = TrayIcon(self, icon)
-        for button_id, action in self.tray.tool_actions.items():
-            action.setVisible(access.allowed(button_id))
+        self.tray.apply_access(access.allowed)
         self.tray.set_exit_allowed(not cfg.get("general/block_exit"))
         self.tray.show()
 
@@ -565,24 +638,27 @@ class MainWindow(QMainWindow):
         from toolbox import windows
         window = self.tool_windows.get(name)
         if window is None:
+            # окна без владельца: не держатся поверх главного окна, его можно вывести вперёд
             if name == "link":
-                window = windows.LinkCheckWindow(self)
+                window = windows.LinkCheckWindow()
                 window.open_file.connect(self.open_analyzer)
             elif name == "password":
-                window = windows.PasswordLeakWindow(self)
+                window = windows.PasswordLeakWindow()
             elif name == "drivers":
                 from toolbox.driverswindow import DriversWindow
-                window = DriversWindow(self)
+                window = DriversWindow()
                 window.journal_changed.connect(self.journal_page.refresh)
                 window.exclusions_changed.connect(self.exclusions_page.refresh)
             elif name == "extensions":
                 from toolbox.extwindow import ExtensionsWindow
-                window = ExtensionsWindow(self)
+                window = ExtensionsWindow()
+                window.window_ref = self  # открыть папку в сканере
                 window.journal_changed.connect(self.journal_page.refresh)
             else:
                 from vpn.window import VpnWindow
-                window = VpnWindow(self)
+                window = VpnWindow()
             self.tool_windows[name] = window
+            self.apply_on_top(cfg.get("general/on_top"))
         window.show()
         window.raise_()
         window.activateWindow()
@@ -733,8 +809,7 @@ class MainWindow(QMainWindow):
     def open_false_positives(self, path: str | None = None):
         from analyzer.fpwindow import FalsePositiveWindow
         if getattr(self, "fp_window", None) is None:
-            self.fp_window = FalsePositiveWindow(self)
-            self.fp_window.setWindowFlag(Qt.WindowType.Window)
+            self.fp_window = FalsePositiveWindow()
             self.fp_window.journal_changed.connect(lambda: self.journal_page.refresh())
         self.fp_window.show()
         self.fp_window.raise_()
@@ -756,6 +831,8 @@ class MainWindow(QMainWindow):
 
     def add_event(self, text: str, level: str = "info"):
         """Событие для списка «Последние события» на главной странице."""
+        _dlog.log(40 if level in ("error", "threat") else 30 if level == "warning" else 20,
+                  "Событие: %s", text)
         self.recent_events.insert(0, (time.strftime("%d.%m %H:%M"), text, level))
         del self.recent_events[8:]
         self.refresh_dashboard()
@@ -785,6 +862,7 @@ class MainWindow(QMainWindow):
 
     def quick_scan(self):
         """Кнопка главной: быстрая проверка (Windows, Users и программы на дисках)."""
+        features.begin("home.quick_scan")
         self.shell.show_page("Защита")
         if self._full_cancel is None:
             self.toggle_full_scan("quick", all_drives=True)
@@ -805,6 +883,7 @@ class MainWindow(QMainWindow):
         if self._updating:
             return
         self._updating = True
+        features.begin("db.update")
         self._update_silent = silent
         if not silent:
             self.statusBar().showMessage("Обновляю базы (хэши, правила YARA, адреса C2)...")
@@ -844,6 +923,7 @@ class MainWindow(QMainWindow):
         self._db_stats = None
         self.refresh_dashboard()
         activity.record("update", "Базы обновлены" if ok else "Обновление баз не удалось")
+        features.end_if_active("db.update", ok, error="" if ok else text[-300:])
         if ok:
             self.add_event("Базы сигнатур обновлены")
         if silent:  # автообновление: сообщение об успехе не показывается
@@ -876,7 +956,8 @@ class MainWindow(QMainWindow):
             scan_pool.apply_settings()
 
     def apply_on_top(self, on: bool):
-        for window in (self, self.proc_window, self.autoruns_window, self.recovery_window):
+        for window in (self, self.proc_window, self.autoruns_window, self.recovery_window,
+                       *self.tool_windows.values(), getattr(self, "fp_window", None)):
             if window is not None:
                 visible = window.isVisible()
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
@@ -957,7 +1038,13 @@ class MainWindow(QMainWindow):
         a_kill = menu.addAction("Завершить процесс")
         a_scan = menu.addAction("Открыть файл программы в сканере")
         a_scan.setEnabled(bool(alert.exe))
+        menu.addSeparator()
+        a_skip = menu.addAction("Не оповещать об этой программе (исключение)")
+        a_skip.setEnabled(bool(alert.exe) and self.net_monitor is not None)
         chosen = menu.exec(self.net_table.viewport().mapToGlobal(pos))
+        if chosen is a_skip:
+            self._exclude_net_program(alert)
+            return
         from networkmonitor.panels import run_block
         if chosen is a_ip:
             run_block(self, self._net_block_bridge, ips, [])
@@ -967,6 +1054,33 @@ class MainWindow(QMainWindow):
             self.kill_selected_process()
         elif chosen is a_scan:
             self.open_analyzer(alert.exe)
+
+    def _exclude_net_program(self, alert):
+        """Исключение программы из оповещений мониторинга сети. В тестовой версии
+        попадает в signatures/release_exclusions.json — и в релиз."""
+        from diag import edition
+        from scanner import exclusions
+        key = self.net_monitor.program_key(alert.exe)
+        if not key:
+            QMessageBox.warning(self, "Сеть", "Файл программы недоступен")
+            return
+        how = ("по издателю подписи" if "|pub:" in key
+               else "по SHA-256: после обновления файла оповещения вернутся")
+        where = ("\n\nТестовая версия: исключение попадёт и в релизную."
+                 if edition.is_test() else "")
+        answer = QMessageBox.question(
+            self, "Мониторинг сети",
+            f"Не оповещать о сетевой активности {alert.name}?\n\n{alert.exe}\n\n"
+            f"Исключение {how}. Если файл программы распознан как угроза, оповещения "
+            f"будут всё равно. Убрать — «Журнал» → «Исключения».{where}")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        from diag.anon import anonymize_user  # файл может уйти в Git: без имени пользователя
+        exclusions.add("network", key, alert.name, anonymize_user(alert.exe))
+        activity.record("net_alert", f"Программа исключена из мониторинга сети: {alert.name}",
+                        exe=alert.exe)
+        self.exclusions_page.refresh()
+        self.statusBar().showMessage(f"{alert.name}: оповещений сети больше не будет", 5000)
 
     def _on_net_blocked(self, text: str, ok: bool):
         (QMessageBox.information if ok else QMessageBox.warning)(self, "Блокировка", text)
@@ -1092,6 +1206,7 @@ class MainWindow(QMainWindow):
         self._full_mode = "full"
         page.full_btn.clicked.connect(lambda checked=False: self.toggle_full_scan("full"))
         page.quick_btn.clicked.connect(lambda checked=False: self.toggle_full_scan("quick"))
+        page.full_drive.currentIndexChanged.connect(lambda i: self._update_quick_visible())
         self.full_progress.connect(self._on_full_progress)
         self.full_found.connect(self._on_full_found)
         self.full_done.connect(self._on_full_done)
@@ -1148,6 +1263,7 @@ class MainWindow(QMainWindow):
         Журнал прокручивается вниз сам только при угрозе, или если он и так был внизу
         (смотрят новые события). Если пользователь листает выше, проверенные файлы его не
         двигают; удаление старых строк сверху (больше 500) не сдвигает видимую часть."""
+        _dlog.log(30 if threat else 10, "Журнал защиты: %s", item.text())
         log = self.protect_log
         bar = log.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 1
@@ -1174,6 +1290,8 @@ class MainWindow(QMainWindow):
             activity.record("launch", f"{exe}: {text}", killed=info.get("killed"),
                             parent=info.get("parent", ""))
             self.add_event(f"Угроза при запуске: {name}", "threat")
+            threatlog.add(exe, "threat", text, "Контроль запуска")
+            self.protect_journal.refresh()
             self._protect_line(line, exe, "red")
             if self.tray is not None:
                 self.tray.showMessage(
@@ -1184,6 +1302,9 @@ class MainWindow(QMainWindow):
         level = "red" if kind == "threat" else "darkorange"
         activity.record("launch", f"{exe}: {text}")
         self._protect_line(f"[Запуск] {name}: {text}", exe, level)
+        if exe:
+            threatlog.add(exe, "threat" if kind == "threat" else "suspicious", text,
+                          "Контроль запуска")
         if kind == "threat":
             self.add_event(f"Угроза среди процессов: {name}", "threat")
 
@@ -1221,8 +1342,9 @@ class MainWindow(QMainWindow):
         from vpn.window import VpnWindow
         window = self.tool_windows.get("vpn")
         if window is None:
-            window = VpnWindow(self)
+            window = VpnWindow()  # без владельца: не держится поверх главного окна
             self.tool_windows["vpn"] = window
+            self.apply_on_top(cfg.get("general/on_top"))
         if window.autoconnect():
             activity.record("vpn", "VPN подключается вместе с программой")
 
@@ -1360,6 +1482,16 @@ class MainWindow(QMainWindow):
             combo.addItem(os.path.abspath(os.sep), [os.path.abspath(os.sep)])
         index = combo.findData(previous)
         combo.setCurrentIndex(max(0, index))
+        self._update_quick_visible()
+
+    def _update_quick_visible(self):
+        """Быстрая проверка — только системного диска: на других дисках кнопки и описания нет."""
+        from scanner import fullscan
+        page = self.protection_page
+        roots = page.full_drive.currentData() or []
+        visible = any(fullscan.is_system_drive(r) for r in roots)
+        page.quick_btn.setVisible(visible)
+        page.quick_hint.setVisible(visible)
 
     def toggle_full_scan(self, mode: str = "full", all_drives: bool = False):
         """mode: full | quick. all_drives — все локальные диски (плановая, с главной)."""
@@ -1371,12 +1503,15 @@ class MainWindow(QMainWindow):
             button.setText("Останавливаю...")
             return
         from scanner import fullscan
-        if all_drives:
+        if mode == "quick":  # системный диск и папка пользователя (fullscan.quick_plan)
+            roots = [item.path for item in fullscan.quick_plan()]
+        elif all_drives:
             roots = [d.root for d in fullscan.drives() if not d.removable] or \
                 [os.path.abspath(os.sep)]
         else:
             roots = page.full_drive.currentData() or []
         self._full_mode = mode
+        features.begin("protect.full_scan").fact("режим", mode)
         cancel = self._full_cancel = threading.Event()
         active, other = ((page.quick_btn, page.full_btn) if mode == "quick"
                          else (page.full_btn, page.quick_btn))
@@ -1404,11 +1539,16 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _full_text(stats) -> str:
         from analyzer.fileops import human_size
-        text = (f"Проверено файлов: {stats.checked:,}. Пропущено (ресурсы игр, данные): "
+        text = (f"Проверено файлов: {stats.checked:,}. Пропущено: "
                 f"{stats.skipped:,} ({human_size(stats.skipped_bytes)})"
                 ).replace(",", " ")
         if stats.game_dirs:
             text += f", папок игр: {len(stats.game_dirs)}"
+        extra = [f"записей автозапуска: {stats.autoruns}" if stats.autoruns else "",
+                 "проверка системы выполнена" if stats.checks else "",
+                 f"память процессов: {stats.processes}" if stats.processes else ""]
+        if any(extra):
+            text += ". Также: " + ", ".join(e for e in extra if e)
         text += f". Угроз: {stats.threats}, подозрительных: {stats.suspicious}."
         return text
 
@@ -1426,18 +1566,22 @@ class MainWindow(QMainWindow):
             return
         self.protection_page.full_status.setText(
             f"{self._full_text(stats)} Идёт {self._duration(stats.started)}.\n"
-            f"Сейчас: {stats.current}")
+            f"Сейчас: {stats.current}") 
 
     def _on_full_found(self, path: str, level: str, text: str):
-        self._full_found_list.append(f"{path}: {text}")
+        where = f"{path}: {text}" if path else text  # запись системы или процесс без файла
+        self._full_found_list.append(where)
         title = "Быстрая проверка" if self._full_mode == "quick" else "Полная проверка"
-        item = QListWidgetItem(f"{time.strftime('%H:%M:%S')}  [{title}] {path}: {text}")
-        item.setData(ID_ROLE, path)
-        item.setToolTip("Правый клик: в карантин, открыть в сканере, показать в проводнике")
+        threatlog.add(path, level, text, title)
+        item = QListWidgetItem(f"{time.strftime('%H:%M:%S')}  [{title}] {where}")
+        if path:
+            item.setData(ID_ROLE, path)
+            item.setToolTip("Правый клик: в карантин, открыть в сканере, показать в проводнике")
         item.setForeground(QBrush(QColor("red" if level == "threat" else "darkorange")))
         self.add_protect_item(item, threat=level == "threat")
         if level == "threat":
-            self.add_event(f"Угроза: {os.path.basename(path)} ({text})", "threat")
+            self.add_event(f"Угроза: {os.path.basename(path)} ({text})" if path else f"Угроза: {text}",
+                           "threat")
 
     def _on_full_done(self, stats, stopped: bool):
         page = self.protection_page
@@ -1450,7 +1594,13 @@ class MainWindow(QMainWindow):
         page.full_progress.setVisible(False)
         if isinstance(stats, str):
             page.full_status.setText(f"Полная проверка не удалась: {stats}")
+            for fid in ("protect.full_scan", "home.quick_scan"):
+                features.end_if_active(fid, False, error=stats)
             return
+        for fid in ("protect.full_scan", "home.quick_scan"):
+            features.end_if_active(fid, True, stopped=stopped, files=stats.files,
+                                   checked=stats.checked, errors=stats.errors,
+                                   threats=stats.threats, suspicious=stats.suspicious)
         title = "Быстрая проверка" if self._full_mode == "quick" else "Полная проверка"
         head = (f"{title} остановлена" if stopped else
                 f"{title} завершена за {self._duration(stats.started)}")
@@ -1494,7 +1644,8 @@ class MainWindow(QMainWindow):
         done, failed = 0, []
         for path in paths:
             try:
-                fileops.quarantine(path, "Защита: перемещено пользователем")
+                qid = fileops.quarantine(path, "Защита: перемещено пользователем")
+                threatlog.mark_path(path, threatlog.QUARANTINED, qid)
                 done += 1
             except OSError as e:
                 failed.append(f"{os.path.basename(path)}: {e}")
@@ -1593,6 +1744,7 @@ class MainWindow(QMainWindow):
         if kind == "threat":
             path, reason, action = (text.split("\t") + ["", ""])[:3]
             activity.record("threat", f"{path}: {reason}", action=action)
+            threatlog.add(path, "threat", reason, "Защита файлов")
             text = f"[!] {path} ({reason}): {action}"
             self.refresh_quarantine()
             self.statusBar().showMessage(text)
@@ -1656,119 +1808,15 @@ class MainWindow(QMainWindow):
     # ---------- вкладка «Карантин» ----------
 
 
-    QUAR_COLUMNS = [
-        ("Дата", 140),
-        ("Исходный путь", 300),
-        ("Размер, КБ", 90),
-        ("SHA-256", 220),
-        ("Статус", 110),
-        ("Подпись", 160),
-        ("Причина", 240),
-    ]   # заголовки и начальная ширина столбцов таблицы карантина
-
-    def _build_quarantine_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        self.table = make_table(self.QUAR_COLUMNS)
-        layout.addWidget(self.table)
-
-        row = QHBoxLayout()
-        for text, handler in (("Восстановить", self.restore_selected),
-                              ("Удалить навсегда", self.delete_selected),
-                              ("Обновить", self.refresh_quarantine)):
-            btn = QPushButton(text)
-            btn.clicked.connect(handler)
-            row.addWidget(btn)
-
-        self.history_cb = QCheckBox("Показывать историю")
-        self.history_cb.setToolTip("Восстановленные и удалённые файлы")
-        self.history_cb.toggled.connect(lambda _: self.refresh_quarantine())
-        row.addWidget(self.history_cb)
-        row.addStretch()
-        layout.addLayout(row)
-        return tab
-
+    # бывшая вкладка «Карантин» теперь часть журнала защиты (ui/protect_journal.py)
     def refresh_quarantine(self):
-        self.table.setRowCount(0)
-        for m in list_quarantine(include_history=self.history_cb.isChecked()):
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-
-            size_bytes = int(m.get("size", 0))
-            size_kb = f"{size_bytes / 1024:,.1f}".replace(",", " ")
-            size_item = QTableWidgetItem(size_kb)
-            size_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-            status = m["status"]
-            date_item = QTableWidgetItem(m["quarantined_at"])
-            date_item.setData(ID_ROLE, m["id"])
-            date_item.setData(STATUS_ROLE, status)
-
-            items = [
-                date_item,
-                QTableWidgetItem(m["original_path"]),
-                size_item,
-                QTableWidgetItem(m.get("sha256", "")),
-                QTableWidgetItem(STATUS_TEXT.get(status, status)),
-                QTableWidgetItem(m.get("signature") or "—"),
-                QTableWidgetItem(m["reason"]),
-            ]
-            for col, item in enumerate(items):
-                if status != STATUS_QUARANTINED:  # записи истории выделяем серым
-                    item.setForeground(QBrush(QColor("gray")))
-                self.table.setItem(row, col, item)
-
-    def _selected_id(self) -> str | None:
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Карантин", "Сначала выберите элемент в списке")
-            return None
-        cell = self.table.item(row, 0)
-        if cell.data(STATUS_ROLE) != STATUS_QUARANTINED:
-            QMessageBox.information(
-                self, "Карантин", "Это запись из истории: файл уже восстановлен или удалён")
-            return None
-        return cell.data(ID_ROLE)
+        self.protect_journal.refresh()
 
     def restore_selected(self):
-        item_id = self._selected_id()
-        if not item_id:
-            return
-        answer = QMessageBox.question(
-            self, "Восстановление",
-            "Вернуть файл на исходное место?\n\n"
-            "Его SHA-256 будет добавлен в белый список, и сканер не будет "
-            "считать этот файл угрозой, пока его содержимое не изменится.")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            dest = restore_file(item_id)
-            self.statusBar().showMessage(f"Восстановлен: {dest} (добавлен в белый список)")
-        except (FileExistsError, ValueError, OSError) as e:
-            QMessageBox.critical(self, "Ошибка восстановления", str(e))
-        self.refresh_quarantine()
-        self.refresh_whitelist()
+        self.protect_journal.restore_selected()
 
     def delete_selected(self):
-        item_id = self._selected_id()
-        if not item_id:
-            return
-        answer = QMessageBox.question(
-            self, "Удаление",
-            "Файл будет удалён безвозвратно, а его SHA-256 добавлен в "
-            "базу сигнатур (signatures/hashes.txt). Продолжить?")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            added = delete_file(item_id)
-            self.statusBar().showMessage(
-                "Файл удалён, хэш добавлен в базу сигнатур" if added
-                else "Файл удалён, хэш уже был в базе сигнатур")
-        except (ValueError, OSError) as e:
-            QMessageBox.critical(self, "Ошибка удаления", str(e))
-        self.refresh_quarantine()
+        self.protect_journal.delete_selected()
 
     # ---------- закрытие окна ----------
     def _shutdown_all(self):
@@ -1851,11 +1899,24 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Information, 4000)
             return
         activity.record("program", "Программа завершена")
+        from diag import crash
+        crash.begin_exit()
         self._shutdown_all()
+        crash.mark_clean_exit()
         if self.tray is not None:
             self.tray.hide()  # иначе значок остаётся в трее до наведения мыши
         event.accept()
         QApplication.quit()
+
+
+for _name, _fid in (("toggle_protection", "protect.realtime"), ("toggle_network", "net.monitor"),
+                    ("restore_selected", "journal.quarantine"),
+                    ("delete_selected", "journal.quarantine"),
+                    ("remove_from_wl", "journal.whitelist"),
+                    ("_quarantine_threats", "protect.threat_actions"),
+                    ("on_setting_changed", "settings.change"),
+                    ("open_resource_report", "debug.bench")):
+    features.wrap_method(MainWindow, _name, _fid)
 
 
 def elevate_on_start() -> bool:
@@ -1878,6 +1939,11 @@ def _argument(name: str) -> str | None:
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    from diag import crash, edition, resources, uiaudit
+    crash.install_qt_messages()
+    _freeze_watch = crash.FreezeWatch()
+    uiaudit.install(app)
+    features.install_dialog_hook()
     install_message_box_limits()  # длинные команды и пути не растягивают окна сообщений
     apply_theme(app, cfg.get("general/theme"))
     heuristics.set_threshold(cfg.get("scan/threshold"))
@@ -1887,6 +1953,12 @@ if __name__ == "__main__":
     app.setWindowIcon(icon)
     tray_ok = QSystemTrayIcon.isSystemTrayAvailable()
     app.setQuitOnLastWindowClosed(not tray_ok)  # с треем программа живёт и после закрытия окна
+
+    if "--uninstall" in sys.argv:  # удаление программы (uninstall.py): нужны права
+        if not is_admin() and relaunch_as_admin():
+            sys.exit(0)
+        import uninstall
+        sys.exit(0 if uninstall.run() else 1)
 
     autostart = "--autostart" in sys.argv
     analyze_path = _argument("--analyze")  # файл из меню Проводника
@@ -1906,6 +1978,8 @@ if __name__ == "__main__":
     cfg.ensure_explorer_menu()  # пункт «Проверить в ...» в меню файлов — всегда
     if not guard.listen():  # другой экземпляр успел занять имя
         sys.exit(0)
+    crash.start_session()  # метка сеанса: аварийный выход заметен при следующем запуске
+    features.begin("app.start")
 
     window = MainWindow()
     window.guard = guard
@@ -1926,4 +2000,12 @@ if __name__ == "__main__":
     window.start_auto_update()
     window.start_schedule()
     window.start_vpn_on_launch()
+    if edition.is_test():
+        from diag import testpanel
+        testpanel.bridge()
+        _attacher = testpanel.WindowAttacher(app)
+        window.install_test_ui()
+    features.end("app.start", True, окно="скрыто" if quiet_start else "показано")
+    diag_log.session_details()
+    resources.start()
     sys.exit(app.exec())

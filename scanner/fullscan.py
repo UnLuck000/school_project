@@ -10,12 +10,13 @@
 (программа под чужим расширением), он проверяется как обычно. В папке игры ресурс без
 загрузчика не запустится, а загрузчики (exe, dll) проверяются всегда. Видео и аудио распознаёт pool (media.py).
 
-Быстрая проверка (mode="quick", quick_plan): папки Windows и Users — целиком, как полная;
-в остальных папках дисков — только файлы до QUICK_LIMIT (16 МБ): программы и библиотеки
-(QUICK_EXTS: .exe, .dll, .sys, .pyd...) и файлы с заголовком MZ в начале. Ради MZ
-открываются только .txt, .tmp, .bak, .png, .pdf, .docx, .pptx (QUICK_MZ_EXTS): открытие
-файла стоит ~5 мс (его проверяет и Защитник Windows), и проверка заголовков у всех 150 тыс.
-файлов вне Windows и Users заняла 14 минут.
+Быстрая проверка (mode="quick", quick_plan) — только системный диск:
+• файлы прямо в корне диска, в Windows, System32 и SysWOW64 (без вложенных папок) — до
+  QUICK_SYSTEM_LIMIT (16 МБ);
+• папка текущего пользователя (%USERPROFILE%) целиком — файлы до QUICK_USER_LIMIT (32 МБ),
+  с теми же пропусками ресурсов игр, что и у полной.
+Перед файлами (scanner/extras.py): быстрая проверяет весь автозапуск, полная — автозапуск,
+проверку системы и память запущенных процессов.
 """
 import ctypes
 import os
@@ -29,12 +30,8 @@ from pathlib import Path
 from monitor import EXECUTABLE_EXTS
 
 DATA_LIMIT = 256 * 1024 * 1024  # файл данных крупнее — пропускается (если в нём нет MZ)
-QUICK_LIMIT = 16 * 1024 * 1024  # быстрая проверка вне Windows и Users: файлы меньше
-# быстрая проверка: программы и библиотеки — проверяются без открытия ради заголовка
-QUICK_EXTS = {".exe", ".dll", ".sys", ".scr", ".com", ".pif", ".cpl", ".ocx", ".drv", ".efi",
-              ".pyd", ".node", ".msi"}
-# быстрая проверка: под эти расширения прячут программы — открываем и ищем MZ
-QUICK_MZ_EXTS = {".txt", ".tmp", ".bak", ".png", ".pdf", ".docx", ".pptx"}
+QUICK_SYSTEM_LIMIT = 16 * 1024 * 1024  # быстрая: файлы корня диска и папок Windows меньше
+QUICK_USER_LIMIT = 32 * 1024 * 1024    # быстрая: файлы папки пользователя меньше
 BATCH = 256                     # файлов в одном обращении к pool: результаты идут потоком
 
 # архивы ресурсов и данные игровых движков: в них нет исполняемого кода
@@ -133,7 +130,10 @@ class Stats:
     errors: int = 0          # не открылись
     threats: int = 0
     suspicious: int = 0
-    current: str = ""        # папка, которую сейчас обходим
+    autoruns: int = 0        # записей автозапуска проверено
+    checks: int = 0          # проверок системы
+    processes: int = 0       # процессов, чья память проверена
+    current: str = ""        # папка (или этап), который сейчас идёт
     started: float = field(default_factory=time.time)
 
 
@@ -182,40 +182,40 @@ def child_state(state: str, name: str) -> str:
     return ""
 
 
-def quick_reason(name: str, size: int) -> str | None:
-    """Быстрая проверка вне Windows и Users, файлы до 16 МБ: программы и библиотеки —
-    проверять (None); подозрительные расширения — "mz" (открыть и посмотреть заголовок);
-    остальное — причина пропуска."""
-    if size >= QUICK_LIMIT:
-        return "крупный файл (быстрая проверка)"
-    ext = os.path.splitext(name)[1].lower()
-    if ext in QUICK_EXTS:
-        return None
-    if ext in QUICK_MZ_EXTS:
-        return "mz"
-    return "не программа (быстрая проверка)"
+def system_drive() -> str:
+    """Корень системного диска: «C:\»."""
+    return os.environ.get("SystemDrive", "C:").rstrip("\\/") + os.sep
 
 
-def full_roots() -> list[str]:
-    """Папки, которые быстрая проверка проходит целиком: Windows и Users."""
-    windows = os.environ.get("SystemRoot", r"C:\Windows")
-    users = os.path.join(os.environ.get("SystemDrive", "C:") + os.sep, "Users")
-    return [p for p in (windows, users) if os.path.isdir(p)]
+def is_system_drive(root: str) -> bool:
+    return os.path.normcase(root.rstrip("\\/")) == \
+        os.path.normcase(system_drive().rstrip("\\/"))
 
 
-def quick_plan(roots: list[str]) -> list[tuple[str, bool]]:
-    """(папка, быстрый фильтр): Windows и Users целиком, остальные диски — с фильтром."""
-    plan = [(p, False) for p in full_roots()]
-    plan += [(root, True) for root in roots]
-    return plan
+@dataclass
+class QuickRoot:
+    path: str
+    recursive: bool    # False — только файлы прямо в папке
+    limit: int | None  # файлы этого размера и крупнее пропускаются
 
 
-def walk(root: str, stats: Stats, cancel: threading.Event, quick: bool = False,
-         skip_dirs: set[str] | None = None):
+def quick_plan() -> list[QuickRoot]:
+    """Быстрая проверка: корень системного диска, Windows, System32, SysWOW64 — только их
+    файлы (до 16 МБ); папка пользователя — целиком (до 32 МБ)."""
+    windows = os.environ.get("SystemRoot", os.path.join(system_drive(), "Windows"))
+    plan = [QuickRoot(p, False, QUICK_SYSTEM_LIMIT)
+            for p in (system_drive(), windows, os.path.join(windows, "System32"),
+                      os.path.join(windows, "SysWOW64"))]
+    plan.append(QuickRoot(os.path.expanduser("~"), True, QUICK_USER_LIMIT))
+    return [q for q in plan if os.path.isdir(q.path)]
+
+
+def walk(root: str, stats: Stats, cancel: threading.Event, recursive: bool = True,
+         limit: int | None = None):
     """Файлы для проверки (генератор). Ссылки на папки (junction, symlink) не раскрываются:
-    иначе одни и те же папки обходятся по нескольку раз. quick — фильтр быстрой проверки
-    (quick_reason), skip_dirs — папки, уже проверенные целиком."""
-    skip = own_dirs() | {_winsxs()} | {os.path.normcase(d) for d in skip_dirs or ()}
+    иначе одни и те же папки обходятся по нескольку раз. recursive=False — только файлы
+    самой папки; limit — файлы такого размера и крупнее пропускаются (быстрая проверка)."""
+    skip = own_dirs() | {_winsxs()}
     # состояние папки: "" — обычная, "library" — библиотека лаунчера, "game" — папка игры
     stack = [(root, "")]
     while stack:
@@ -238,6 +238,8 @@ def walk(root: str, stats: Stats, cancel: threading.Event, quick: bool = False,
                 if entry.is_symlink() or entry.is_junction():
                     continue
                 if entry.is_dir(follow_symlinks=False):
+                    if not recursive:
+                        continue
                     low = entry.name.lower()
                     if low in SKIP_DIRS or os.path.normcase(entry.path) in skip:
                         continue
@@ -255,15 +257,9 @@ def walk(root: str, stats: Stats, cancel: threading.Event, quick: bool = False,
                 stats.errors += 1
                 continue
             stats.files += 1
-            if quick:
-                reason = quick_reason(entry.name, size)
-                if reason == "mz" and not in_game and _has_mz(entry.path):
-                    reason = None
-                if reason:
-                    stats.skipped += 1
-                    stats.skipped_bytes += size
-                    continue
-                yield entry.path
+            if limit is not None and size >= limit:
+                stats.skipped += 1
+                stats.skipped_bytes += size
                 continue
             reason = skip_reason(entry.name, size, in_game)
             # в папке игры ресурс без загрузчика не запустится, а загрузчики (exe, dll)
@@ -278,8 +274,8 @@ def walk(root: str, stats: Stats, cancel: threading.Event, quick: bool = False,
 
 def run(roots: list[str], on_progress, on_found, cancel: threading.Event,
         mode: str = "full") -> Stats:
-    """Полная (mode="full") или быстрая ("quick") проверка дисков.
-    on_progress(stats) — пачками, on_found(path, level, text)."""
+    """Полная (mode="full") проверка дисков roots или быстрая ("quick": quick_plan, roots не
+    нужны). on_progress(stats) — пачками, on_found(path, level, text)."""
     from analyzer.folderview import classify, rules_and_bases
     from scanner import pool as scan_pool
 
@@ -304,11 +300,20 @@ def run(roots: list[str], on_progress, on_found, cancel: threading.Event,
                 last = time.monotonic()
                 on_progress(stats)
 
-    plan = quick_plan(roots) if mode == "quick" else [(root, False) for root in roots]
-    whole = [root for root, quick in plan if not quick] if mode == "quick" else []
-    for root, quick in plan:
+    def found(path, level, text):
+        stats.threats += level == "threat"
+        stats.suspicious += level == "suspicious"
+        on_found(path, level, text)
+
+    def say(text):
+        stats.current = text
+        on_progress(stats)
+
+    run_extras(mode, stats, signatures, rules, whitelist, found, cancel, say)
+    plan = quick_plan() if mode == "quick" else [QuickRoot(r, True, None) for r in roots]
+    for item in plan:
         batch = []
-        for path in walk(root, stats, cancel, quick, set(whole) if quick else None):
+        for path in walk(item.path, stats, cancel, item.recursive, item.limit):
             batch.append(path)
             stats.queued += 1
             if len(batch) >= BATCH:
@@ -320,3 +325,24 @@ def run(roots: list[str], on_progress, on_found, cancel: threading.Event,
             break
     on_progress(stats)
     return stats
+
+
+def run_extras(mode, stats, signatures, rules, whitelist, found, cancel, say) -> None:
+    """Автозапуск (обе проверки), проверка системы и память (полная). Сбой этапа не
+    останавливает проверку файлов: он попадает в находки как ошибка этапа."""
+    from scanner import extras
+    stages = [("автозапуск", lambda: setattr(stats, "autoruns", extras.scan_autoruns(
+        signatures, rules, whitelist, found, cancel, say)))]
+    if mode == "full":
+        stages += [("проверка системы", lambda: setattr(stats, "checks", extras.scan_system(
+                       found, cancel, say))),
+                   ("память процессов", lambda: setattr(stats, "processes", extras.scan_memory(
+                       found, cancel, say)))]
+    for title, stage in stages:
+        if cancel.is_set():
+            return
+        try:
+            stage()
+        except Exception as e:
+            stats.errors += 1
+            say(f"{title}: не выполнено ({e})")

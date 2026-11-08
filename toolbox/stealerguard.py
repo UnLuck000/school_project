@@ -127,6 +127,11 @@ def _save_trust(items: set[str]) -> None:
                           encoding="utf-8")
 
 
+@journal.active_check("stealer_untrust")
+def _trust_active(d: dict) -> bool:
+    return os.path.normcase(d["exe"]) in load_trust()
+
+
 @journal.undo_op("stealer_untrust")
 def _undo_trust(d: dict) -> str:
     items = load_trust()

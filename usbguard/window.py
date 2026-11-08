@@ -1,10 +1,11 @@
 """Окно «USB-накопители»: проверка флешки и её восстановление после вируса-ярлыка."""
 import threading
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+    QAbstractItemView, QComboBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
+    QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -18,6 +19,8 @@ LEVELS = {"threat": ("Угроза", (255, 128, 128)), "suspicious": ("Пров�
           "info": ("Сведения", None)}
 FIXES = {"quarantine": "в карантин", "unhide": "показать (снять «скрытый»)",
          "restore_folder": "вернуть файлы в корень", "": "—"}
+KINDS = {"autorun": "autorun.inf", "shortcut": "ярлык", "script": "скрипт",
+         "program": "программа", "hidden_folder": "скрытая папка", "hidden_file": "скрытый файл"}
 
 
 def check_drive(root: str, label: str = "", cancel: threading.Event | None = None) -> DriveReport:
@@ -104,11 +107,15 @@ class UsbWindow(QMainWindow):
         layout.addWidget(self.status)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Уровень", "Что найдено", "Путь", "Подробности", "Действие"])
+        # путь и подробности — в «Описании» (двойной щелчок или правая кнопка)
+        self.tree.setHeaderLabels(["Уровень", "Что найдено", "Действие"])
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setRootIsDecorated(False)
-        for col, width in enumerate((90, 330, 260, 260)):
+        for col, width in enumerate((100, 560)):
             self.tree.setColumnWidth(col, width)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.describe())
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._menu)
         layout.addWidget(self.tree, 1)
 
         actions = QHBoxLayout()
@@ -171,9 +178,9 @@ class UsbWindow(QMainWindow):
         self.tree.clear()
         for f in report.findings:
             level, rgb = LEVELS.get(f.level, (f.level, None))
-            item = QTreeWidgetItem([level, f.title, f.path, f.detail, FIXES.get(f.fix, f.fix)])
-            for col in range(5):
-                item.setToolTip(col, item.text(col))
+            item = QTreeWidgetItem([level, f.title, FIXES.get(f.fix, f.fix)])
+            for col in range(3):
+                item.setToolTip(col, f.path)
                 if rgb:
                     item.setBackground(col, QBrush(QColor(*rgb)))
                     item.setForeground(col, QBrush(text_color(rgb)))
@@ -193,6 +200,45 @@ class UsbWindow(QMainWindow):
         self.btn_vaccine.setEnabled(has_drive)
         self.btn_cure.setEnabled(has_drive and fixable)
         self.btn_selected.setEnabled(has_drive and fixable)
+
+    # ---------- описание и меню ----------
+    def _selected(self) -> list:
+        return [item.data(0, 256) for item in self.tree.selectedItems()]
+
+    def _menu(self, pos) -> None:
+        findings = self._selected()
+        if not findings:
+            return
+        menu = QMenu(self)
+        menu.addAction("Описание", self.describe)
+        menu.addSeparator()
+        menu.addAction("Исправить выбранное", self.fix_selected).setEnabled(
+            any(f.fix for f in findings))
+        menu.addAction("Показать в проводнике", lambda: self._show(findings[0]))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def describe(self) -> None:
+        findings = self._selected()
+        if not findings:
+            return
+        f = findings[0]
+        from ui.details import show_details
+        level = LEVELS.get(f.level, (f.level, None))[0]
+        rows = [("Что найдено", f.title), ("Уровень", level), ("Вид", KINDS.get(f.kind, f.kind)),
+                ("Путь", f.path), ("Подробности", f.detail),
+                ("Что сделает исправление", FIXES.get(f.fix, f.fix)),
+                ("Накопитель", f"{self.report.root[:2]} {self.report.label}".strip()
+                 if self.report else "")]
+        actions = [("Показать в проводнике", lambda d: self._show(f))]
+        if f.fix:
+            actions.insert(0, ("Исправить", lambda d: (d.accept(), self._fix(
+                [f], f"{f.title}: {FIXES.get(f.fix, f.fix)}?"))))
+        show_details(self, f"USB: {f.title}", rows, actions)
+
+    @staticmethod
+    def _show(f) -> None:
+        from analyzer import fileops
+        fileops.show_in_explorer(f.path)
 
     # ---------- исправление ----------
     def _fix(self, findings: list, question: str) -> None:

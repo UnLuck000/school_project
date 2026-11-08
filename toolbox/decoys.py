@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 
 from recovery import journal
-from recovery.journal import undo_op
+from recovery.journal import active_check, undo_op
 
 DECOY_NAME = "!myav — файлы-ловушки"
 MANIFEST = journal.JOURNAL_DIR / "decoys.json"
@@ -187,6 +187,16 @@ def uninstall() -> None:
     _save_manifest({})
     journal.log_action("Файлы-ловушки для шифровальщиков убраны", "decoys_create",
                        {"folders": [str(d.parent) for d in dirs]})
+
+
+@active_check("decoys_remove")
+def _decoys_active(d: dict) -> bool:
+    return bool(load_manifest())
+
+
+@active_check("decoys_create")
+def _no_decoys_active(d: dict) -> bool:
+    return not load_manifest()
 
 
 @undo_op("decoys_remove")

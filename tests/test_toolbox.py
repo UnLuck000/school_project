@@ -28,8 +28,8 @@ def test_activity_report_and_periods(sandbox, monkeypatch):
     activity.record("scan_folder", r"C:\x: Найдено угроз: 1", found=[r"C:\x\bad.exe: Угроза"])
     activity.record("custom", "событие без раздела")
     text = activity.build_report()
-    assert "Угрозы, найденные защитой файлов (1)" in text and "bad.exe" not in text
-    assert re.search(r"C:\\[a-z0-9]{8}\\[a-z0-9]{8}\.exe: hash match", text)
+    assert "Угрозы, найденные защитой файлов (1)" in text
+    assert r"C:\x\bad.exe: hash match" in text  # имена файлов остаются (п. 1.3)
     assert "Сканирование папок (1)" in text and "событие без раздела" in text
     assert "== Карантин сейчас: 0 ==" in text
 
@@ -57,26 +57,7 @@ def test_activity_anonymize(sandbox):
     activity.record("threat", os.path.join(os.environ["USERPROFILE"], "bad.exe") + ": hash")
     report = activity.build_report()
     assert os.environ["USERPROFILE"].lower() not in report.lower()
-    assert re.search(r"%USERPROFILE%\\[a-z0-9]{8}\.exe: hash", report)
-
-
-def test_activity_hide_names():
-    hide = activity.NameHider()
-    text = (r"%USERPROFILE%\Downloads\Договор Иванова.docx: Угроза (YARA)" "\n"
-            r"%USERPROFILE%\Desktop\Учёба 2025\Договор Иванова.docx — карантин" "\n"
-            r"C:\Program Files (x86)\Steam\steam.exe: ok" "\n"
-            r"C:\Windows\System32\evil.dll; E:\FLASH.lnk: ярлык" "\n"
-            r"C:\Users\%OTHERUSER%\Pictures\фото.jpg" "\n"
-            "Файл «Договор Иванова.docx» перемещён в карантин")
-    out = hide(text).splitlines()
-    code = re.search(r"Downloads\\([a-z0-9]{8})\.docx: Угроза \(YARA\)$", out[0]).group(1)
-    assert re.fullmatch(r"%USERPROFILE%\\Desktop\\[a-z0-9]{8}\\" + code + r"\.docx — карантин",
-                        out[1])                                # одно имя — один код
-    assert out[2] == r"C:\Program Files (x86)\Steam\steam.exe: ok"  # системные места как есть
-    assert re.fullmatch(r"C:\\Windows\\System32\\evil\.dll; E:\\[a-z0-9]{8}\.lnk: ярлык", out[3])
-    assert re.fullmatch(r"C:\\Users\\%OTHERUSER%\\Pictures\\[a-z0-9]{8}\.jpg", out[4])
-    assert out[5] == f"Файл «{code}.docx» перемещён в карантин"
-    assert "Иванов" not in hide(text)
+    assert r"%USERPROFILE%\bad.exe: hash" in report
 
 
 def test_pwned_offline():

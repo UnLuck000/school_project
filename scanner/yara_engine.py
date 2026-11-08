@@ -341,6 +341,11 @@ def match_details(rules, path: Path, timeout: int = 30, raw: bool = False,
             matches = rules.match(data=data, timeout=timeout, externals=_externals(path))
         elif path.stat().st_size > MAX_FILE_SIZE:
             return []
+        elif not str(path).isascii():
+            # yara-python открывает файл в ANSI-кодировке: путь с кириллицей не находится,
+            # и файл молча считался чистым — проверяем по прочитанным байтам
+            matches = rules.match(data=path.read_bytes(), timeout=timeout,
+                                  externals=_externals(path))
         else:
             matches = rules.match(str(path), timeout=timeout, externals=_externals(path))
     except (yara.Error, OSError):  # TimeoutError тоже наследуется от yara.Error

@@ -293,13 +293,12 @@ class ToolsPage(_UiPage):
 class SettingsPage(_UiPage):
     UI_NAME = "settings_page"
     changed = Signal(str, object)  # ключ, новое значение
-    advanced_requested = Signal()  # кнопка «Открыть дополнительные настройки и отладку»
+    advanced_requested = Signal()  # кнопка «Режим администратора»
 
     def __init__(self):
         super().__init__()
         ui = self.ui
         self.chk_autostart = child(ui, QCheckBox, "chkAutostart")
-        self.chk_vpn_autostart = child(ui, QCheckBox, "chkVpnAutostart")
         # «Запуск» и «Плановая проверка» — только после пароля, как «Проверка» и «Запреты»
         self.group_startup = child(ui, QGroupBox, "groupStartup")
         self.group_schedule = child(ui, QGroupBox, "groupSchedule")
@@ -366,7 +365,7 @@ class SettingsPage(_UiPage):
             ("lock/vpn", "chkLockVpn"))}
         self.btn_advanced = child(ui, QPushButton, "btnAdvanced")
         self.btn_advanced.clicked.connect(lambda checked=False: self.advanced_requested.emit())
-        self._all = (self.chk_autostart, self.chk_vpn_autostart, self.chk_block_exit,
+        self._all = (self.chk_autostart, self.chk_block_exit,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
                      self.spn_workers, self.spn_interval,
                      self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
@@ -378,7 +377,6 @@ class SettingsPage(_UiPage):
         guard_wheel(ui)  # колесо над полем прокручивает страницу, значение — после щелчка
 
         self.chk_autostart.toggled.connect(self._on_autostart)
-        self.chk_vpn_autostart.toggled.connect(lambda v: self._save("vpn/autostart", v))
         self.chk_block_exit.toggled.connect(lambda v: self._save("general/block_exit", v))
         self.chk_on_top.toggled.connect(lambda v: self._save("general/on_top", v))
         self.chk_decoys.toggled.connect(lambda v: self._save("protect/decoys", v))
@@ -405,20 +403,26 @@ class SettingsPage(_UiPage):
         self.btn_reset.clicked.connect(lambda checked=False: self._reset())
         self.btn_reset.setVisible(False)
 
+    def add_admin_group(self, group: QWidget) -> None:
+        """Раздел режима администратора из другой страницы (пароль) — после «Запретов»."""
+        layout = self.group_locks.parentWidget().layout()
+        layout.insertWidget(layout.indexOf(self.group_locks) + 1, group)
+        group.setVisible(False)
+        self._admin_extra = [*getattr(self, "_admin_extra", []), group]
+
     def set_debug(self, on: bool) -> None:
-        """Разделы «Запуск», «Плановая проверка», «Проверка» и «Запреты» видны только после
-        пароля администратора."""
+        """Разделы «Запуск», «Плановая проверка», «Проверка», «Запреты» и «Пароль
+        администратора» видны только в режиме администратора."""
         for group in (self.group_startup, self.group_schedule, self.group_scan,
-                      self.group_locks, self.btn_reset):
+                      self.group_locks, self.btn_reset, *getattr(self, "_admin_extra", [])):
             group.setVisible(on)
-        self.btn_advanced.setText("Скрыть дополнительные настройки и отладку" if on
-                                  else "Открыть дополнительные настройки и отладку")
+        self.btn_advanced.setText("Выйти из режима администратора" if on
+                                  else "Режим администратора")
 
     def load_values(self) -> None:
         for widget in self._all:
             widget.blockSignals(True)
         self.chk_autostart.setChecked(cfg.autostart_enabled())
-        self.chk_vpn_autostart.setChecked(cfg.get("vpn/autostart"))
         self.chk_block_exit.setChecked(cfg.get("general/block_exit"))
         self.chk_on_top.setChecked(cfg.get("general/on_top"))
         self.chk_decoys.setChecked(cfg.get("protect/decoys"))
@@ -502,7 +506,7 @@ class SettingsPage(_UiPage):
             return
         cfg.reset()
         try:
-            cfg.set_autostart(cfg.get("startup/autostart"))  # по умолчанию — включён
+            cfg.set_autostart(cfg.get("startup/autostart"))  # по умолчанию — выключен
         except OSError:
             pass
         self.load_values()
@@ -554,10 +558,26 @@ class AboutPage(_UiPage):
         child(ui, QLabel, "lblDisclaimer").setText(appinfo.DISCLAIMER)
         child(ui, QPushButton, "btnRepo").clicked.connect(
             lambda checked=False: QDesktopServices.openUrl(QUrl(appinfo.REPO_URL)))
+        self._admin_groups: list[QWidget] = []
+
+    def add_admin_group(self, group: QWidget) -> None:
+        """Раздел, видный только в режиме администратора (отчёт о работе программы)."""
+        layout = self.ui.layout()  # сразу под карточками, до распорки внизу страницы
+        layout.insertWidget(layout.indexOf(child(self.ui, QFrame, "cardNote")) + 1, group)
+        group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        group.setVisible(False)
+        self._admin_groups.append(group)
+
+    def set_admin(self, on: bool) -> None:
+        for group in self._admin_groups:
+            group.setVisible(on)
 
 
 class DebugPage(_UiPage):
-    """Служебная страница: видна только в режиме отладки."""
+    """Служебная страница: только в тестовой версии, в режиме администратора. Разделы
+    «Отчёт о работе программы» (group_activity) и «Пароль администратора» (group_access)
+    создаются здесь, а показываются на страницах «О программе» и «Настройки» — во всех
+    версиях, тоже только в режиме администратора."""
     UI_NAME = "debug_page"
     password_changed = Signal(bool)  # True: пароль задан
 
@@ -584,6 +604,8 @@ class DebugPage(_UiPage):
             lambda checked=False: self.show_activity_info())
         child(self.ui, QPushButton, "btnActivityFolder").clicked.connect(
             lambda checked=False: self._open_path(self._activity_dir()))
+        self.group_activity = child(self.ui, QGroupBox, "groupActivity")
+        self.group_access = child(self.ui, QGroupBox, "groupAccess")
 
     @staticmethod
     def _activity_dir():
@@ -631,8 +653,8 @@ class DebugPage(_UiPage):
         self.btn_default_password.setText("Убрать пароль по умолчанию" if default
                                           else "Вернуть пароль по умолчанию")
         self.btn_default_password.setEnabled(own or not default)
-        text = ("Дополнительные настройки и эта вкладка открываются кнопкой на странице "
-                "«Настройки» после ввода пароля. ")
+        text = ("Режим администратора открывается кнопкой «Режим администратора» на "
+                "странице «Настройки» после ввода пароля. ")
         text += ("Пароль по умолчанию действует и показывается подсказкой в окне ввода. "
                  if default else "Пароль по умолчанию убран: подсказки в окне ввода нет. ")
         if own:

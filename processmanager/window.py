@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal, QEvent
 from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDockWidget, QHeaderView, QLabel,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDockWidget, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
     QTextEdit, QTreeWidget, QVBoxLayout,
 )
@@ -64,11 +64,28 @@ class ProcItem(SortItem):
 assert ProcItem.SORT_ROLE == SORT_ROLE
 
 
+# размеры окон под экран 1920×1080 (меньший экран — по его рабочей области)
+WINDOW_SIZE = (1860, 720)
+PROPERTIES_SIZE = (1540, 560)
+# эти действия — только в меню «Процесс» и по правой кнопке, на панели их нет
+MENU_ONLY = {"props", "scan", "memdeep", "inject"}
+
+
+def fit_size(widget, size: tuple[int, int]):
+    """Задать размер окна, не больше рабочей области экрана."""
+    width, height = size
+    screen = widget.screen() or QApplication.primaryScreen()
+    if screen is not None:
+        area = screen.availableGeometry()
+        width, height = min(width, area.width() - 40), min(height, area.height() - 60)
+    widget.resize(width, height)
+
+
 class TextDialog(QDialog):
     def __init__(self, title: str, text: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(780, 540)
+        fit_size(self, PROPERTIES_SIZE)
         self._scan_workers = 4
         layout = QVBoxLayout(self)
         edit = QTextEdit()
@@ -85,7 +102,7 @@ class ProcessWindow(QMainWindow):
     def __init__(self):
         super().__init__()  # без родителя: отдельное окно
         self.setWindowTitle("Диспетчер процессов")
-        self.resize(1500, 700)
+        fit_size(self, WINDOW_SIZE)
         self.bridge = Bridge()
         self.bridge.snapshot.connect(self.on_snapshot)
         self.bridge.mem_result.connect(self.on_mem_result)
@@ -145,7 +162,8 @@ class ProcessWindow(QMainWindow):
             action_id, text, handler = d
             action = QAction(text, self)
             action.triggered.connect(lambda checked=False, h=handler: h())
-            toolbar.addAction(action)
+            if action_id not in MENU_ONLY:
+                toolbar.addAction(action)
             self.menu_actions.append(action)
             self.actions[action_id] = action
 
@@ -247,8 +265,7 @@ class ProcessWindow(QMainWindow):
             "«Возобновить» отключены. Причина указана в подсказке над именем процесса."))
         dock.setWidget(legend)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        toolbar.addSeparator()
-        toolbar.addAction(dock.toggleViewAction())  # кнопка показа и скрытия легенды
+        dock.hide()  # по умолчанию скрыта: «Вид» → «Легенда цветов»
         return dock
 
     def _show_menu(self, pos):
@@ -619,7 +636,10 @@ class ProcessWindow(QMainWindow):
     def show_memory_map(self):
         p = self._selected()
         if p:
-            MemoryDialog(p.pid, p.name, self).show()
+            from processmanager.memview import keep_window
+            dialog = MemoryDialog(p.pid, p.name)  # без владельца: не закрывает диспетчер
+            keep_window(dialog)
+            dialog.show()
 
     def set_memory_allowed(self, on: bool) -> None:
         """Карта памяти и поиск внедрения кода (запрет «Память» в ui/access.py)."""
@@ -627,9 +647,12 @@ class ProcessWindow(QMainWindow):
             self.actions[action_id].setVisible(on)
 
     def find_injections(self):
-        procs = [(p.pid, p.name, p.exe) for p in self.procs.values()
-                 if p.pid not in (0, 4, os.getpid())]
-        InjectionScanDialog(procs, self).show()
+        """Список процессов окно берёт само (снимок ntsnap): из «Инструментов» оно
+        открывается раньше, чем диспетчер заполнит свою таблицу."""
+        from processmanager.memview import keep_window
+        dialog = InjectionScanDialog(analyze=self.analyze_requested.emit)
+        keep_window(dialog)
+        dialog.show()
 
     # ---------- сканирование памяти ----------
     def scan_selected_memory(self):

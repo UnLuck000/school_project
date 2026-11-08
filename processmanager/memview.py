@@ -19,7 +19,31 @@ from ui.widgets import SortItem, make_tree
 LEVEL_COLORS = {"suspicious": (255, 160, 110), "check": (255, 235, 150)}
 LEVEL_TEXT = {"suspicious": "Подозрительно", "check": "На проверку", "normal": ""}
 NUM_ROLE = Qt.ItemDataRole.UserRole + 1
+REPORT_ROLE = Qt.ItemDataRole.UserRole + 3
 FILTERS = ["Подозрительные и на проверку", "Все исполняемые", "Все регионы"]
+
+_windows: list = []  # открытые окна без владельца: живут, пока не закрыты
+
+
+def keep_window(window) -> None:
+    """Окно без родителя (не держится поверх окна, из которого открыто): хранить ссылку,
+    пока его не закроют."""
+    window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    _windows.append(window)
+    window.destroyed.connect(lambda *_: _windows.remove(window) if window in _windows else None)
+
+
+def all_processes() -> list[tuple[int, str, str]]:
+    """(PID, имя, файл) всех процессов, кроме ядра и самой программы — одним снимком
+    (диспетчер процессов при открытии ещё может не успеть заполнить свой список)."""
+    from processmanager import ntsnap
+    me = os.getpid()
+    procs = []
+    for raw in ntsnap.list_processes():
+        if raw.pid in (0, 4, me):
+            continue
+        procs.append((raw.pid, raw.name, ntsnap._exe_by_kernel(raw.pid)))
+    return procs
 
 
 class _Item(SortItem):
@@ -256,13 +280,16 @@ class MemoryDialog(QDialog):
 
 
 class InjectionScanDialog(QDialog):
-    """Проверка карты памяти всех процессов: где есть признаки внедрения кода."""
-    def __init__(self, procs: list[tuple[int, str, str]], parent=None):
+    """Проверка карты памяти всех процессов: где есть признаки внедрения кода. Путь и
+    подробности — в описании (двойной щелчок или правая кнопка), там же действия."""
+    def __init__(self, procs: list[tuple[int, str, str]] | None = None, parent=None,
+                 analyze=None):
         super().__init__(parent)
+        self.analyze = analyze  # открыть файл в сканере (главное окно)
         self.setWindowTitle("Поиск внедрения кода в процессах")
         self.resize(1100, 640)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
-        self.procs = procs
+        self.procs = procs or []
         self._cancel = threading.Event()
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._on_progress)
@@ -273,14 +300,16 @@ class InjectionScanDialog(QDialog):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.tree = _tree(["Процесс", "PID", "Подозрительных", "На проверку", "Приватных X",
-                           "RWX", "Главная причина", "Путь"],
-                          [200, 70, 120, 100, 100, 70, 380, 300])
-        self.tree.itemDoubleClicked.connect(self._open)
+                           "RWX", "Главная причина"],
+                          [200, 70, 120, 100, 100, 70, 380])
+        self.tree.itemDoubleClicked.connect(lambda item, col: self.describe(item))
+        self.tree.customContextMenuRequested.connect(self._menu)
         layout.addWidget(self.tree, 1)
         row = QHBoxLayout()
         self.btn_stop = QPushButton("Остановить")
         self.btn_stop.clicked.connect(self._cancel.set)
-        row.addWidget(QLabel("Двойной щелчок по строке: подробная карта памяти и модули."))
+        row.addWidget(QLabel("Двойной щелчок или правая кнопка: описание процесса и "
+                             "действия (карта памяти, завершить, сканер)."))
         row.addStretch()
         row.addWidget(self.btn_stop)
         layout.addLayout(row)
@@ -289,6 +318,9 @@ class InjectionScanDialog(QDialog):
         threading.Thread(target=self._job, daemon=True).start()
 
     def _job(self) -> None:
+        if not self.procs:
+            self.procs = all_processes()
+
         def work(proc):
             if self._cancel.is_set():
                 return None
@@ -316,11 +348,13 @@ class InjectionScanDialog(QDialog):
         rwx = sum(1 for r in executable if r.protect & memdeep.WRITE_EXEC)
         main = (suspicious or check)[0].reasons[0]
         item = _Item([report.name, str(report.pid), str(len(suspicious)), str(len(check)),
-                      str(private_x), str(rwx), main, getattr(report, "exe", "")])
+                      str(private_x), str(rwx), main])
+        item.setData(0, REPORT_ROLE, report)
+        item.setToolTip(0, getattr(report, "exe", "") or report.name)
         for col, value in ((1, report.pid), (2, len(suspicious)), (3, len(check)),
                            (4, private_x), (5, rwx)):
             item.setData(col, NUM_ROLE, value)
-        _paint(item, "suspicious" if suspicious else "check", 8)
+        _paint(item, "suspicious" if suspicious else "check", 7)
         if suspicious:
             self._found += 1
         self.tree.addTopLevelItem(item)
@@ -334,10 +368,77 @@ class InjectionScanDialog(QDialog):
             f"{self.tree.topLevelItemCount()}. Жёлтые строки чаще всего нормальны (JIT, "
             "переходники); оранжевые стоит открыть и проверить.")
 
-    def _open(self, item, _column) -> None:
+    def _open(self, item, _column=0) -> None:
         pid = item.data(1, NUM_ROLE)
         if pid is not None:
-            MemoryDialog(pid, item.text(0), self).show()
+            dialog = MemoryDialog(pid, item.text(0))
+            keep_window(dialog)
+            dialog.show()
+
+    def _menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        exe = getattr(item.data(0, REPORT_ROLE), "exe", "") or ""
+        menu = QMenu(self)
+        menu.addAction("Описание", lambda: self.describe(item))
+        menu.addAction("Карта памяти и модули", lambda: self._open(item))
+        menu.addSeparator()
+        menu.addAction("Проверить файл в сканере",
+                       lambda: self._analyze(exe)).setEnabled(bool(exe and self.analyze))
+        menu.addAction("Показать в проводнике",
+                       lambda: open_in_explorer(exe)).setEnabled(bool(exe))
+        menu.addAction("Завершить процесс", lambda: self._kill(item))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _analyze(self, exe: str) -> None:
+        if exe and self.analyze:
+            self.analyze(exe)
+
+    def _kill(self, item) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        import psutil
+        pid, name = item.data(1, NUM_ROLE), item.text(0)
+        answer = QMessageBox.question(self, "Завершить процесс",
+                                      f"Завершить {name} (PID {pid})? Несохранённые данные "
+                                      "этой программы пропадут.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            p = psutil.Process(pid)
+            p.terminate()
+            p.wait(3)
+            text = f"Процесс {name} (PID {pid}) завершён"
+        except psutil.NoSuchProcess:
+            text = "Процесс уже завершён"
+        except (psutil.Error, OSError) as e:
+            text = f"Не удалось завершить: {e}"
+        QMessageBox.information(self, "Завершить процесс", text)
+
+    def describe(self, item) -> None:
+        report = item.data(0, REPORT_ROLE)
+        if report is None:
+            return
+        from ui.details import show_details
+        exe = getattr(report, "exe", "") or ""
+        regions = [r for r in report.regions if r.level in ("suspicious", "check")]
+        reasons = []
+        for r in regions[:12]:
+            reasons.append(f"0x{r.base:X} ({LEVEL_TEXT.get(r.level, r.level)}): "
+                           + "; ".join(r.reasons))
+        rows = [("Процесс", report.name), ("PID", str(report.pid)), ("Файл", exe),
+                ("Подозрительных регионов", item.text(2)), ("На проверку", item.text(3)),
+                ("Приватных исполняемых", item.text(4)), ("RWX", item.text(5)),
+                ("Главная причина", item.text(6))]
+        rows += [(f"Регион {i}", text) for i, text in enumerate(reasons, 1)]
+        if len(regions) > 12:
+            rows.append(("…", f"ещё регионов: {len(regions) - 12} (в карте памяти)"))
+        actions = [("Карта памяти и модули", lambda d: self._open(item)),
+                   ("Завершить процесс", lambda d: self._kill(item))]
+        if exe:
+            actions.insert(1, ("Проверить файл в сканере", lambda d: self._analyze(exe)))
+            actions.insert(2, ("Показать в проводнике", lambda d: open_in_explorer(exe)))
+        show_details(self, f"Процесс {report.name}: описание", rows, actions)
 
     def closeEvent(self, event) -> None:
         self._cancel.set()
