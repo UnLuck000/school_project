@@ -12,6 +12,9 @@ from scanner.engine import check_file
 from scanner.hashing import load_all_signatures
 from scanner.whitelist import load_whitelist, trusted_hashes
 from processmanager.memscan import shared_rules
+from scanner.watchflags import use_content_flags
+
+use_content_flags()  # без событий от чтения: иначе проверялись давно не менявшиеся файлы
 
 # временные файлы браузеров и загрузчиков: проверяем уже после переименования
 TEMP_SUFFIXES = {".crdownload", ".part", ".partial", ".tmp", ".download", ".opdownload"}
@@ -255,6 +258,9 @@ class RealtimeMonitor:
             self._emit("stopped", "Защита выключена")
 
     def _handle(self, path: Path, tries: int):
+        from toolbox.decoys import is_decoy
+        if is_decoy(path):
+            return  # ловушки сторожит DecoyWatcher, своё чтение его только тревожит
         try:
             if not path.is_file():
                 return  # файл успели удалить или переименовать

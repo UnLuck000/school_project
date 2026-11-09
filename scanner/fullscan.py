@@ -58,7 +58,10 @@ GAME_LIBRARIES = {"steamapps", "epic games", "riot games", "xboxgames", "gog gam
 
 # служебные места, где проверять нечего или нельзя
 SKIP_DIRS = {"system volume information", "$winreagent", "$sysreset", "$windows.~bt",
-             "$windows.~ws", "windows.old"}
+             "$windows.~ws", "windows.old",
+             # ловушки для шифровальщиков (toolbox.decoys.DECOY_NAME): свои файлы, а чтение
+             # во время проверки поднимало тревогу «ловушки изменены, виновник не найден»
+             "!myav — файлы-ловушки"}
 SKIP_FILES = {"pagefile.sys", "hiberfil.sys", "swapfile.sys", "dumpstack.log.tmp"}
 
 

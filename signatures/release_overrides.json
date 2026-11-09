@@ -28,7 +28,7 @@
       "path": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Steam\\Rust.url"
     },
     "79be63f17a7b5aec4d6ea5ba987047bb9781096e9e3031d6d911587f05398d22": {
-      "added_at": "2026-11-08T23:25:22",
+      "added_at": "2026-11-08T23:51:18",
       "layers": [
         "yara"
       ],

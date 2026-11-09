@@ -170,6 +170,9 @@ def folder_stats(path: str, cancel=None) -> tuple[int, int, int, int]:
     return files, folders, size, on_disk
 
 
+DECOY_DIR = "!myav — файлы-ловушки"  # toolbox.decoys.DECOY_NAME в нижнем регистре
+
+
 def folder_files(path: str, limit: int, cancel=None,
                  stop_over: bool = False) -> tuple[list[str] | None, int, int, bool]:
     """Все файлы папки с вложенными: (список файлов или None, если папка весит больше limit,
@@ -194,7 +197,8 @@ def folder_files(path: str, limit: int, cancel=None,
                 if entry.is_symlink() or entry.is_junction():
                     continue
                 if entry.is_dir(follow_symlinks=False):
-                    stack.append(entry.path)
+                    if entry.name.lower() != DECOY_DIR:  # ловушки не трогаем: ложная тревога
+                        stack.append(entry.path)
                 elif entry.is_file(follow_symlinks=False):
                     count += 1
                     size += entry.stat(follow_symlinks=False).st_size

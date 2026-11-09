@@ -1,15 +1,15 @@
 {
  "app.start": {
-  "verified_at": "2026-11-08 21:15:34",
+  "verified_at": "2026-11-08 23:50:39",
   "version": "0.1.0",
   "steps": [],
-  "duration": 1.27,
+  "duration": 1.62,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "db.update": {
-  "verified_at": "2026-11-08 19:22:54",
+  "verified_at": "2026-11-08 23:50:42",
   "version": "0.1.0",
   "steps": [],
   "duration": null,
@@ -18,16 +18,16 @@
   "had_run": false
  },
  "scan.file": {
-  "verified_at": "2026-11-08 19:23:58",
+  "verified_at": "2026-11-08 23:47:27",
   "version": "0.1.0",
   "steps": [],
-  "duration": 0.64,
+  "duration": 0.04,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "protect.schedule": {
-  "verified_at": "2026-11-08 19:41:22",
+  "verified_at": "2026-11-08 23:44:41",
   "version": "0.1.0",
   "steps": [],
   "duration": null,
@@ -36,7 +36,7 @@
   "had_run": false
  },
  "protect.decoys": {
-  "verified_at": "2026-11-08 19:41:39",
+  "verified_at": "2026-11-08 23:44:44",
   "version": "0.1.0",
   "steps": [],
   "duration": null,
@@ -45,16 +45,16 @@
   "had_run": false
  },
  "net.monitor": {
-  "verified_at": "2026-11-08 19:41:55",
+  "verified_at": "2026-11-08 23:44:49",
   "version": "0.1.0",
   "steps": [],
-  "duration": 0.03,
+  "duration": 0.05,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "net.block": {
-  "verified_at": "2026-11-08 19:42:35",
+  "verified_at": "2026-11-08 23:44:50",
   "version": "0.1.0",
   "steps": [],
   "duration": null,
@@ -63,7 +63,7 @@
   "had_run": false
  },
  "settings.change": {
-  "verified_at": "2026-11-08 23:26:24",
+  "verified_at": "2026-11-08 23:44:12",
   "version": "0.1.0",
   "steps": [],
   "duration": 0.0,
@@ -81,43 +81,124 @@
   "had_run": true
  },
  "debug.bench": {
-  "verified_at": "2026-11-08 23:25:33",
+  "verified_at": "2026-11-08 23:44:15",
   "version": "0.1.0",
   "steps": [],
-  "duration": 0.04,
+  "duration": 0.01,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "win.autoruns": {
-  "verified_at": "2026-11-08 22:34:18",
+  "verified_at": "2026-11-08 23:46:52",
   "version": "0.1.0",
   "steps": [],
-  "duration": 3.38,
+  "duration": 15.54,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "win.password": {
-  "verified_at": "2026-11-08 22:22:21",
+  "verified_at": "2026-11-08 23:51:23",
   "version": "0.1.0",
   "steps": [],
-  "duration": 22.92,
+  "duration": 2.58,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "win.link": {
-  "verified_at": "2026-11-08 22:22:17",
+  "verified_at": "2026-11-08 23:53:45",
   "version": "0.1.0",
   "steps": [],
-  "duration": 52.23,
+  "duration": 5.6,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
  "win.usb": {
-  "verified_at": "2026-11-08 20:06:52",
+  "verified_at": "2026-11-08 23:47:55",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 117.5,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.process_manager": {
+  "verified_at": "2026-11-08 23:47:21",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 421.84,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.recovery": {
+  "verified_at": "2026-11-08 23:54:10",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.96,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.memory": {
+  "verified_at": "2026-11-08 23:47:38",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 23.62,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.injection": {
+  "verified_at": "2026-11-08 23:47:07",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 3.48,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "win.false_positives": {
+  "verified_at": "2026-11-08 23:50:34",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 3.47,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "journal.undo": {
+  "verified_at": "2026-11-08 23:54:13",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.0,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "protect.realtime": {
+  "verified_at": "2026-11-09 13:06:54",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.05,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "protect.full_scan": {
+  "verified_at": "2026-11-08 23:44:34",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 198.01,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "protect.threat_actions": {
+  "verified_at": "2026-11-08 23:44:38",
   "version": "0.1.0",
   "steps": [],
   "duration": null,
@@ -125,47 +206,88 @@
   "note": "",
   "had_run": false
  },
- "win.process_manager": {
-  "verified_at": "2026-11-08 22:27:18",
+ "journal.quarantine": {
+  "verified_at": "2026-11-08 23:46:39",
   "version": "0.1.0",
   "steps": [],
-  "duration": 4.18,
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "journal.whitelist": {
+  "verified_at": "2026-11-08 23:46:37",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "scan.folder": {
+  "verified_at": "2026-11-08 23:47:28",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 0.83,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
- "win.recovery": {
-  "verified_at": "2026-11-08 22:38:33",
+ "home.quick_scan": {
+  "verified_at": "2026-11-08 23:50:40",
   "version": "0.1.0",
   "steps": [],
-  "duration": 1.36,
+  "duration": 1720.77,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
- "win.memory": {
-  "verified_at": "2026-11-08 22:27:48",
+ "win.extensions": {
+  "verified_at": "2026-11-08 23:51:05",
   "version": "0.1.0",
   "steps": [],
-  "duration": 92.13,
+  "duration": 6.01,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
- "win.injection": {
-  "verified_at": "2026-11-08 22:27:52",
+ "win.vpn": {
+  "verified_at": "2026-11-08 23:57:00",
   "version": "0.1.0",
   "steps": [],
-  "duration": 12.95,
+  "duration": 1019.92,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true
  },
- "win.false_positives": {
-  "verified_at": "2026-11-08 23:25:35",
+ "vpn.connect": {
+  "verified_at": "2026-11-08 23:57:01",
+  "version": "0.1.0",
+  "steps": [
+   "конфигурация",
+   "xray",
+   "адаптер TUN",
+   "kill switch"
+  ],
+  "duration": 9.78,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": true
+ },
+ "vpn.checks": {
+  "verified_at": "2026-11-09 00:01:27",
   "version": "0.1.0",
   "steps": [],
-  "duration": 21.89,
+  "duration": null,
+  "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
+  "note": "",
+  "had_run": false
+ },
+ "win.drivers": {
+  "verified_at": "2026-11-09 13:10:29",
+  "version": "0.1.0",
+  "steps": [],
+  "duration": 109.37,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",
   "note": "",
   "had_run": true

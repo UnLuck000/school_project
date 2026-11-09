@@ -73,6 +73,42 @@ def test_singbox_uses_windows_dns_by_family():
     assert "rules" not in singbox.build_config(10808, r"C:\x\xray.exe")["dns"]
 
 
+def test_scans_skip_decoys(tmp_path, monkeypatch):
+    """Проверка дисков и защита файлов не читают ловушки; занятый файл — не изменение."""
+    from analyzer import fileops
+    from scanner import fullscan
+    from toolbox import decoys
+    name = decoys.DECOY_NAME.lower()
+    assert name in fullscan.SKIP_DIRS and fileops.DECOY_DIR == name
+    assert decoys.is_decoy(tmp_path / decoys.DECOY_NAME / "Пароли.txt")
+    trap = tmp_path / decoys.DECOY_NAME
+    trap.mkdir()
+    (trap / "a.txt").write_bytes(b"x")
+    (tmp_path / "b.txt").write_bytes(b"y")
+    files, *_ = fileops.folder_files(str(tmp_path), 10 ** 6)
+    assert [os.path.basename(f) for f in files] == ["b.txt"]
+    calls = []
+
+    def busy(path):
+        calls.append(path)
+        if len(calls) < 3:
+            raise PermissionError(32, "занят")
+        return "sha"
+    monkeypatch.setattr(decoys, "_sha", busy)
+    monkeypatch.setattr(decoys, "LOCK_WAIT", 0)
+    assert decoys.changed_files({str(trap / "a.txt"): "sha"}) == []
+
+
+def test_watchdog_ignores_reads():
+    """Защита и ловушки не получают событий от чтения файлов (время доступа, атрибуты)."""
+    import monitor  # noqa: F401  (ставит флаги при импорте)
+    from watchdog.observers import winapi
+    from scanner import watchflags
+    assert winapi.WATCHDOG_FILE_NOTIFY_FLAGS == watchflags.CONTENT_FLAGS
+    assert not watchflags.CONTENT_FLAGS & 0x20   # FILE_NOTIFY_CHANGE_LAST_ACCESS
+    assert watchflags.CONTENT_FLAGS & 0x10       # запись остаётся
+
+
 def test_vpn_builtin_rules_listed():
     from ui import settings as cfg
     from vpn.window import builtin_rules

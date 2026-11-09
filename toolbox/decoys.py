@@ -222,15 +222,30 @@ def repair() -> int:
     return len(fresh)
 
 
-def changed_files(manifest: dict | None = None) -> list[str]:
-    result = []
-    for path, sha in (manifest or load_manifest()).items():
+def is_decoy(path) -> bool:
+    """Файл внутри папки ловушек: проверка дисков и защита файлов их не читают."""
+    return any(part.lower() == DECOY_NAME.lower() for part in Path(path).parts)
+
+
+LOCK_RETRIES = 6      # занятый файл (антивирус, индексатор) — ждём до ~3 с, это не изменение
+LOCK_WAIT = 0.5
+
+
+def _file_changed(path: Path, sha: str) -> bool:
+    for attempt in range(LOCK_RETRIES):
         try:
-            if _sha(Path(path)) != sha:
-                result.append(path)
-        except OSError:
-            result.append(path)  # удалён, переименован или заблокирован
-    return result
+            return _sha(path) != sha
+        except (FileNotFoundError, NotADirectoryError):
+            return True                     # удалён или переименован
+        except OSError:                     # занят другим процессом на чтение
+            if attempt + 1 < LOCK_RETRIES:
+                time.sleep(LOCK_WAIT)
+    return True  # всё время заблокирован: так делает и шифровальщик
+
+
+def changed_files(manifest: dict | None = None) -> list[str]:
+    return [path for path, sha in (manifest or load_manifest()).items()
+            if _file_changed(Path(path), sha)]
 
 
 class DecoyWatcher:
@@ -275,6 +290,8 @@ class DecoyWatcher:
     def _run(self) -> None:
         from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
+        from scanner.watchflags import use_content_flags
+        use_content_flags()  # чтение ловушки (индексатор, проверка) — не повод проверять хэши
 
         manifest = load_manifest()
         files = {os.path.normcase(p) for p in manifest}
