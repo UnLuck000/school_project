@@ -112,7 +112,8 @@ class ProtectJournalPage(QWidget):
         from analyzer import fileops
         menu.addAction("Показать в проводнике",
                        lambda: fileops.show_in_explorer(path)).setEnabled(on_disk)
-        if self.debug_mode:
+        from diag import edition
+        if self.debug_mode and edition.is_test():  # разбор ложных — только в тестовой версии
             menu.addAction("Разобрать срабатывание (ложное?)",
                            lambda: self.false_positive.emit(path)).setEnabled(on_disk)
         menu.exec(self.tree.viewport().mapToGlobal(pos))

@@ -1,6 +1,7 @@
 """Инструменты вкладки «Декомпилятор» → tools/bin (см. tools/bin/THIRD_PARTY.md).
 
     python tools/build_tools.py [dotnet] [pycdc] [upx] [cfr] [rizin]   (без аргументов — всё)
+    python tools/build_tools.py trim     — только убрать лишние процессоры из готового rizin
 
 rizin — rizin + rz-ghidra (декомпилятор Ghidra) из выпуска Cutter, ~116 МБ;
 
@@ -41,6 +42,7 @@ def _get(url: str, target: Path) -> Path:
 
 
 def dotnet() -> None:
+    # ужатие (PublishTrimmed) задано в SbitDotnet.csproj
     subprocess.run(["dotnet", "publish", str(ROOT / "tools" / "dotnet" / "SbitDotnet.csproj"),
                     "-c", "Release", "-r", "win-x64", "--self-contained", "true",
                     "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true",
@@ -84,6 +86,26 @@ def pycdc(tmp: Path) -> None:
     shutil.copy(src / "LICENSE", BIN / "pycdc" / "LICENSE-pycdc.txt")
 
 
+SLEIGH_KEEP = ("x86.ldefs", "ARM.ldefs", "AARCH64.ldefs")   # программы Windows: x86/x64/ARM
+
+
+def trim_sleigh(folder: Path) -> None:
+    """Описания процессоров Ghidra — только x86/x64 и ARM (13 → ~3 МБ). Остаются эти .ldefs
+    и файлы, на которые они ссылаются (.sla, .pspec, .cspec); для остальных процессоров
+    rz-ghidra просто не декомпилирует — вкладка покажет дизассемблер."""
+    import re
+    keep = set(SLEIGH_KEEP)
+    for name in SLEIGH_KEEP:
+        text = (folder / name).read_text(encoding="utf-8", errors="replace")
+        keep.update(re.findall(r'(?:slafile|processorspec|spec)="([^"/]+)"', text))
+    removed = 0
+    for f in folder.iterdir():
+        if f.is_file() and f.name not in keep:
+            removed += f.stat().st_size
+            f.unlink()
+    print(f"rz-ghidra: оставлено {len(keep)} файлов, убрано {removed / 2**20:.1f} МБ")
+
+
 def rizin(tmp: Path) -> None:
     """Из Cutter — только консольный rizin, модуль rz-ghidra и данные (без Qt и Python)."""
     with zipfile.ZipFile(_get(CUTTER_URL, tmp / "cutter.zip")) as z:
@@ -97,6 +119,7 @@ def rizin(tmp: Path) -> None:
     plugins = src / "lib" / "rizin" / "plugins"
     shutil.copy(plugins / "core_ghidra.dll", dst / "lib" / "rizin" / "plugins")
     shutil.copytree(plugins / "rz_ghidra_sleigh", dst / "lib" / "rizin" / "plugins" / "rz_ghidra_sleigh")
+    trim_sleigh(dst / "lib" / "rizin" / "plugins" / "rz_ghidra_sleigh")
     shutil.copytree(src / "share", dst / "share",
                     ignore=shutil.ignore_patterns("elf", "fortunes", "man", "gittip"))
     # среда выполнения Visual C++ рядом с rizin: на чужом ПК её может не быть
@@ -106,6 +129,9 @@ def rizin(tmp: Path) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["trim"]:
+        trim_sleigh(BIN / "rizin" / "lib" / "rizin" / "plugins" / "rz_ghidra_sleigh")
+        return
     wanted = set(sys.argv[1:]) or {"dotnet", "pycdc", "upx", "cfr", "rizin"}
     BIN.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:

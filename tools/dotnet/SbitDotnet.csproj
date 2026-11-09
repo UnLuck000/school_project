@@ -10,6 +10,17 @@
     <RootNamespace>SbitDotnet</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Ужатие при публикации: TrimMode=partial убирает неиспользуемое только из сборок .NET
+         (они размечены как безопасные для этого), ICSharpCode.Decompiler остаётся целиком —
+         он читает метаданные через отражение. Отладчик и трассировка помощнику не нужны. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <DebuggerSupport>false</DebuggerSupport>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetricsSupport>false</MetricsSupport>
+    <StackTraceSupport>true</StackTraceSupport>
+    <!-- tree и resources пишут JSON через отражение: при ужатии оно по умолчанию выключено -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ICSharpCode.Decompiler" Version="11.2.0.10050" />

@@ -807,6 +807,11 @@ class MainWindow(QMainWindow):
             self.toggle_network(force=True)
 
     def open_false_positives(self, path: str | None = None):
+        """Окно «Ложные срабатывания» — только в тестовой версии: в релизной не открывается
+        ни из меню, ни из «Перейти к месту действия» журнала."""
+        from diag import edition
+        if not edition.is_test():
+            return
         from analyzer.fpwindow import FalsePositiveWindow
         if getattr(self, "fp_window", None) is None:
             self.fp_window = FalsePositiveWindow()
@@ -1634,7 +1639,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Открыть в сканере", lambda: self.open_analyzer(paths[0]))
         from analyzer import fileops
         menu.addAction("Показать в проводнике", lambda: fileops.show_in_explorer(paths[0]))
-        if self.debug_mode:
+        from diag import edition
+        if self.debug_mode and edition.is_test():  # разбор ложных — только в тестовой версии
             menu.addAction("Разобрать срабатывание (ложное?)",
                            lambda: self.open_false_positives(paths[0]))
         menu.exec(self.protect_log.viewport().mapToGlobal(pos))

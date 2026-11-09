@@ -294,6 +294,7 @@ class SettingsPage(_UiPage):
     UI_NAME = "settings_page"
     changed = Signal(str, object)  # ключ, новое значение
     advanced_requested = Signal()  # кнопка «Режим администратора»
+    info_collected = Signal(str, str)  # путь к архиву, ошибка («» — успех)
 
     def __init__(self):
         super().__init__()
@@ -365,6 +366,16 @@ class SettingsPage(_UiPage):
             ("lock/vpn", "chkLockVpn"))}
         self.btn_advanced = child(ui, QPushButton, "btnAdvanced")
         self.btn_advanced.clicked.connect(lambda checked=False: self.advanced_requested.emit())
+        # «Сведения для разработчика» — видны всем (diag/bundle.py)
+        self.lbl_support = child(ui, QLabel, "lblSupport")
+        self.btn_collect = child(ui, QPushButton, "btnCollectInfo")
+        self.btn_collect.clicked.connect(lambda checked=False: self.collect_info())
+        self.info_collected.connect(self._on_info_collected)
+        from diag import edition
+        if edition.is_test():
+            self.lbl_support.setText(self.lbl_support.text() + " В тестовой версии в архив "
+                                     "входят ещё комментарии со снимками экрана и статусы "
+                                     "проверенных функций.")
         self._all = (self.chk_autostart, self.chk_block_exit,
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
                      self.spn_workers, self.spn_interval,
@@ -403,8 +414,54 @@ class SettingsPage(_UiPage):
         self.btn_reset.clicked.connect(lambda checked=False: self._reset())
         self.btn_reset.setVisible(False)
 
+    def collect_info(self) -> None:
+        """Кнопка «Собрать сведения о программе»: куда сохранить — спросить, собрать в фоне
+        (журналы до десятков МБ, снимок запускает ядра VPN за версиями)."""
+        from pathlib import Path
+
+        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtWidgets import QFileDialog
+
+        from diag import bundle, features
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить сведения о программе",
+                                              str(Path(folder) / bundle.default_name()),
+                                              "Архив ZIP (*.zip)")
+        if not path:
+            return
+        self.btn_collect.setEnabled(False)
+        self.btn_collect.setText("Собираю сведения...")
+        features.begin("settings.collect_info")
+
+        def job():
+            try:
+                manifest = bundle.collect(Path(path))
+                features.step("settings.collect_info", f"файлов: {manifest['files']}")
+                self.info_collected.emit(path, "")
+            except Exception as e:  # noqa: BLE001 — показать пользователю
+                self.info_collected.emit(path, str(e))
+
+        import threading
+        threading.Thread(target=job, daemon=True, name="collect-info").start()
+
+    def _on_info_collected(self, path: str, error: str) -> None:
+        from diag import features
+        from analyzer import fileops
+        self.btn_collect.setEnabled(True)
+        self.btn_collect.setText("Собрать сведения о программе (.zip)")
+        features.end_if_active("settings.collect_info", not error, error=error)
+        if error:
+            QMessageBox.warning(self, "Сведения о программе", f"Не удалось собрать архив: {error}")
+            return
+        box = QMessageBox(QMessageBox.Icon.Information, "Сведения о программе",
+                          f"Архив сохранён:\n{path}\n\nПередайте его разработчику.", parent=self)
+        show = box.addButton("Показать в проводнике", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        if box.clickedButton() is show:
+            fileops.show_in_explorer(path)
+
     def add_admin_group(self, group: QWidget) -> None:
-        """Раздел режима администратора из другой страницы (пароль) — после «Запретов»."""
         layout = self.group_locks.parentWidget().layout()
         layout.insertWidget(layout.indexOf(self.group_locks) + 1, group)
         group.setVisible(False)

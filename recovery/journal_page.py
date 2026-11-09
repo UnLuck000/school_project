@@ -38,6 +38,18 @@ PLACES = {
     "decoys_remove": "protection", "decoys_create": "protection",
     "stealer_untrust": "protection", "file_rename": "file",
 }
+TEST_ONLY_PLACES = {"false_positives"}   # окна есть только в тестовой версии (diag/edition)
+
+
+def place_of(op: str) -> str | None:
+    """Куда ведёт «Перейти к месту действия»; None — некуда (в том числе окно, которого нет
+    в релизной версии: «Ложные срабатывания»)."""
+    place = PLACES.get(op)
+    if place in TEST_ONLY_PLACES:
+        from diag import edition
+        if not edition.is_test():
+            return None
+    return place
 
 
 class JournalPage(QWidget):
@@ -99,13 +111,14 @@ class JournalPage(QWidget):
         undo = menu.addAction("Отменить действие", self.undo_selected)
         undo.setEnabled(not record["undone"])
         place = menu.addAction("Перейти к месту действия", lambda: self._goto(item))
-        place.setEnabled(record["op"] in PLACES)
+        place.setEnabled(place_of(record["op"]) is not None)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _goto(self, item) -> None:
         record = self._record(item)
-        if record is not None and record["op"] in PLACES:
-            self.goto.emit(PLACES[record["op"]], record)
+        place = place_of(record["op"]) if record is not None else None
+        if place is not None:
+            self.goto.emit(place, record)
 
     def refresh(self) -> None:
         journal.cleanup()  # снятые другим путём и повторы — убрать

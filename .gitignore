@@ -48,3 +48,6 @@ CLAUDE.md
 # релизная сборка (python build_release.py)
 dist/
 release/
+
+# присланные архивы «Сведения о программе» (tools/import_reports.py)
+user_reports/

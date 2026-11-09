@@ -1,8 +1,10 @@
 """Сборка: python build_release.py [--zip] [--installer]
 
 1. PyInstaller по myav.spec → dist/StretchBIT: StretchBIT.exe и папка app со всем остальным.
-2. Рядом кладутся ядра VPN (vpn/bin) и скачанные базы (signatures) — без файлов этого
-   компьютера: белого списка, исключений, отключённых правил, своей базы хэшей и ключа abuse.ch.
+2. Рядом кладутся ядра VPN (vpn/bin), инструменты декомпилятора (tools/bin) и из signatures —
+   только файлы из Git (release_exclusions.json, release_overrides.json). Скачанных баз в
+   сборке нет: первый запуск сразу их обновляет (db/last_update = 0). Файлов этого
+   компьютера (белый список, исключения, своя база хэшей, ключ abuse.ch) — тоже нет.
 3. Две версии (diag/edition.py): dist/StretchBIT — релизная, dist/StretchBIT-test — тестовая
    (кнопки «✓ Исправно», «✎ Комментарий», страница «Тестирование», подробный журнал).
    Отличаются только файлом app/edition.txt.
@@ -11,7 +13,8 @@
    а в signatures/release_overrides.json и release_exclusions.json — её исключения.
 5. --zip — архивы release/StretchBIT-<версия>.zip и StretchBIT-test-<версия>.zip;
    --installer — ещё и установщики ...-setup.exe (installer.py: релизная ставится в
-   C:\\Utils\\SBIT, тестовая — в C:\\Utils\\SBIT-test; архив — внутри установщика).
+   C:\\Utils\\SBIT, тестовая — в C:\\Utils\\SBIT-test; внутри установщика — тот же архив,
+   пересжатый LZMA: он заметно меньше, а .zip остаётся Deflate, его открывает Проводник).
 
 Журналы, карантин, кэш, профили VPN, настройки и пароли отладки (debug_mode/passwords.txt)
 в сборку не попадают: программа создаёт их сама на новом компьютере.
@@ -31,6 +34,8 @@ DIST = ROOT / "dist" / NAME
 EDITIONS = {"release": NAME, "test": f"{NAME}-test"}   # версия → папка в dist
 INSTALLED_TEST = Path(r"C:\Utils\SBIT-test")
 BASELINE = ROOT / "diag" / "baseline.json"
+# из signatures/ в сборку — только эти файлы (они в Git); базы скачиваются при первом запуске
+RELEASE_SIGNATURES = ("release_exclusions.json", "release_overrides.json")
 # файлы signatures/, которые принадлежат только этому компьютеру (или секретны)
 LOCAL_ONLY = {"whitelist.json", "exclusions.json", "overrides.json", "hashes.txt",
               ".abusech_key"}
@@ -121,12 +126,14 @@ def copy_decompilers(app: Path) -> None:
 
 
 def copy_signatures(app: Path) -> None:
+    """Только файлы из Git: скачанные базы (feeds, netfeeds, rules) не входят — ~70 МБ,
+    а первый запуск всё равно сразу их обновляет."""
     src, dst = ROOT / "signatures", app / "signatures"
-
-    def ignore(folder: str, names: list[str]) -> set[str]:
-        return {n for n in names if Path(folder) == src and n in LOCAL_ONLY}
-
-    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    for name in RELEASE_SIGNATURES:
+        shutil.copy2(src / name, dst / name)
     leaked = [p for p in dst.rglob("*") if p.name in LOCAL_ONLY]
     if leaked:
         raise SystemExit(f"В сборку попали локальные файлы: {leaked}")
@@ -152,12 +159,29 @@ def make_zip(folder: Path) -> Path:
     return Path(shutil.make_archive(str(out), "zip", folder.parent, folder.name))
 
 
+def recompress_lzma(archive: Path, target: Path) -> None:
+    """Тот же архив, но LZMA: installer.py распаковывает его тем же zipfile. Уже сжатое
+    (.zip, .jar, .dat VPN) и так не ужимается — его хранить без сжатия, быстрее распаковка."""
+    import zipfile
+    stored = (".zip", ".jar", ".gz", ".7z", ".png", ".jpg", ".ico")
+    with zipfile.ZipFile(archive) as src, zipfile.ZipFile(target, "w") as dst:
+        for info in src.infolist():
+            method = (zipfile.ZIP_STORED if info.filename.lower().endswith(stored)
+                      else zipfile.ZIP_LZMA)
+            out = zipfile.ZipInfo(info.filename, info.date_time)
+            out.compress_type = method
+            out.external_attr = info.external_attr
+            with src.open(info) as r, dst.open(out, "w", force_zip64=True) as w:
+                shutil.copyfileobj(r, w, 1 << 20)
+    print(f"LZMA: {archive.stat().st_size / 2**20:.0f} → {target.stat().st_size / 2**20:.0f} МБ")
+
+
 def make_installer(archive: Path, folder_name: str) -> Path:
     name = f"{folder_name}-{appinfo.VERSION}-setup"
     work = ROOT / "build" / "installer" / folder_name
     payload = work / "payload.zip"  # внутри установщика — под постоянным именем
     payload.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(archive, payload)
+    recompress_lzma(archive, payload)
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
                     "--windowed", "--name", name, "--icon", str(ROOT / "ui" / "assets" / "icon.ico"),
                     "--add-data", f"{payload}{os.pathsep}.",

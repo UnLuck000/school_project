@@ -49,6 +49,15 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="groupSupport">
+     <property name="title"><string>Сведения для разработчика</string></property>
+     <layout class="QVBoxLayout" name="layoutSupport">
+      <item><widget class="QLabel" name="lblSupport"><property name="wordWrap"><bool>true</bool></property><property name="text"><string>Журналы программы, характеристики компьютера и изменённые настройки — одним .zip-файлом. Имена пользователя и компьютера, адреса и профили VPN в журналах скрываются. Файл никуда не отправляется: передайте его разработчику сами.</string></property></widget></item>
+      <item><widget class="QPushButton" name="btnCollectInfo"><property name="minimumSize"><size><width>0</width><height>34</height></size></property><property name="text"><string>Собрать сведения о программе (.zip)</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="QPushButton" name="btnAdvanced">
      <property name="minimumSize"><size><width>0</width><height>34</height></size></property>
      <property name="toolTip"><string>Режим администратора: разделы «Запуск», «Плановая проверка», «Проверка», «Запреты» и «Пароль администратора», отчёт о работе на странице «О программе». Нужен пароль администратора.</string></property>

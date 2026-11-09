@@ -38,5 +38,13 @@
       "fp": null,
       "added": "2026-11-07T01:35:24"
     }
+  },
+  "network": {
+    "backgrounddownload.exe|pub:Microsoft Corporation": {
+      "title": "BackgroundDownload.exe",
+      "detail": "%TEMP%\\ll4fb3uy.4ka\\resources\\app\\ServiceHub\\Services\\Microsoft.VisualStudio.Setup.Service\\BackgroundDownload.exe",
+      "fp": null,
+      "added": "2026-11-09T17:18:45"
+    }
   }
 }

@@ -32,6 +32,21 @@ a = Analysis(
     excludes=["tkinter", "pytest", "_pytest", "IPython", "matplotlib", "pybind11"],
     noarchive=False,
 )
+# Лишнее из Qt (~45 МБ): программная замена OpenGL (окнам Qt Widgets не нужна), переводы
+# Qt (программа их не загружает), плагин экранной клавиатуры и картинок PDF — только из-за
+# них в сборку попадали Qt Quick, QML и Qt PDF.
+QT_DROP = ("opengl32sw.dll", "qt6quick", "qt6qml", "qt6pdf", "qt6virtualkeyboard",
+           "/translations/", "/platforminputcontexts/", "qpdf.dll")
+
+
+def _keep(entry) -> bool:
+    name = entry[0].replace("\\", "/").lower()
+    return not any(part in name if "/" in part else part in name.rsplit("/", 1)[-1]
+                   for part in QT_DROP)
+
+
+a.binaries = [b for b in a.binaries if _keep(b)]
+a.datas = [d for d in a.datas if _keep(d)]
 pyz = PYZ(a.pure)
 
 version_file = ROOT / "build" / "version_info.txt"
