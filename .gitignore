@@ -29,6 +29,13 @@ vpn/bin/*
 !vpn/bin/COPYING-*
 !vpn/bin/THIRD_PARTY.md
 
+# инструменты «Декомпилятора» (UPX, pycdc, CFR, собранный sbit-dotnet) — в релиз отдельно;
+# исходники sbit-dotnet (tools/dotnet), tools/build_tools.py и THIRD_PARTY.md — в Git
+tools/bin/*
+!tools/bin/THIRD_PARTY.md
+tools/dotnet/bin/
+tools/dotnet/obj/
+
 # выгрузка проверок PyCharm
 inspections/
 

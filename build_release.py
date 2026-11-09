@@ -111,6 +111,15 @@ def copy_vpn_cores(app: Path) -> None:
     shutil.copytree(src, app / "vpn" / "bin", dirs_exist_ok=True)
 
 
+def copy_decompilers(app: Path) -> None:
+    """Инструменты вкладки «Декомпилятор» (tools/bin: UPX, pycdc, CFR, sbit-dotnet)."""
+    src = ROOT / "tools" / "bin"
+    if not (src / "dotnet" / "sbit-dotnet.exe").exists():
+        print("! tools/bin без sbit-dotnet.exe — сначала python tools/build_tools.py")
+    if src.is_dir():
+        shutil.copytree(src, app / "tools" / "bin", dirs_exist_ok=True)
+
+
 def copy_signatures(app: Path) -> None:
     src, dst = ROOT / "signatures", app / "signatures"
 
@@ -162,6 +171,7 @@ def main() -> None:
     merge_test_exclusions()
     run_pyinstaller()
     copy_vpn_cores(DIST / "app")
+    copy_decompilers(DIST / "app")
     copy_signatures(DIST / "app")
     for edition, folder in make_editions().items():
         size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()) / 2 ** 20

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Помощник анализатора для сборок .NET: дерево типов, ресурсы, код C# (ILSpy).
+       Сборка: python tools/build_tools.py (self-contained: .NET на чужом ПК не нужен). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>sbit-dotnet</AssemblyName>
+    <RootNamespace>SbitDotnet</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ICSharpCode.Decompiler" Version="11.2.0.10050" />
+  </ItemGroup>
+</Project>

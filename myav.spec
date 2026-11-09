@@ -36,7 +36,11 @@ pyz = PYZ(a.pure)
 
 version_file = ROOT / "build" / "version_info.txt"
 version_file.parent.mkdir(exist_ok=True)
-v = tuple(int(x) for x in appinfo.VERSION.split(".")) + (0,) * (4 - len(appinfo.VERSION.split(".")))
+# в числовые поля Windows — только цифры: «1.0.0-beta» → (1, 0, 0, 0); полная строка
+# остаётся в FileVersion/ProductVersion ниже
+import re
+numbers = [int(x) for x in re.findall(r"\d+", appinfo.VERSION.split("-")[0].split("+")[0])][:4]
+v = tuple(numbers + [0] * (4 - len(numbers)))
 version_file.write_text(f"""VSVersionInfo(
   ffi=FixedFileInfo(filevers={v}, prodvers={v}),
   kids=[StringFileInfo([StringTable('041904B0', [

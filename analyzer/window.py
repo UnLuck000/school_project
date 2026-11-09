@@ -78,7 +78,7 @@ def _split(*sections: QWidget, sizes=None) -> QSplitter:
 
 
 class FileView(QWidget):
-    """Результат проверки одного файла: «Общие», «Проверка», «Код»."""
+    """Результат проверки одного файла: «Общие», «Проверка», «Код», «Декомпилятор»."""
     quarantine_changed = Signal()
     status = Signal(str, int)        # текст для строки состояния, время показа (мс)
     busy_changed = Signal(bool)
@@ -115,6 +115,9 @@ class FileView(QWidget):
                                 _section("Структура PE", self.pe_tree), sizes=[230, 360]),
                          "Проверка")
         self.tabs.addTab(self.code_tab, "Код")
+        from analyzer.decompview import DecompileTab
+        self.decompile_tab = DecompileTab()
+        self.tabs.addTab(self.decompile_tab, "Декомпилятор")
         layout.addWidget(self.tabs, 1)
 
         buttons = QHBoxLayout()
@@ -194,6 +197,7 @@ class FileView(QWidget):
         self._fill_pe(report)
         self.code_tab.set_view(report.code)
         self.code_tab.set_file(Path(report.path), report.pe is not None)
+        self.decompile_tab.set_file(Path(report.path))
         self.status.emit(f"Готово: {report.name}", 8000)
 
     # ---------- заполнение вкладок ----------

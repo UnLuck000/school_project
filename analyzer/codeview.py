@@ -44,9 +44,22 @@ KEYWORDS = {
     "py": r"def|class|import|from|if|else|elif|for|while|return|try|except|with|lambda|exec|eval",
     "sh": r"if|then|else|fi|for|do|done|while|case|esac|echo|curl|wget|chmod|rm",
     "asm": r"mov|push|pop|call|jmp|je|jne|jz|jnz|ret|lea|xor|add|sub|cmp|test|nop|int3",
+    # вкладка «Декомпилятор»
+    "cs": r"using|namespace|class|struct|interface|enum|public|private|protected|internal|"
+          r"static|readonly|const|void|var|new|return|if|else|for|foreach|while|do|switch|case|"
+          r"break|continue|try|catch|finally|throw|async|await|this|base|null|true|false|"
+          r"string|int|long|bool|byte|object|override|virtual|abstract|sealed|get|set|out|ref",
+    "java": r"package|import|class|interface|enum|extends|implements|public|private|"
+            r"protected|static|final|void|new|return|if|else|for|while|do|switch|case|break|"
+            r"continue|try|catch|finally|throw|throws|this|super|null|true|false|int|long|"
+            r"boolean|byte|char|String|Object|synchronized|abstract",
+    "c": r"if|else|for|while|do|switch|case|break|continue|return|goto|void|int|char|long|"
+         r"short|unsigned|signed|struct|union|typedef|static|const|sizeof|uint8_t|uint16_t|"
+         r"uint32_t|uint64_t|int32_t|int64_t|bool|NULL",
 }
 COMMENTS = {"bat": r"^\s*(?:@?rem\b|::).*", "ps1": r"#.*", "vbs": r"'.*", "js": r"//.*",
-            "py": r"#.*", "sh": r"#.*", "reg": r";.*", "ini": r";.*"}
+            "py": r"#.*", "sh": r"#.*", "reg": r";.*", "ini": r";.*", "cs": r"//.*",
+            "java": r"//.*", "c": r"//.*"}
 STRING = r"\"[^\"\r\n]*\"|'[^'\r\n]*'"
 URL = r"(?:https?|ftp)://[^\s'\"<>)]+"
 
