@@ -1,6 +1,5 @@
 """Отчёт о работе, USB (вирус-ярлык и восстановление), ловушки, проверка ссылок и паролей."""
 import os
-import re
 import subprocess
 import time
 from pathlib import Path

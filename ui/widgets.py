@@ -85,9 +85,9 @@ def make_table(columns: list[tuple[str, int]]) -> QTableWidget:
 class _WheelGuard(QObject):
     """Колесо над полем без фокуса прокручивает страницу, а не меняет значение."""
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
-            parent = obj.parentWidget()
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Wheel and not watched.hasFocus():
+            parent = watched.parentWidget()
             while parent is not None and not isinstance(parent, QAbstractScrollArea):
                 parent = parent.parentWidget()
             if parent is not None:

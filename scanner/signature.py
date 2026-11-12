@@ -49,6 +49,7 @@ class SignatureInfo:
     publisher: str | None = None
     source: str | None = None  # "embedded" | "catalog"
     revocation: str | None = None  # None — отзыв не проверялся; ok | revoked | unknown
+    cert: str | None = None  # отпечаток SHA-1 сертификата подписанта (один на все его файлы)
 
 
 def describe(info: SignatureInfo) -> str:
@@ -306,6 +307,14 @@ if sys.platform == "win32":
                 ctypes.addressof(probe), None)
             if not cert:
                 return None
+            thumb = ctypes.create_string_buffer(20)
+            thumb_size = wintypes.DWORD(20)
+            prop = _crypt32.CertGetCertificateContextProperty
+            prop.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                             ctypes.POINTER(wintypes.DWORD)]
+            prop.restype = wintypes.BOOL
+            if prop(cert, 3, thumb, ctypes.byref(thumb_size)):  # CERT_SHA1_HASH_PROP_ID
+                _signer.cert = thumb.raw[:thumb_size.value].hex()
             name = ctypes.create_unicode_buffer(256)
             if _crypt32.CertGetNameStringW(
                     cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, name, 256) <= 1:
@@ -320,6 +329,16 @@ if sys.platform == "win32":
                 _crypt32.CryptMsgClose(msg)
 
 
+_signer = threading.local()  # .cert — отпечаток сертификата из последнего get_publisher
+
+
+def _publisher(path: Path) -> tuple[str | None, str | None]:
+    """(издатель, отпечаток сертификата подписанта)."""
+    _signer.cert = None
+    name = get_publisher(path)
+    return name, getattr(_signer, "cert", None)
+
+
 def inspect_signature(path: Path) -> SignatureInfo:
     """Проверяет подпись: сначала встроенную, затем по каталогам Windows."""
     if sys.platform != "win32":
@@ -327,17 +346,48 @@ def inspect_signature(path: Path) -> SignatureInfo:
     try:
         status = _verify_embedded(path)
         if status == 0:
-            return SignatureInfo(VALID, get_publisher(path), "embedded")
+            name, cert = _publisher(path)
+            return SignatureInfo(VALID, name, "embedded", cert=cert)
         if status in UNSIGNED_CODES:
             found = _catalog_lookup(path)
             if found is None:
                 return SignatureInfo(UNSIGNED)
             cat_status, cat_path = found
-            publisher = get_publisher(Path(cat_path))
-            return SignatureInfo(VALID if cat_status == 0 else INVALID, publisher, "catalog")
-        return SignatureInfo(INVALID, get_publisher(path), "embedded")
+            name, cert = _publisher(Path(cat_path))
+            return SignatureInfo(VALID if cat_status == 0 else INVALID, name, "catalog",
+                                 cert=cert)
+        name, cert = _publisher(path)
+        return SignatureInfo(INVALID, name, "embedded", cert=cert)
     except (OSError, ValueError, ctypes.ArgumentError):
         return SignatureInfo(UNAVAILABLE)
+
+
+CERT_OK_SECONDS = 3600        # сертификат не отозван: час не спрашиваем снова
+CERT_UNKNOWN_SECONDS = 300    # нет связи: не ждать по 15 с на каждом файле
+_cert_lock = threading.Lock()
+_cert_checked: dict[str, tuple[float, str]] = {}  # отпечаток -> (время, ok | unknown)
+
+
+def trusted_fast(path: Path, info: SignatureInfo, revocation: bool) -> SignatureInfo:
+    """Подпись для быстрого пути движка (крупный подписанный файл — без YARA).
+
+    Отзыв — свойство сертификата, а не файла: проверяем его один раз на отпечаток, а не на
+    каждый файл (проверка с отзывом стоит как сама YARA, без связи — до 15 с на файл).
+    Отозванный сертификат не запоминается: такой файл всегда идёт обычным путём."""
+    if info.status != VALID or not revocation:
+        return info
+    now = time.time()
+    if info.cert:
+        with _cert_lock:
+            seen = _cert_checked.get(info.cert)
+        if seen and now - seen[0] < (CERT_OK_SECONDS if seen[1] == REV_OK
+                                     else CERT_UNKNOWN_SECONDS):
+            return replace(info, revocation=seen[1])
+    checked = check_revocation(path, info)
+    if info.cert and checked.status == VALID:
+        with _cert_lock:
+            _cert_checked[info.cert] = (now, checked.revocation or REV_UNKNOWN)
+    return checked
 
 
 _rev_lock = threading.Lock()

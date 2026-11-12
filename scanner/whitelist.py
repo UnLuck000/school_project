@@ -1,24 +1,45 @@
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
+import trustseal
+import userdata
+
 BASE_DIR = Path(__file__).resolve().parent.parent  # корень проекта
-WHITELIST_FILE = BASE_DIR / "signatures" / "whitelist.json"
+WHITELIST_FILE = userdata.WHITELIST_FILE  # папка конфигурации пользователя
 
 
 def trusted_hashes() -> set[str]:
     """SHA-256, которые проверки не считают угрозой: белый список пользователя и заранее
     известные безвредные программы релиза (exclusions, категория programs)."""
     from scanner import exclusions
-    return set(load_whitelist()) | set(exclusions.load().get("programs", {}))
+    global _trusted
+    now = time.monotonic()
+    if _trusted is None or now - _trusted[0] > TRUSTED_SECONDS:
+        # защита файлов спрашивает это на каждый файл: два файла JSON читались и
+        # разбирались заново; изменение из программы сбрасывает запомненное сразу
+        _trusted = (now, frozenset(load_whitelist()) | frozenset(
+            exclusions.load().get("programs", {})))
+    return set(_trusted[1])
+
+
+TRUSTED_SECONDS = 2.0
+_trusted: tuple[float, frozenset] | None = None
+
+
+def forget_trusted() -> None:
+    global _trusted
+    _trusted = None
 
 
 def load_whitelist() -> dict[str, dict]:
     """Возвращает {sha256: {"path": ..., "added_at": ...}}."""
     try:
-        data = json.loads(WHITELIST_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+        # trustseal: файл, изменённый не программой, не действует, пока пользователь не решит
+        data = json.loads(trustseal.read(WHITELIST_FILE).decode("utf-8"))
+    except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -28,6 +49,8 @@ def _save(data: dict) -> None:
     tmp = WHITELIST_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, WHITELIST_FILE)  # запись через временный файл
+    trustseal.saved(WHITELIST_FILE)
+    forget_trusted()
 
 
 def add_to_whitelist(sha256: str, path: str) -> bool:

@@ -7,10 +7,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
+import userdata
+
 from scanner.heuristics import analyze_pe
 from scanner.signature import describe, inspect_signature
 
-CACHE_FILE = Path(__file__).resolve().parent.parent / "cache" / "process_info.json"
+CACHE_FILE = userdata.PROCESS_INFO_FILE  # папка конфигурации пользователя
 MAX_CACHE = 4000
 EMIT_INTERVAL = 0.4  # не чаще: интерфейсу не нужно обновляться на каждую программу
 
@@ -73,7 +75,8 @@ class Enricher(QObject):
                 packed = sum(f.points for f in report.findings if f.category == "pack") >= 4
                 dotnet = report.dotnet
             except Exception:
-                pass
+                from diag.log import swallowed
+                swallowed("enrich: разбор PE")
         with self._lock:
             self._results[key] = (sig_text, status, packed, dotnet)
             self._pending.discard(key)

@@ -28,7 +28,7 @@ def times_pwned(password: str, timeout: float = 15.0) -> int:
     """Сколько раз пароль встречался в утечках. OSError — нет связи."""
     prefix, suffix = split_hash(password)
     request = urllib.request.Request(API + prefix, headers={
-        "User-Agent": "study-av-pwned/1.0", "Add-Padding": "true"})
+        "User-Agent": "StretchBIT-pwned/1.0", "Add-Padding": "true"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         text = response.read().decode("utf-8", "replace")
     return count_in_response(text, suffix)

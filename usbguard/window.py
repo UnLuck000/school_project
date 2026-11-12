@@ -231,8 +231,11 @@ class UsbWindow(QMainWindow):
                  if self.report else "")]
         actions = [("Показать в проводнике", lambda d: self._show(f))]
         if f.fix:
-            actions.insert(0, ("Исправить", lambda d: (d.accept(), self._fix(
-                [f], f"{f.title}: {FIXES.get(f.fix, f.fix)}?"))))
+            def fix(d):
+                d.accept()
+                self._fix([f], f"{f.title}: {FIXES.get(f.fix, f.fix)}?")
+
+            actions.insert(0, ("Исправить", fix))
         show_details(self, f"USB: {f.title}", rows, actions)
 
     @staticmethod

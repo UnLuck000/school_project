@@ -1,0 +1,31 @@
+# Настройки ruff для проекта: python tools/lint.py (или ruff check .).
+line-length = 120
+target-version = "py312"
+extend-exclude = [
+    "dist", "build", "release", "user_reports", "inspections", "cache", "logs", "reports",
+    "signatures", "quarantine_data", "test_samples", "native", "tools/bin", "vpn/bin",
+]
+
+[lint]
+select = [
+    "F",     # pyflakes: неиспользуемые импорты и имена, «x = x()» (F823), опечатки в именах
+    "E", "W",  # pycodestyle: синтаксис, отступы, хвостовые пробелы, длина строки
+    "B",     # bugbear: изменяемые значения по умолчанию, замыкания в циклах и т. п.
+    "S110",  # «except Exception: pass» — только с причиной в «# noqa: S110 — ...»
+    "UP",    # устаревший синтаксис для Python 3.12
+    "PLE",   # явные ошибки pylint
+    "SIM101", "SIM102", "SIM103", "SIM117", "SIM201", "SIM202",
+]
+ignore = [
+    "B008",  # QModelIndex() по умолчанию — обычный приём Qt
+    "B905",  # zip() без strict: длины совпадают по построению
+    "E731",  # лямбда в переменной — где так короче
+]
+
+[lint.per-file-ignores]
+"gui.py" = ["E402"]   # рабочая папка переключается до импортов модулей проекта
+"tests/*" = ["E402"]  # sys.path.insert перед импортом
+"tools/*" = ["E402"]
+# встроенные скрипты PowerShell и XML задания планировщика — строки как есть
+"diag/specs.py" = ["E501"]
+"ui/settings.py" = ["E501"]

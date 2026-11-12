@@ -296,7 +296,7 @@
   "verified_at": "2026-11-09 17:24:22",
   "version": "1.0.0-beta",
   "steps": [
-   "разбор .exe"
+   "разбор файла"
   ],
   "duration": 0.37,
   "pc": "12th Gen Intel(R) Core(TM) i5-12450H; Windows 26300",

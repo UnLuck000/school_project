@@ -16,7 +16,8 @@ from PySide6.QtCore import QObject, Signal
 
 import appinfo
 
-AUMID = "StudyAV.myav"
+AUMID = "StretchBIT.App"
+LEGACY_KEYS = (r"Software\Classes\AppUserModelId\StudyAV.myav",)  # регистрация прежних версий
 ICON = Path(__file__).resolve().parent / "assets" / "icon.ico"
 KEY = rf"Software\Classes\AppUserModelId\{AUMID}"
 
@@ -25,6 +26,11 @@ def register() -> None:
     """Имя и значок программы для уведомлений Windows (раз за запуск, без журнала:
     это регистрация самой программы, как пункт меню Проводника)."""
     import winreg
+    for old in LEGACY_KEYS:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, old)
+        except OSError:
+            pass
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, KEY) as key:
         winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, appinfo.SHORT_NAME)
         if ICON.exists():

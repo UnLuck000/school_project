@@ -30,7 +30,24 @@ SHARED_SERVICES = (
     "t.me", "yandex.ru", "yandex.net", "disk.yandex.ru", "mail.ru", "vk.com", "userapi.com",
     "apple.com", "icloud.com", "mozilla.org", "abuse.ch", "virusshare.com", "ngrok.io",
     "ngrok-free.app", "sourceforge.net", "archive.org", "pastebin.com", "transfer.sh",
+    # крупные сайты и их счётчики/CDN: ссылки на них тоже попадают в базы целым доменом
+    # (09.11.2026 ThreatFox внёс baidu.com — тревога на счётчик hm.baidu.com в браузере)
+    "baidu.com", "bdstatic.com", "qq.com", "weixin.qq.com", "wechat.com", "alibaba.com",
+    "aliyun.com", "aliyuncs.com", "alicdn.com", "taobao.com", "tencent.com",
+    "tencentcloud.com", "myqcloud.com", "bing.com", "msn.com", "facebook.com", "fbcdn.net",
+    "instagram.com", "whatsapp.com", "whatsapp.net", "twitter.com", "x.com", "twimg.com",
+    "linkedin.com", "reddit.com", "wikipedia.org", "amazon.com", "ebay.com", "tiktok.com",
+    "tiktokcdn.com", "bytedance.com", "zoom.us", "slack.com", "notion.so", "box.com",
+    "akamaihd.net", "akamaized.net", "jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com",
+    "ok.ru", "rambler.ru", "ozon.ru", "wildberries.ru", "avito.ru", "sberbank.ru",
+    "gosuslugi.ru", "steampowered.com", "steamcommunity.com", "epicgames.com",
+    "office365.com", "outlook.com", "skype.com", "adobe.com", "apple-cloudkit.com",
+    "yahoo.com", "naver.com", "doubleclick.net", "googlesyndication.com",
+    "google-analytics.com", "googletagmanager.com",
 )
+# Совпадение с родителем, внесённым в базу целиком (evil.com для a.evil.com), у сайта
+# с многими поддоменами чаще ошибка базы, чем вредонос. Такой случай понижается до
+# «подозрительно», если имя в базе — домен второго уровня, а не сам запрошенный адрес.
 DGA_MIN_LEN = 10      # короче — слишком мало данных для оценки
 DGA_THRESHOLD = 3.0   # баллы, с которых имя считается сгенерированным
 
@@ -66,6 +83,18 @@ def lookup(domains: dict[str, str], name: str) -> tuple[str, str] | None:
         if candidate in domains:
             return candidate, domains[candidate]
     return None
+
+
+def lookup_level(domains: dict[str, str], name: str) -> tuple[str, str, str] | None:
+    """lookup + уровень: (найденный домен, источник, "critical" | "warning").
+    warning — в базе только родитель второго уровня (baidu.com для hm.baidu.com):
+    точное имя или родитель глубже (x.evil.com) — critical."""
+    found = lookup(domains, name)
+    if not found:
+        return None
+    name = name.strip().lower().rstrip(".")
+    apex_only = found[0] != name and found[0].count(".") == 1
+    return found[0], found[1], "warning" if apex_only else "critical"
 
 
 def _entropy(text: str) -> float:

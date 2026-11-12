@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from scanner import media, overrides, verdict_cache
@@ -5,10 +6,10 @@ from scanner.hashing import data_hashes, file_hashes
 from scanner.heuristics import analyze_pe, get_threshold
 from scanner.relations import signed_partner, weak_match
 from scanner.yara_engine import match_details, rules_version
-from scanner.signature import (INVALID, REVOKED, UNSIGNED, VALID, check_revocation,
+from scanner.signature import (INVALID, REVOKED, UNSIGNED, VALID, check_revocation, trusted_fast,
                                inspect_signature)
 
-ENGINE_VERSION = "6"
+ENGINE_VERSION = "8"
 # файлы до этого размера читаются один раз: хэши, YARA и эвристика берут байты из памяти
 ONE_READ_LIMIT = 32 * 1024 * 1024  # меняется вместе с логикой проверки: старые вердикты в кэше не годятся
 
@@ -67,9 +68,14 @@ def check_file(p: Path, signatures, rules=None,
         digest, md5 = data_hashes(data) if data is not None else file_hashes(p)
         if whitelist and digest in whitelist:
             return None
-        reason = overrides.filter_reason(digest, hash_verdict(st.st_size, digest, md5, signatures)
-                                         or (None if kind else analyze(p, rules, heuristics,
-                                                                       data=data)))
+        found = hash_verdict(st.st_size, digest, md5, signatures)
+        if found is None and not kind:
+            from scanner import archive
+            found = analyze(p, rules, heuristics, data=data)
+            # вложенные файлы ZIP: правила — сразу, хэши сверяются с базами здесь же
+            found = archive.resolve(archive.pack(found, p, data, rules), signatures,
+                                    hash_verdict)
+        reason = overrides.filter_reason(digest, found)
     if version:
         verdict_cache.put(p, st, version, digest, reason)
     return reason
@@ -90,6 +96,40 @@ def read_small(p: Path, size: int) -> bytes | None:
     return p.read_bytes() if size <= ONE_READ_LIMIT else None
 
 
+LAUNCHER_SCHEMES = ("steam", "com.epicgames.launcher", "uplay", "origin", "origin2", "battlenet",
+                    "heroic", "goggalaxy", "minecraft", "roblox-player", "discord", "spotify",
+                    "ms-settings", "ms-windows-store", "tg", "zoommtg")
+_URL_RE = re.compile(rb"^\s*URL\s*=\s*([a-z0-9.+\-]+):", re.I | re.M)
+
+
+def launcher_shortcut(p: Path, data: bytes | None = None) -> bool:
+    """Интернет-ярлык (.url), который открывает известную программу: Steam, Epic, Discord..."""
+    if p.suffix.lower() != ".url":
+        return False
+    try:
+        text = data if data is not None else p.read_bytes()[:8192]
+    except OSError:
+        return False
+    schemes = [s.decode("ascii", "replace").lower() for s in _URL_RE.findall(text[:8192])]
+    return bool(schemes) and all(s in LAUNCHER_SCHEMES for s in schemes)
+
+
+SIGNATURE_FIRST = 256 * 1024  # с этого размера у программы сначала проверяется подпись
+
+
+def _large_program(p: Path, data: bytes | None) -> bool:
+    """PE-файл от SIGNATURE_FIRST: проверка подписи (3–8 мс) дешевле YARA по такому файлу."""
+    try:
+        if data is not None:
+            return len(data) >= SIGNATURE_FIRST and data[:2] == b"MZ"
+        if p.stat().st_size < SIGNATURE_FIRST:
+            return False
+        with open(p, "rb") as f:
+            return f.read(2) == b"MZ"
+    except OSError:
+        return False
+
+
 def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = None,
             revocation: bool | None = None, data: bytes | None = None) -> str | None:
     """Слои без хэшей: YARA, эвристика PE, подпись и связь с подписанной программой.
@@ -98,10 +138,21 @@ def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = Non
     revocation = _revocation if revocation is None else revocation
     sig = None
     partner = False  # False: связь ещё не искали
+    if _large_program(p, data):
+        # Быстрый путь. При действительной подписи совпадения YARA и эвристика всё равно
+        # отбрасываются (ниже), а YARA — 88% времени проверки файла: крупную подписанную
+        # программу правилами не проверяем. Отозванный сертификат — обычный путь.
+        sig = trusted_fast(p, inspect_signature(p), revocation)
+        if sig.status == VALID:
+            return None
     if rules is not None:
         matches = match_details(rules, p, data=data)
+        if matches and launcher_shortcut(p, data):
+            # ярлык игры (steam://rungameid/...): правила «Methodology» ловят любую схему,
+            # кроме http — это способ запуска, а не признак вредоноса
+            matches = [m for m in matches if not m.rule.startswith("Methodology_")]
         if matches:
-            sig = _trusted_signature(p, inspect_signature(p), revocation)
+            sig = sig or _trusted_signature(p, inspect_signature(p), revocation)
             if sig.status == REVOKED:
                 return "YARA: " + ", ".join(m.rule for m in matches) + " [сертификат отозван]"
             # действительная подпись доверенного издателя (Microsoft, JetBrains...):

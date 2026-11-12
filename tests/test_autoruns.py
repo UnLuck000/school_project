@@ -48,20 +48,19 @@ def test_cannot_change_winlogon():
 @pytest.mark.skipif(sys.platform != "win32", reason="нужен реестр Windows")
 def test_registry_remove_and_undo(tmp_journal):
     import winreg
-    path = r"Software\StudyAVTest\Run"
+    path = r"Software\SBITTest\Run"
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "TestEntry", 0, winreg.REG_SZ, r"C:\test\app.exe")
     try:
         e = Entry(kind="run", name="TestEntry", location="", command="",
                   extra={"hive": "HKCU", "path": path, "value": "TestEntry"})
         actions.remove_registry_value(e)
-        with pytest.raises(OSError):
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
-                winreg.QueryValueEx(key, "TestEntry")
+        with pytest.raises(OSError), winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+            winreg.QueryValueEx(key, "TestEntry")
 
         journal.undo(journal.read_all()[0]["id"])
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
             assert winreg.QueryValueEx(key, "TestEntry")[0] == r"C:\test\app.exe"
     finally:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\StudyAVTest")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\SBITTest")

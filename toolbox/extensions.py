@@ -26,6 +26,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from recovery import journal
 
@@ -280,7 +281,7 @@ def firefox_extensions() -> list[Extension]:
 
 
 # ---------- реестр ----------
-def _reg_values(hive, path: str) -> dict[str, object]:
+def _reg_values(hive, path: str) -> dict[str, Any]:
     import winreg
     values = {}
     try:
@@ -443,7 +444,7 @@ def _edit_json(path: Path, change) -> bool:
     data = _read_json(path)
     if not data or not change(data):
         return False
-    tmp = path.with_name(path.name + ".myav-tmp")
+    tmp = path.with_name(path.name + ".sbit-tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")),
                    encoding="utf-8")
     os.replace(tmp, path)
@@ -491,7 +492,10 @@ def remove_extension(ext: Extension) -> str:
             target = None  # не похоже на папку расширения: не трогаем
         if target is not None:
             copy = _backup(target, slot)
-            shutil.rmtree(target, ignore_errors=True) if target.is_dir() else target.unlink()
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink()
             undo["files"].append({"original": str(target), "copy": copy})
             done.append(f"файлы: {target}")
     if not done:

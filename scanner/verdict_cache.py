@@ -3,13 +3,26 @@
 Запись привязана к пути, размеру и времени изменения файла, а также к «версии» проверки
 (отпечатки баз хэшей и правил, ручные исключения, порог эвристики). Изменился файл или
 обновились базы — файл проверяется заново. Хранится в cache/verdicts.sqlite.
+
+Защита от обхода:
+  * у исполняемых файлов (EXECUTABLE_EXTS) запоминается ещё ChangeTime — время изменения
+    записи NTFS. Обычную дату (mtime) программа может вернуть назад после заражения файла
+    того же размера, ChangeTime обычными средствами не подделать;
+  * строка подписана ключом, который читают только администраторы (trustseal.mac_key):
+    дописать в базу «чистый» вердикт своему файлу, не зная ключа, нельзя.
 Записи копятся в памяти и пишутся на диск пачками: SQLite медленно фиксирует по одной.
 """
+import ctypes
+import hashlib
 import os
 import sqlite3
 import threading
 import time
+from ctypes import wintypes
 from pathlib import Path
+
+import trustseal
+from scanner.media import EXECUTABLE_EXTS
 
 CACHE_FILE = Path(__file__).resolve().parent.parent / "cache" / "verdicts.sqlite"
 FLUSH_EVERY = 200      # записей
@@ -29,6 +42,42 @@ def _key(path) -> str:
     return os.path.normcase(os.path.abspath(str(path)))
 
 
+def change_time(path) -> int:
+    """ChangeTime файла (NTFS, единицы по 100 нс) или 0. Только для исполняемых файлов:
+    лишнее открытие каждого файла замедлило бы проверку дисков."""
+    if os.path.splitext(str(path))[1].lower() not in EXECUTABLE_EXTS:
+        return 0
+    try:
+        k32 = ctypes.windll.kernel32
+    except AttributeError:
+        return 0
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    # FILE_READ_ATTRIBUTES, общий доступ на всё, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS
+    handle = k32.CreateFileW(str(path), 0x80, 7, None, 3, 0x02000000, None)
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return 0
+    try:
+        info = (ctypes.c_longlong * 5)()  # FILE_BASIC_INFO: 4 времени и атрибуты
+        k32.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                     ctypes.c_void_p, wintypes.DWORD]
+        if not k32.GetFileInformationByHandleEx(handle, 0, info, ctypes.sizeof(info)):
+            return 0
+        return int(info[3])
+    finally:
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.CloseHandle(handle)
+
+
+def _mac(key: str, size: int, mtime: int, ctime: int, version: str, sha256: str,
+         reason: str | None) -> str:
+    text = "\x1f".join((key, str(size), str(mtime), str(ctime), version, sha256 or "",
+                        reason or ""))
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=12,
+                           key=trustseal.mac_key()).hexdigest()
+
+
 def _db() -> sqlite3.Connection | None:
     global _conn, _conn_path
     if _conn is not None and _conn_path == CACHE_FILE:
@@ -38,10 +87,11 @@ def _db() -> sqlite3.Connection | None:
         conn = sqlite3.connect(str(CACHE_FILE), check_same_thread=False, timeout=5)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("""CREATE TABLE IF NOT EXISTS verdicts (
+        conn.execute("DROP TABLE IF EXISTS verdicts")  # прежний вид: без ChangeTime и подписи
+        conn.execute("""CREATE TABLE IF NOT EXISTS verdicts2 (
             path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, version TEXT,
-            sha256 TEXT, reason TEXT, checked REAL)""")
-        conn.execute("DELETE FROM verdicts WHERE checked < ?", (time.time() - KEEP_DAYS * 86400,))
+            sha256 TEXT, reason TEXT, checked REAL, ctime INTEGER, mac TEXT)""")
+        conn.execute("DELETE FROM verdicts2 WHERE checked < ?", (time.time() - KEEP_DAYS * 86400,))
         conn.commit()
     except sqlite3.Error:
         return None  # кэш не обязателен: без него просто медленнее
@@ -61,12 +111,14 @@ def get(path, st: os.stat_result, version: str) -> tuple[str, str | None] | None
                 return None
             try:
                 found = conn.execute(
-                    "SELECT size, mtime, version, sha256, reason FROM verdicts WHERE path = ?",
-                    (key,)).fetchone()
+                    "SELECT size, mtime, version, sha256, reason, ctime, mac FROM verdicts2 "
+                    "WHERE path = ?", (key,)).fetchone()
             except (sqlite3.Error, OverflowError, ValueError):
                 return None
-            row = found and (found[0], found[1], found[2], found[3], found[4])
-        if row and row[0] == st.st_size and row[1] == st.st_mtime_ns and row[2] == version:
+            row = found and tuple(found)
+        if row and row[0] == st.st_size and row[1] == st.st_mtime_ns and row[2] == version \
+                and row[5] == change_time(path) \
+                and row[6] == _mac(key, row[0], row[1], row[5], row[2], row[3], row[4]):
             _hits += 1
             return row[3], row[4]
         _misses += 1
@@ -81,8 +133,11 @@ def put(path, st: os.stat_result, version: str, sha256: str, reason: str | None)
     # такой файл просто не кэшируется
     if not (-INT64 <= st.st_mtime_ns < INT64 and 0 <= st.st_size < INT64):
         return
+    key = _key(path)
+    ctime = change_time(path)
+    mac = _mac(key, st.st_size, st.st_mtime_ns, ctime, version, sha256, reason)
     with _lock:
-        _pending[_key(path)] = (st.st_size, st.st_mtime_ns, version, sha256, reason)
+        _pending[key] = (st.st_size, st.st_mtime_ns, version, sha256, reason, ctime, mac)
         if len(_pending) >= FLUSH_EVERY or time.monotonic() - _last_flush > FLUSH_SECONDS:
             flush()
 
@@ -99,10 +154,11 @@ def flush() -> None:
             _pending.clear()
             return
         now = time.time()
-        rows = [(k, *v, now) for k, v in _pending.items()]
+        rows = [(k, *v[:5], now, v[5], v[6]) for k, v in _pending.items()]
         _pending.clear()
         try:
-            conn.executemany("INSERT OR REPLACE INTO verdicts VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+            conn.executemany("INSERT OR REPLACE INTO verdicts2 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             rows)
             conn.commit()
         except (sqlite3.Error, OverflowError, ValueError):
             pass
@@ -114,7 +170,7 @@ def clear() -> None:
         conn = _db()
         if conn is not None:
             try:
-                conn.execute("DELETE FROM verdicts")
+                conn.execute("DELETE FROM verdicts2")
                 conn.commit()
             except sqlite3.Error:
                 pass
@@ -135,7 +191,7 @@ def forget(paths) -> None:
         if conn is None:
             return
         try:
-            conn.executemany("DELETE FROM verdicts WHERE path = ?", [(k,) for k in keys])
+            conn.executemany("DELETE FROM verdicts2 WHERE path = ?", [(k,) for k in keys])
             conn.commit()
         except sqlite3.Error:
             pass

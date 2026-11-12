@@ -239,7 +239,10 @@ def extract_strings(data: bytes) -> list[tuple[int, str, str]]:
     return found
 
 
-def _hash_and_head(path: Path) -> tuple[str, str, str, bytes]:
+def _hash_and_head(path: Path, on_bytes=None) -> tuple[str, str, str, bytes]:
+    """on_bytes(прочитано, всего) — для шкалы хода (крупный файл читается долго)."""
+    total = path.stat().st_size
+    done = 0
     md5 = hashlib.md5(usedforsecurity=False)
     sha1 = hashlib.sha1(usedforsecurity=False)
     sha256 = hashlib.sha256()
@@ -251,6 +254,9 @@ def _hash_and_head(path: Path) -> tuple[str, str, str, bytes]:
             sha256.update(block)
             if len(head) < HEAD_LIMIT:
                 head += block[:HEAD_LIMIT - len(head)]
+            done += len(block)
+            if on_bytes is not None:
+                on_bytes(done, total)
     return md5.hexdigest(), sha1.hexdigest(), sha256.hexdigest(), bytes(head)
 
 
@@ -287,15 +293,32 @@ class FileReport:
     code: CodeView | None = None
 
 
-def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -> FileReport:
+# этапы анализа: (начало шкалы в процентах, название) — для progress(процент, этап)
+STAGES = {"hash": (5, "хэши"), "signature": (35, "цифровая подпись"), "yara": (50, "правила YARA"),
+          "heuristics": (75, "эвристика PE"), "structure": (85, "структура и код")}
+
+
+def build_report(path: Path, signatures: set[str], rules, whitelist: set[str],
+                 progress=None) -> FileReport:
     """Собирает все сведения о файле. Медленная функция: вызывать не из GUI-потока.
-    Все слои проверки считаются независимо, чтобы было видно результат каждого."""
+    Все слои проверки считаются независимо, чтобы было видно результат каждого.
+    progress(процент, этап) — ход анализа для шкалы (вызывается из этого же потока)."""
+    def stage(key: str, part: float = 0.0) -> None:
+        if progress is not None:
+            start, name = STAGES[key]
+            keys = list(STAGES)
+            end = STAGES[keys[keys.index(key) + 1]][0] if key != keys[-1] else 100
+            progress(int(start + (end - start) * part), name)
+
     stat = path.stat()
-    md5, sha1, sha256, head = _hash_and_head(path)
+    stage("hash")
+    md5, sha1, sha256, head = _hash_and_head(
+        path, lambda done, total: stage("hash", done / total if total else 1.0))
     ext = path.suffix.lower()
     key, title = detect_type(head, ext)
     notes, masquerade = _name_notes(path.name, ext, key, title)
 
+    stage("signature")
     signature = inspect_signature(path)
     if revocation_enabled():
         signature = check_revocation(path, signature)  # отозванный сертификат — не доверяем
@@ -303,14 +326,17 @@ def build_report(path: Path, signatures: set[str], rules, whitelist: set[str]) -
     hash_match = stat.st_size > 0 and any(  # VirusShare: только MD5
         h in signatures and not overrides.hash_ignored(h) for h in (sha256, md5))
     yara_skipped = stat.st_size > MAX_FILE_SIZE
+    stage("yara")
     matches = [] if (rules is None or yara_skipped) else match_details(rules, path)
     yara_names = [m.rule for m in matches]
+    stage("heuristics")
     heuristics = analyze_pe(path)
     threshold = get_threshold()
     partner = None  # подписанный файл из той же папки, частью которого выглядит этот
     if signature.status != "valid" and ((matches and all(weak_match(m) for m in matches))
                                         or (not matches and heuristics.score >= threshold)):
         partner = signed_partner(path)
+    stage("structure")
     pe = read_pe(path, stat.st_size) if key == "pe" else None
 
     if whitelisted:

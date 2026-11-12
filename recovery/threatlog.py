@@ -51,19 +51,26 @@ def _write(records: list[dict]) -> None:
     os.replace(tmp, THREATS_FILE)
 
 
-def add(path: str, level: str, text: str, source: str = "") -> str:
-    """Находка (level: threat | suspicious). Возвращает id записи."""
+def add(path: str, level: str, text: str, source: str = "", story: str = "",
+        pid: int = 0) -> str:
+    """Находка (level: threat | suspicious). Возвращает id записи. story — сводка по
+    процессу на момент находки (processmanager.story): процесс к просмотру журнала
+    обычно уже завершён."""
     key = os.path.normcase(path) if path else text
     with _lock:
         records = _read()
         for r in records:
             if r["status"] == FOUND and r.get("key") == key and r["text"] == text:
                 r["time"], r["count"] = _now(), r.get("count", 1) + 1
+                if story:
+                    r["story"], r["pid"] = story, pid
                 _write(records)
                 return r["id"]
         record = {"id": uuid.uuid4().hex, "time": _now(), "first": _now(), "count": 1,
                   "key": key, "path": path, "level": level, "text": text,
                   "source": source, "status": FOUND, "qid": ""}
+        if story:
+            record["story"], record["pid"] = story, pid
         records.append(record)
         _write(records)
         return record["id"]

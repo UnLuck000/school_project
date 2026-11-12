@@ -18,8 +18,11 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-EXCLUSIONS_FILE = Path(__file__).resolve().parent.parent / "signatures" / "exclusions.json"
-RELEASE_FILE = EXCLUSIONS_FILE.with_name("release_exclusions.json")
+import trustseal
+import userdata
+
+EXCLUSIONS_FILE = userdata.EXCLUSIONS_FILE  # папка конфигурации пользователя
+RELEASE_FILE = Path(__file__).resolve().parent.parent / "signatures" / "release_exclusions.json"
 RELEASE_CATEGORIES = {"drivers", "programs"}
 TEST_TO_RELEASE = {"network"}
 CATEGORY_TEXT = {"autoruns": "Автозапуск", "checks": "Проверка системы",
@@ -62,8 +65,11 @@ def _file(category: str) -> Path:
 
 def _read_file(path: Path) -> dict:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        if path == EXCLUSIONS_FILE:  # файл пользователя — через защиту от подмены
+            data = json.loads(trustseal.read(path).decode("utf-8"))
+        else:
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -84,6 +90,10 @@ def _save(data: dict, path: Path = EXCLUSIONS_FILE) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)  # запись через временный файл
+    if path == EXCLUSIONS_FILE:
+        trustseal.saved(path)
+    from scanner import whitelist
+    whitelist.forget_trusted()
 
 
 def load() -> dict:

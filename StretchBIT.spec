@@ -20,6 +20,10 @@ datas = [
     (str(ROOT / "signatures" / "release_exclusions.json"), "signatures"),
     (str(ROOT / "diag" / "baseline.json"), "diag"),  # эталон исправных функций (diag/features)
 ]
+# провайдер AMSI (native/amsi/build.py; build_release собирает его сам, если нет)
+for _dll in ("sbit_amsi64.dll", "sbit_amsi32.dll"):
+    if (ROOT / "native" / "amsi" / "bin" / _dll).is_file():
+        datas.append((str(ROOT / "native" / "amsi" / "bin" / _dll), "native/amsi/bin"))
 
 a = Analysis(
     [str(ROOT / "gui.py")],

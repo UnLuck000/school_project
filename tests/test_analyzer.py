@@ -65,3 +65,17 @@ def test_real_exe_has_pe_details():
         pytest.skip("интерпретатор не PE-файл")
     assert report.pe is not None
     assert report.pe.sections
+
+
+def test_build_report_progress(tmp_path):
+    """Шкала анализа файла: этапы по порядку, проценты не убывают."""
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"MZ" + b"\0" * (3 << 20))
+    seen = []
+    build_report(f, set(), None, set(), progress=lambda p, s: seen.append((p, s)))
+    percents = [p for p, _ in seen]
+    assert percents == sorted(percents) and 0 < percents[0] and percents[-1] >= 85
+    stages = list(dict.fromkeys(s for _, s in seen))
+    assert stages == ["хэши", "цифровая подпись", "правила YARA", "эвристика PE",
+                      "структура и код"]
+

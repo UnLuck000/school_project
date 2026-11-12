@@ -108,7 +108,7 @@ def _file_name(response, url: str) -> str:
 def download(url: str, progress=None, cancel=None) -> Path:
     """Скачивает файл в DOWNLOAD_DIR. progress(получено, всего). OSError — ошибка сети."""
     url = normalize(url)
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 study-av/1.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 StretchBIT/1.0"})
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(request, timeout=30) as response:
         total = int(response.headers.get("Content-Length") or 0)

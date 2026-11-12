@@ -7,10 +7,9 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
-from quarantine import quarantine_file  # noqa: F401  (нужен, когда автокарантин включён, см. _handle)
 from scanner.engine import check_file
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist, trusted_hashes
+from scanner.whitelist import trusted_hashes
 from processmanager.memscan import shared_rules
 from scanner.watchflags import use_content_flags
 
@@ -101,6 +100,14 @@ class _Handler(FileSystemEventHandler):
             self._enqueue(event.dest_path)  # файл получил итоговое имя
 
 
+def auto_quarantine(path, reason: str) -> bool:
+    """Сразу в карантин: совпадение хэша, файл не из папки Windows."""
+    if not (reason or "").startswith("hash match"):
+        return False
+    windows = os.path.normcase(os.environ.get("SystemRoot", r"C:\Windows")) + os.sep
+    return not os.path.normcase(str(path)).startswith(windows)
+
+
 class RealtimeMonitor:
     """Следит за папками и проверяет новые и изменённые файлы.
 
@@ -149,8 +156,8 @@ class RealtimeMonitor:
     def _emit(self, kind: str, text: str = ""):
         try:
             self.on_event(kind, text)
-        except Exception:
-            pass  # ошибка в обработчике интерфейса не должна ронять монитор
+        except Exception:  # noqa: S110 — ошибка в обработчике интерфейса не должна ронять монитор
+            pass
 
     # ---------- очередь ----------
     def _wanted(self, path: Path) -> bool:
@@ -159,9 +166,9 @@ class RealtimeMonitor:
         if any(_inside(path, f) for f in self.folders):
             return True  # папка пользователя: все файлы
         for folder, recursive, all_files in self.system:
-            if (_inside(path, folder) if recursive else path.parent == folder):
-                if all_files or path.suffix.lower() in EXECUTABLE_EXTS:
-                    return True
+            inside = _inside(path, folder) if recursive else path.parent == folder
+            if inside and (all_files or path.suffix.lower() in EXECUTABLE_EXTS):
+                return True
         return False
 
     def _enqueue(self, raw_path, tries: int = 0):
@@ -257,7 +264,24 @@ class RealtimeMonitor:
             observer.join(timeout=5)
             self._emit("stopped", "Защита выключена")
 
+    def _watch_ransom(self, path: Path) -> None:
+        """Шифровальщик по поведению (toolbox/ransomguard.py): много документов в папках
+        пользователя за минуту стали «шумом»."""
+        if not any(_inside(path, f) for f in self.folders):
+            return
+        if not hasattr(self, "_ransom"):
+            from toolbox.ransomguard import BurstDetector
+            self._ransom = BurstDetector()
+        try:
+            found = self._ransom.feed(path)
+        except Exception:  # noqa: BLE001 — дополнительный признак не должен ронять защиту
+            return
+        if found:
+            self._emit("ransom", "\n".join(found))
+
     def _handle(self, path: Path, tries: int):
+        if not hasattr(self, "_clean"):
+            self._clean = {}  # путь -> (размер, mtime) последней строки «OK»
         from toolbox.decoys import is_decoy
         if is_decoy(path):
             return  # ловушки сторожит DecoyWatcher, своё чтение его только тревожит
@@ -276,21 +300,34 @@ class RealtimeMonitor:
                 self._emit("error", f"Не удалось прочитать файл: {path}")
             return
 
+        self._watch_ransom(path)
         if reason is None:
+            # «создан» и «изменён» по одному файлу приходят порознь: на вторую проверку
+            # отвечает кэш вердиктов, а вторую строку «OK» в журнал не пишем
+            try:
+                st = path.stat()
+                mark = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                mark = None
+            if mark is not None and self._clean.get(path) == mark:
+                return
+            self._clean[path] = mark
+            if len(self._clean) > 4000:
+                for old in list(self._clean)[:2000]:
+                    del self._clean[old]
             self._emit("scanned", f"OK: {path}")
             return
 
-        # ================================================================================
-        # АВТОМАТИЧЕСКИЙ КАРАНТИН ВРЕМЕННО ОТКЛЮЧЁН: под наблюдением теперь и системные
-        # папки, и ложное срабатывание на системный файл не должно его убрать.
-        # Чтобы вернуть автокарантин: раскомментировать блок «try ... except» ниже
-        # и удалить две строки после него (action = ... и self._emit(...)).
-        # ================================================================================
-        # try:
-        #     quarantine_file(path, reason=reason)
-        #     self._emit("threat", f"{path}\t{reason}\tперемещён в карантин")
-        # except OSError as e:
-        #     self._emit("threat", f"{path}\t{reason}\tне удалось изолировать: {e}")
-        # return
-        action = "обнаружен, автокарантин отключён (правый клик: «В карантин»)"
+        # Автокарантин — только по совпадению хэша (самый надёжный слой) и не в папке
+        # Windows: ложное срабатывание не должно убрать системный файл. Правила YARA и
+        # эвристика — пока только сообщение, в карантин вручную из журнала защиты.
+        if auto_quarantine(path, reason):
+            try:
+                from quarantine import quarantine_file
+                quarantine_file(path, reason=reason)
+                self._emit("threat", f"{path}\t{reason}\tперемещён в карантин")
+            except OSError as e:
+                self._emit("threat", f"{path}\t{reason}\tне удалось изолировать: {e}")
+            return
+        action = "обнаружен (правый клик: «В карантин»)"
         self._emit("threat", f"{path}\t{reason}\t{action}")

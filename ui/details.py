@@ -5,6 +5,8 @@
 журнал защиты, уязвимые драйверы, расширения браузеров, внедрённый код, ложные
 срабатывания. Действие (label, callback): кнопка внизу; callback(dialog) может закрыть окно
 (dialog.accept()) — например, если строки больше нет."""
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem,
@@ -19,7 +21,7 @@ def main_window():
 
 
 def show_details(parent, title: str, rows: list[tuple[str, str]],
-                 actions: list[tuple[str, object]] | None = None,
+                 actions: list[tuple[str, Callable[[QDialog], object]]] | None = None,
                  width: int = 760) -> QDialog:
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)

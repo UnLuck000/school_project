@@ -12,7 +12,8 @@ from PySide6.QtCore import QMimeData, QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QHeaderView, QInputDialog, QLabel, QMenu,
-    QMessageBox, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from analyzer import fileops
@@ -20,7 +21,7 @@ from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from scanner import pool as scan_pool
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist, trusted_hashes
+from scanner.whitelist import trusted_hashes
 from ui.widgets import item_less
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
@@ -38,17 +39,17 @@ class _Bridge(QObject):
     dir_size = Signal(int, str, object, int, bool)  # запрос, папка, размер, файлов, открылась
     dir_state = Signal(int, str, str, str, str)     # запрос, папка, уровень, текст, подсказка
     finished = Signal(int, int, int)        # номер запроса, угроз, подозрительных
+    advanced = Signal(int, int)             # номер запроса, проверено ещё файлов во вложенных
     props = Signal(int, object)             # номер запроса, свойства папки
     item_props = Signal(str, object)        # заголовок окна, свойства файла или папки
 
 
 class _Item(QTreeWidgetItem):
-    """Папки выше файлов, размер сортируется как число (по размеру — вперемешку с файлами)."""
+    """Папки выше файлов при сортировке по любому столбцу и в обе стороны; размер и время
+    сортируются как числа."""
     def __lt__(self, other):
         tree = self.treeWidget()
-        if tree is not None and tree.sortColumn() == 2:
-            return item_less(self, other, SORT_ROLE)
-        a_dir, b_dir = self.data(0, IS_DIR_ROLE), other.data(0, IS_DIR_ROLE)
+        a_dir, b_dir = bool(self.data(0, IS_DIR_ROLE)), bool(other.data(0, IS_DIR_ROLE))
         if a_dir != b_dir:
             ascending = tree is None or tree.header().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
             return a_dir if ascending else b_dir
@@ -125,6 +126,7 @@ class FolderView(QWidget):
         self.bridge.dir_size.connect(self._on_dir_size)
         self.bridge.dir_state.connect(self._on_dir_state)
         self.bridge.finished.connect(self._on_finished)
+        self.bridge.advanced.connect(self._on_advanced)
         self.bridge.props.connect(self._on_props)
         self.bridge.item_props.connect(lambda title, rows: _props_dialog(self, title, rows))
 
@@ -134,6 +136,14 @@ class FolderView(QWidget):
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("padding: 8px; border-radius: 6px; font-size: 11pt;")
         layout.addWidget(self.summary)
+        # на время проверки вместо строки-итога — шкала: сколько файлов проверено из
+        # известных (файлы вложенных папок добавляются, как только посчитан их размер)
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.setMinimumHeight(28)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        self._done = self._total = self._dirs_pending = 0
 
         self.tabs = QTabWidget()
         self.tree = QTreeWidget()
@@ -178,6 +188,8 @@ class FolderView(QWidget):
         try:
             entries = sorted(os.scandir(self.folder), key=lambda e: e.name.lower())
         except OSError as e:
+            self.progress.hide()
+            self.summary.show()
             self.summary.setText(f"Не удалось открыть папку: {e}")
             return
         for entry in entries:
@@ -207,10 +219,12 @@ class FolderView(QWidget):
                 files.append(entry.path)
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
-        folders = len(entries) - len(files)
         self.summary.setStyleSheet("padding: 8px; border-radius: 6px; font-size: 11pt;")
-        self.summary.setText(f"Папка {self.folder}: файлов {len(files)}, папок {folders}. "
-                             f"Проверяю файлы и вложенные папки до {LIMIT_TEXT}...")
+        self.summary.setText("")
+        self.summary.hide()
+        self._done, self._total, self._dirs_pending = 0, len(files), len(dirs)
+        self._update_progress()
+        self.progress.show()
         self.props_tree.clear()
         self.props_tree.addTopLevelItem(QTreeWidgetItem(["Считаю...", ""]))
         sized: queue.Queue = queue.Queue()  # папки с посчитанным размером → проверка
@@ -284,19 +298,25 @@ class FolderView(QWidget):
         found: list[str] = []
         sent = 0.0
         total = len(files)
+        unsent = 0  # проверено с прошлого сигнала шкале
         for path, reason, error in scan_pool.check_files(files, signatures, rules, whitelist,
                                                          cancel=cancel):
             done += 1
+            unsent += 1
             if error is None:
                 level, text = classify(reason)
                 if level in ("threat", "suspicious"):
                     threats += level == "threat"
                     suspicious += level == "suspicious"
                     found.append(f"{path}: {text}")
-            if time.monotonic() - sent >= 0.5:
+            if time.monotonic() - sent >= BATCH_SECONDS:
                 sent = time.monotonic()
                 self.bridge.dir_state.emit(request, folder, "", f"Проверяю: {done} из {total}",
                                            "")
+                self.bridge.advanced.emit(request, unsent)
+                unsent = 0
+        if unsent:
+            self.bridge.advanced.emit(request, unsent)
         if cancel.is_set():
             return threats, suspicious
         tip = "\n".join(found[:30]) + (f"\n...и ещё {len(found) - 30}" if len(found) > 30
@@ -328,11 +348,31 @@ class FolderView(QWidget):
                 item.setBackground(col, QBrush(QColor(*rgb)))
                 item.setForeground(col, QBrush(text_color(rgb)))
 
+    def _update_progress(self) -> None:
+        bar = self.progress
+        if self._total == 0 and self._dirs_pending:
+            bar.setRange(0, 0)  # файлов пока нет, считается размер папок — «бегущая» шкала
+            bar.setFormat("Считаю размер вложенных папок...")
+            return
+        bar.setRange(0, max(1, self._total))
+        bar.setValue(min(self._done, self._total))
+        tail = f" (считаю папки: {self._dirs_pending})" if self._dirs_pending else ""
+        bar.setFormat(f"Проверено {self._done} из {self._total} файлов — %p%{tail}")
+
+    def _on_advanced(self, request: int, count: int) -> None:
+        if request == self._request:
+            self._done += count
+            self._update_progress()
+
     def _on_dir_size(self, request: int, folder: str, size: int, count: int,
                      opened: bool) -> None:
         item = self._items.get(folder)
         if request != self._request or item is None:
             return
+        self._dirs_pending = max(0, self._dirs_pending - 1)
+        if opened and 0 < count and size <= DIR_LIMIT:
+            self._total += count  # её файлы пойдут на проверку
+        self._update_progress()
         if not opened:
             item.setText(2, "")
             item.setText(4, "Нет доступа")
@@ -367,6 +407,8 @@ class FolderView(QWidget):
     def _on_checked(self, request: int, batch) -> None:
         if request != self._request:
             return
+        self._done += len(batch)
+        self._update_progress()
         for path, level, text in batch:
             item = self._items.get(path)
             if item is None:
@@ -380,6 +422,8 @@ class FolderView(QWidget):
     def _on_finished(self, request: int, threats: int, suspicious: int) -> None:
         if request != self._request:
             return
+        self.progress.hide()
+        self.summary.show()
         if threats:
             rgb, text = COLORS["threat"], f"Найдено угроз: {threats}, подозрительных: {suspicious}"
         elif suspicious:

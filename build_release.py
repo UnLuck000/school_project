@@ -1,6 +1,6 @@
 """Сборка: python build_release.py [--zip] [--installer]
 
-1. PyInstaller по myav.spec → dist/StretchBIT: StretchBIT.exe и папка app со всем остальным.
+1. PyInstaller по StretchBIT.spec → dist/StretchBIT: StretchBIT.exe и папка app со всем остальным.
 2. Рядом кладутся ядра VPN (vpn/bin), инструменты декомпилятора (tools/bin) и из signatures —
    только файлы из Git (release_exclusions.json, release_overrides.json). Скачанных баз в
    сборке нет: первый запуск сразу их обновляет (db/last_update = 0). Файлов этого
@@ -12,12 +12,12 @@
    добавляются отметки из установленной тестовой версии (C:\\Utils\\SBIT-test), если там новее,
    а в signatures/release_overrides.json и release_exclusions.json — её исключения.
 5. --zip — архивы release/StretchBIT-<версия>.zip и StretchBIT-test-<версия>.zip;
-   --installer — ещё и установщики ...-setup.exe (installer.py: релизная ставится в
-   C:\\Utils\\SBIT, тестовая — в C:\\Utils\\SBIT-test; внутри установщика — тот же архив,
-   пересжатый LZMA: он заметно меньше, а .zip остаётся Deflate, его открывает Проводник).
+   --installer — установщики Inno Setup 6 (installer.iss, ISCC.exe): release/StretchBIT-
+   <версия>-setup.exe ставит в C:\\Utils\\SBIT, StretchBIT-test-...-setup.exe — в
+   C:\\Utils\\SBIT-test; LZMA2, при удалении — флажок «Удалить все настройки пользователя».
 
-Журналы, карантин, кэш, профили VPN, настройки и пароли отладки (debug_mode/passwords.txt)
-в сборку не попадают: программа создаёт их сама на новом компьютере.
+Журналы, карантин, кэш в сборку не попадают; настройки, журнал действий, профили VPN и пароль
+администратора — в %APPDATA%\\StretchBitConfiguration[-test] (userdata.py), не в папке программы.
 """
 import json
 import os
@@ -72,7 +72,9 @@ def merge_test_exclusions() -> None:
     if not folder.is_dir():
         return
     ours = overrides.read_file(overrides.RELEASE_FILE)
+    import userdata  # из исходников — тестовая: её папка конфигурации общая с установленной
     theirs = overrides.merge(overrides.read_file(folder / "overrides.json"),
+                             overrides.read_file(userdata.OVERRIDES_FILE),
                              overrides.read_file(folder / "release_overrides.json"))
     added = 0
     for kind in overrides.KINDS:
@@ -103,10 +105,20 @@ def merge_test_exclusions() -> None:
         print(f"Исключения: добавлено из {folder}: {added}")
 
 
+def build_amsi() -> None:
+    """Провайдер AMSI (native/amsi): собрать, если библиотек ещё нет."""
+    bin_dir = ROOT / "native" / "amsi" / "bin"
+    if all((bin_dir / name).is_file() for name in ("sbit_amsi64.dll", "sbit_amsi32.dll")):
+        return
+    print("Собираю провайдер AMSI (native/amsi/build.py)...")
+    subprocess.run([sys.executable, str(ROOT / "native" / "amsi" / "build.py")], check=True,
+                   cwd=ROOT)
+
+
 def run_pyinstaller() -> None:
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
                     "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build" / "pyinstaller"),
-                    str(ROOT / "myav.spec")], check=True, cwd=ROOT)
+                    str(ROOT / "StretchBIT.spec")], check=True, cwd=ROOT)
 
 
 def copy_vpn_cores(app: Path) -> None:
@@ -159,40 +171,35 @@ def make_zip(folder: Path) -> Path:
     return Path(shutil.make_archive(str(out), "zip", folder.parent, folder.name))
 
 
-def recompress_lzma(archive: Path, target: Path) -> None:
-    """Тот же архив, но LZMA: installer.py распаковывает его тем же zipfile. Уже сжатое
-    (.zip, .jar, .dat VPN) и так не ужимается — его хранить без сжатия, быстрее распаковка."""
-    import zipfile
-    stored = (".zip", ".jar", ".gz", ".7z", ".png", ".jpg", ".ico")
-    with zipfile.ZipFile(archive) as src, zipfile.ZipFile(target, "w") as dst:
-        for info in src.infolist():
-            method = (zipfile.ZIP_STORED if info.filename.lower().endswith(stored)
-                      else zipfile.ZIP_LZMA)
-            out = zipfile.ZipInfo(info.filename, info.date_time)
-            out.compress_type = method
-            out.external_attr = info.external_attr
-            with src.open(info) as r, dst.open(out, "w", force_zip64=True) as w:
-                shutil.copyfileobj(r, w, 1 << 20)
-    print(f"LZMA: {archive.stat().st_size / 2**20:.0f} → {target.stat().st_size / 2**20:.0f} МБ")
+def find_iscc() -> Path | None:
+    """ISCC.exe Inno Setup 6: PATH, Program Files, установка winget для пользователя."""
+    found = shutil.which("ISCC") or shutil.which("iscc")
+    if found:
+        return Path(found)
+    for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+        if base and (Path(base) / "Inno Setup 6" / "ISCC.exe").is_file():
+            return Path(base) / "Inno Setup 6" / "ISCC.exe"
+    return None
 
 
-def make_installer(archive: Path, folder_name: str) -> Path:
-    name = f"{folder_name}-{appinfo.VERSION}-setup"
-    work = ROOT / "build" / "installer" / folder_name
-    payload = work / "payload.zip"  # внутри установщика — под постоянным именем
-    payload.parent.mkdir(parents=True, exist_ok=True)
-    recompress_lzma(archive, payload)
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
-                    "--windowed", "--name", name, "--icon", str(ROOT / "ui" / "assets" / "icon.ico"),
-                    "--add-data", f"{payload}{os.pathsep}.",
-                    "--distpath", str(ROOT / "release"), "--workpath", str(work),
-                    "--specpath", str(work), str(ROOT / "installer.py")], check=True, cwd=ROOT)
-    return ROOT / "release" / f"{name}.exe"
+def make_installer(folder: Path, edition: str) -> Path:
+    """Установщик Inno Setup из готовой папки dist/<версия> (installer.iss)."""
+    iscc = find_iscc()
+    if iscc is None:
+        raise SystemExit("Нет Inno Setup 6 (ISCC.exe): winget install JRSoftware.InnoSetup")
+    subprocess.run([str(iscc), "/Q", f"/DEdition={edition}", f"/DAppVersion={appinfo.VERSION}",
+                    f"/DSourceDir={folder}", f"/DOutputDir={ROOT / 'release'}",
+                    str(ROOT / "installer.iss")], check=True, cwd=ROOT)
+    return ROOT / "release" / f"{folder.name}-{appinfo.VERSION}-setup.exe"
 
 
 def main() -> None:
+    if "--installer" in sys.argv and find_iscc() is None:
+        raise SystemExit("Нет Inno Setup 6 (ISCC.exe): winget install JRSoftware.InnoSetup")
     merge_test_baseline()
     merge_test_exclusions()
+    build_amsi()
     run_pyinstaller()
     copy_vpn_cores(DIST / "app")
     copy_decompilers(DIST / "app")
@@ -200,11 +207,10 @@ def main() -> None:
     for edition, folder in make_editions().items():
         size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()) / 2 ** 20
         print(f"Готово ({edition}): {folder} ({size:.0f} МБ)")
-        if "--zip" in sys.argv or "--installer" in sys.argv:
-            archive = make_zip(folder)
-            print("Архив:", archive)
-            if "--installer" in sys.argv:
-                print("Установщик:", make_installer(archive, folder.name))
+        if "--zip" in sys.argv:
+            print("Архив:", make_zip(folder))
+        if "--installer" in sys.argv:
+            print("Установщик:", make_installer(folder, edition))
 
 
 if __name__ == "__main__":

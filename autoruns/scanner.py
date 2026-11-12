@@ -12,6 +12,7 @@ from processmanager.origin import command_exe, disabled_names
 from scanner.engine import check_file
 from scanner.engine import revocation_enabled
 from scanner.signature import check_revocation, describe, inspect_signature
+import syscmd
 
 try:
     import winreg
@@ -71,17 +72,38 @@ def _powershell(script: str, env_extra: dict | None = None, timeout: int = 20) -
     env.update(env_extra or {})
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            syscmd.PS_ARGS + [script],
             capture_output=True, timeout=timeout, creationflags=NO_WINDOW, env=env)
-    except (OSError, subprocess.SubprocessError):
+    except OSError:
+        # запуск PowerShell запретил другой антивирус (Kaspersky, отчёт 12.11.2026:
+        # WinError 5) — работаем без него и говорим об этом в замечаниях
+        global ps_blocked
+        ps_blocked = True
+        return ""
+    except subprocess.SubprocessError:
         return ""
     return result.stdout.decode("utf-8-sig", errors="replace")
 
 
+ps_blocked = False  # PowerShell не запустился в этом сеансе
+
+
 def resolve_shortcuts(paths: list[str]) -> dict[str, tuple[str, str]]:
-    """{путь ярлыка: (целевой файл, аргументы)}. Один вызов PowerShell на все ярлыки."""
+    """{путь ярлыка: (целевой файл, аргументы)}. Сначала свой разбор .lnk (MS-SHLLINK, без
+    запуска программ); PowerShell — один вызов только для ярлыков, где цель не нашлась."""
+    from usbguard.scan import parse_lnk
+    found: dict[str, tuple[str, str]] = {}
+    for path in paths:
+        try:
+            with open(path, "rb") as f:
+                link = parse_lnk(f.read(1 << 20))
+        except OSError:
+            continue
+        if link.target and os.path.isabs(os.path.expandvars(link.target)):
+            found[path] = (os.path.expandvars(link.target), link.arguments)
+    paths = [p for p in paths if p not in found]
     if not paths:
-        return {}
+        return found
     script = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
               "$sh=New-Object -ComObject WScript.Shell;"
               "$r=@($env:AV_LNKS -split '\\|' | ForEach-Object {"
@@ -92,10 +114,11 @@ def resolve_shortcuts(paths: list[str]) -> dict[str, tuple[str, str]]:
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
-        return {}
+        return found
     if isinstance(data, dict):
         data = [data]
-    return {d["path"]: (d.get("target") or "", d.get("args") or "") for d in data}
+    found.update({d["path"]: (d.get("target") or "", d.get("args") or "") for d in data})
+    return found
 
 
 # ---------- реестр ----------
@@ -355,6 +378,9 @@ def collect_all(progress=None) -> tuple[list[Entry], list[str]]:
     notes += task_notes
     say("Читаю подписки WMI...")
     entries += collect_wmi()
+    if ps_blocked:
+        notes.append("PowerShell не запустился (его запуск запрещает другой антивирус): задачи "
+                     "планировщика прочитаны из файлов, подписки WMI не проверены")
     return entries, notes
 
 

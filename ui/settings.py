@@ -1,21 +1,24 @@
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
 import appinfo
+import userdata
 
 try:
     import winreg
 except ImportError:  # не Windows
     winreg = None
 
-ORG, APP = "StudyAV", "myav"
+ORG, APP = "StudyAV", "myav"  # прежнее место настроек в реестре (для переноса и уборки)
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "StudyAV"
-EXPLORER_KEY = r"Software\Classes\*\shell\StudyAV"
+EXPLORER_KEY = r"Software\Classes\*\shell\StretchBIT"
+LEGACY_EXPLORER_KEY = r"Software\Classes\*\shell\StudyAV"  # пункт меню прежних версий
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULTS = {
@@ -65,6 +68,8 @@ DEFAULTS = {
     "lock/vpn": False,
     "protect/launch": True,         # контроль запуска программ (scanner/launchguard.py)
     "protect/stealer": True,        # защита от стилеров (toolbox/stealerguard.py)
+    "protect/amsi": False,          # проверка скриптов через AMSI (scanner/amsi.py); нужна
+                                    # регистрация провайдера с правами администратора
     "schedule/enabled": False,      # плановая проверка (scanner/schedule.py)
     "schedule/kind": "full",        # full | quick
     "schedule/period": "1w",        # 1w | 2w | 1m | 3m
@@ -81,6 +86,7 @@ DEFAULTS = {
     "scan/ecores_only": False,      # проверка только на энергоэффективных ядрах
     "scan/revocation": True,        # проверять отзыв сертификатов подписи (нужен интернет)
     "net/windivert_dir": "",        # папка с WinDivert.dll (пусто — искать самостоятельно)
+    "protect/selfguard": True,      # сторож: перезапуск после нештатного завершения
     "process/interval": 2,          # обновление диспетчера процессов, сек
     "stats/last_scan": "",
     "db/last_update": 0.0,          # время последнего обновления баз (секунды с 1970 года)
@@ -89,29 +95,43 @@ DEFAULTS = {
 }
 
 
-def _store() -> QSettings:
-    return QSettings(ORG, APP)  # новый объект на вызов: безопасно из разных потоков
+_stores = threading.local()
+
+
+def store() -> QSettings:
+    """settings.ini в папке конфигурации (userdata.py). ORG/APP — прежнее место в реестре:
+    его переносит userdata.migrate и чистит удаление.
+    Объект — один на поток и файл: создание QSettings на каждый cfg.get (таймеры раз в
+    секунду) каждый раз сверяло файл с диском. Сам файл Qt делит между объектами процесса,
+    так что запись из одного потока сразу видна остальным."""
+    path = str(userdata.SETTINGS_FILE)
+    cached = getattr(_stores, "item", None)
+    if cached is None or cached[0] != path:
+        cached = (path, QSettings(path, QSettings.Format.IniFormat))
+        _stores.item = cached
+    return cached[1]
 
 
 def get(key: str):
     default = DEFAULTS[key]
-    return _store().value(key, default, type=type(default))
+    return store().value(key, default, type=type(default))
 
 
 def set_(key: str, value) -> None:
-    _store().setValue(key, value)
+    store().setValue(key, value)
 
 
 def reset() -> None:
-    store = _store()
+    settings = store()
     for key in DEFAULTS:
         if key not in ("stats/last_scan", "db/last_update", "report/first_run",
                        "report/last_end", "schedule/last_run", "advanced/warned"):
-            store.remove(key)
+            settings.remove(key)
 
 
 # ---------- автозапуск вместе с Windows ----------
-TASK_NAME = "StudyAV"
+TASK_NAME = "StretchBIT"
+LEGACY_TASK = "StudyAV"  # задание прежних версий: заменяется новым
 
 
 def _autostart_parts() -> tuple[str, str]:
@@ -185,6 +205,8 @@ def set_autostart(enabled: bool) -> None:
     if sys.platform != "win32":
         raise OSError("Автозапуск поддерживается только в Windows")
     _remove_run_value()
+    if _schtasks("/Query", "/TN", LEGACY_TASK).returncode == 0:
+        _schtasks("/Delete", "/TN", LEGACY_TASK, "/F")
     if not enabled:
         if autostart_enabled():
             result = _schtasks("/Delete", "/TN", TASK_NAME, "/F")
@@ -209,6 +231,12 @@ def set_autostart(enabled: bool) -> None:
 
 def ensure_autostart() -> None:
     """При запуске с правами: задание есть (по умолчанию включено) и указывает сюда."""
+    try:
+        if _schtasks("/Query", "/TN", LEGACY_TASK).returncode == 0:
+            # задание со старым названием: убрать, а при включённой настройке создать новое
+            _schtasks("/Delete", "/TN", LEGACY_TASK, "/F")
+    except OSError:
+        pass
     if not get("startup/autostart"):
         return
     try:
@@ -232,13 +260,18 @@ def _remove_run_value() -> None:
 def ensure_explorer_menu() -> None:
     """Пункт «Проверить в ...» в меню файлов включён всегда (настройки больше нет)."""
     try:
-        if not explorer_menu_enabled() or not _explorer_current():
+        for path in (LEGACY_EXPLORER_KEY + r"\command", LEGACY_EXPLORER_KEY):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+            except OSError:
+                pass
+        if not explorer_menu_enabled() or not explorer_current():
             set_explorer_menu(True)
     except OSError:
         pass
 
 
-def _explorer_current() -> bool:
+def explorer_current() -> bool:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, EXPLORER_KEY + r"\command") as key:
             return winreg.QueryValueEx(key, "")[0] == _analyze_command()

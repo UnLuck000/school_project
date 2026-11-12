@@ -6,7 +6,6 @@ import struct
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
@@ -43,9 +42,8 @@ def test_script_rules(tmp_path):
     assert launchguard.chain_reason("explorer.exe", "powershell.exe") is None
 
 
-def test_threat_is_reported_but_not_killed(monkeypatch, tmp_path):
-    """Экстренное завершение закомментировано: угроза — только уведомление, процесс
-    возобновляется."""
+def test_threat_is_killed(monkeypatch, tmp_path):
+    """Экстренное завершение: процесс с угрозой завершается вместе с дочерними."""
     exe = tmp_path / "evil.exe"
     exe.write_bytes(b"MZ" + b"\0" * 100)
     events, resumed = [], []
@@ -58,8 +56,8 @@ def test_threat_is_reported_but_not_killed(monkeypatch, tmp_path):
     killed = []
     monkeypatch.setattr(launchguard, "_kill_tree", lambda pid: killed.append(pid) or True)
     guard._check_new(1234, 1, str(exe), [])
-    assert events[0][0] == "blocked" and events[0][1]["killed"] is False
-    assert killed == [] and resumed == [1234]
+    assert events[0][0] == "blocked" and events[0][1]["killed"] is True
+    assert killed == [1234]
 
 
 # ---------- стилеры ----------
@@ -323,7 +321,7 @@ def test_vless_profile_and_xray_config():
 def test_system_proxy_restore_on_test_key():
     import winreg
     from vpn import xray
-    key = r"Software\StudyAVTest\InternetSettings"
+    key = r"Software\SBITTest\InternetSettings"
     try:
         xray.write_proxy({"ProxyEnable": 0, "ProxyServer": "old:1", "ProxyOverride": None}, key)
         old = xray.read_proxy(key)
@@ -434,17 +432,19 @@ def test_vpn_guards_restore(monkeypatch):
         calls.append((script, env)),
         type("R", (), {"returncode": 0, "stdout": "Public|True|NotConfigured\n", "stderr": ""})())[1])
     monkeypatch.setattr(killswitch.journal, "log_action", lambda *a: logged.append(a[1]))
-    killswitch.enable("myav-tun", [r"C:\x\xray.exe", r"C:\x\sing-box.exe"])
+    killswitch.enable("sbit-tun", [r"C:\x\xray.exe", r"C:\x\sing-box.exe"])
     assert killswitch.active() and logged == ["vpn_killswitch_off"]
     script, env = calls[-1]
-    assert "DefaultOutboundAction Block" in script and env["KS_TUN"] == "myav-tun"
+    assert "DefaultOutboundAction Block" in script and env["KS_TUN"] == "sbit-tun"
     assert r"C:\x\xray.exe" in env["KS_PROGRAMS"] and "192.168.0.0/16" in env["KS_LAN"]
     assert killswitch.disable() and not killswitch.active()
     assert '"Public": "NotConfigured"' in calls[-1][1]["KS_OLD"]
     # DNS: адаптер с DHCP возвращается к DHCP
     monkeypatch.setattr(dnsguard, "_powershell", lambda script, env=None: (
         calls.append((script, env)),
-        type("R", (), {"returncode": 0, "stdout": "6|Wi-Fi|10.0.0.1|True\n", "stderr": ""})())[1])
+        type("R", (), {"returncode": 0, "stdout": "6|Wi-Fi|10.0.0.1|True|Intel(R) Wi-Fi 6\n"
+                                       "9|throne-tun|172.19.0.2|True|sing-box Tunnel\n",
+                       "stderr": ""})())[1])
     monkeypatch.setattr(dnsguard.journal, "log_action", lambda *a: logged.append(a[1]))
     assert dnsguard.protect() == ["Wi-Fi"] and logged[-1] == "vpn_dns_restore"
     assert any(env and env.get("DNS") == "1.1.1.1,1.0.0.1" for _, env in calls)
@@ -601,3 +601,47 @@ def test_vpn_checks_route():
     assert checks.route_for(B()) == ("http", 10809)
     B.state = backends.DISCONNECTED
     assert checks.route_for(B()) == ("direct",)
+
+
+def test_vless_typed_by_hand_is_normalized():
+    """Ссылку переписали вручную: «None», русская «о», пробелы, регистр в именах параметров."""
+    from vpn import xray
+    uid = "1111aaaa-2222-3333-4444-5555cccceeee"
+    typed = uid.replace("a", "а").replace("c", "с")  # русские «а» и «с»
+    link = (f"vless://{typed}@example.com:443?Type=TCP&security=Reality&encryption=Nоne%20"
+            f"&pbk=AbC_x&sid=ab12&sni=www.example.com&fp=Chrome&flow=xtls-rprx-visiоn&"
+            f"serviceName=Grpc1#Мой")
+    v = xray.parse_vless(link)
+    assert v["id"] == uid
+    assert (v["network"], v["security"], v["encryption"], v["fp"], v["flow"]) == \
+        ("tcp", "reality", "none", "chrome", "xtls-rprx-vision")
+    assert v["pbk"] == "AbC_x" and v["service"] == "Grpc1" and v["name"] == "Мой"
+    assert xray.parse_vless(f"vless://{uid}@h.example:443?encryption=")["encryption"] == "none"
+
+
+def test_tun_address_avoids_other_tunnels():
+    """Занятый Throne 172.19.0.1/30 — берётся следующий адрес."""
+    from vpn import singbox
+    assert singbox.free_tun_address([]) == "172.19.0.1/30"
+    assert singbox.free_tun_address(["172.19.0.1", "192.168.1.5"]) == "172.23.231.1/30"
+
+
+def test_dns_guard_skips_tunnel_adapters():
+    from vpn import dnsguard
+    assert dnsguard.is_tunnel("throne-tun", "sing-box Tunnel")
+    assert dnsguard.is_tunnel("Подключение 2", "WireGuard Tunnel")
+    assert not dnsguard.is_tunnel("Ethernet", "Realtek PCIe GbE Family Controller")
+    assert not dnsguard.is_tunnel("Беспроводная сеть", "Intel(R) Wi-Fi 6 AX201 160MHz")
+
+
+def test_shadow_copy_wipe_commands():
+    """Удаление теневых копий — подготовка шифровальщика; обычные команды не трогаем."""
+    bad = [["vssadmin.exe", "delete", "shadows", "/all", "/quiet"],
+           ["wmic", "shadowcopy", "delete"],
+           ["bcdedit", "/set", "{default}", "recoveryenabled", "No"],
+           ["wbadmin", "delete", "catalog", "-quiet"],
+           ["powershell", "-c", "Get-WmiObject Win32_ShadowCopy | % { $_.Delete() }"]]
+    good = [["vssadmin", "list", "shadows"], ["bcdedit", "/enum"], [],
+            ["powershell", "-c", "Get-CimInstance Win32_ShadowCopy"]]
+    assert all(launchguard.shadow_wipe(c) for c in bad)
+    assert not any(launchguard.shadow_wipe(c) for c in good)

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from recovery.registry import NO_WINDOW, REG_DWORD, read_value  # noqa: F401  (для совместимости)
+import syscmd
 
 SYSTEM_ROOT = os.environ.get("SystemRoot", r"C:\Windows")
 HOSTS_FILE = Path(SYSTEM_ROOT) / "System32" / "drivers" / "etc" / "hosts"
@@ -51,7 +52,7 @@ def run_powershell(script: str, env_extra: dict | None = None,
             "$ProgressPreference='SilentlyContinue';" + script)
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", full],
+            syscmd.PS_ARGS + [full],
             capture_output=True, timeout=timeout, creationflags=NO_WINDOW, env=env)
     except subprocess.TimeoutExpired:
         return -1, "", "Время ожидания истекло"

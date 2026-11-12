@@ -54,7 +54,7 @@ def _excepthook(kind, value, tb):
     try:
         from diag import features
         features.on_exception(value)
-    except Exception:
+    except Exception:  # noqa: S110 — обработчик сбоя не должен падать сам
         pass
 
 
@@ -67,7 +67,7 @@ def _thread_excepthook(args):
     try:
         from diag import features
         features.on_exception(args.exc_value)
-    except Exception:
+    except Exception:  # noqa: S110 — обработчик сбоя не должен падать сам
         pass
 
 
@@ -143,11 +143,19 @@ class FreezeWatch:
 
     def _watch(self):
         reported = 0.0
+        last = time.monotonic()
         while True:
             time.sleep(0.1)
             if _exit_started is not None:
                 return  # выход: ожидание потоков — не зависание
-            lag = time.monotonic() - self._beat
+            now = time.monotonic()
+            if now - last > 3.0:
+                # сам сторож стоял: компьютер спал (или процесс был заморожен) — в журнале
+                # это выглядело «зависанием на 72380 с»
+                log.info("Пауза процесса %.0f с (сон компьютера) — не зависание", now - last)
+                self._beat, reported = now, 0.0
+            last = now
+            lag = now - self._beat
             if lag > FREEZE_SEC and reported == 0.0:
                 frame = sys._current_frames().get(self._main)
                 stack = "".join(traceback.format_stack(frame, limit=12)) if frame else ""

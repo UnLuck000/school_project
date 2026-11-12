@@ -1,6 +1,6 @@
 """Блокировка адресов и программ брандмауэром Windows (с откатом через журнал).
 
-Правила создаются в группе GROUP, у каждого своё имя (Name) вида «myav-<номер>»: по нему
+Правила создаются в группе GROUP, у каждого своё имя (Name) вида «sbit-<номер>»: по нему
 правило удаляется при откате и в списке блокировок. Нужны права администратора.
 Значения (адрес, путь программы) передаются в PowerShell через переменные окружения.
 """
@@ -14,12 +14,14 @@ from recovery import journal
 from recovery.journal import active_check, undo_op
 from recovery.system import run_powershell
 
-GROUP = "myav"
+GROUP = "SBIT"
+LEGACY_GROUPS = ("myav",)        # правила прежних версий: видны и снимаются
+OWN_PREFIXES = ("sbit-", "myav-")
 
 
 @dataclass
 class Rule:
-    name: str          # myav-...
+    name: str          # sbit-...
     title: str         # что видит пользователь
     direction: str     # Inbound | Outbound
     target: str        # адрес или путь программы
@@ -35,10 +37,10 @@ def _check_ip(ip: str) -> str:
 
 def _create(title: str, direction: str, env: dict, target_param: str) -> str:
     name = f"{GROUP}-{uuid.uuid4().hex[:12]}"
-    script = (f"New-NetFirewallRule -Name $env:MYAV_NAME -DisplayName $env:MYAV_TITLE "
+    script = (f"New-NetFirewallRule -Name $env:SBIT_NAME -DisplayName $env:SBIT_TITLE "
               f"-Group '{GROUP}' -Direction {direction} -Action Block "
-              f"-Description 'Создано myav' {target_param} | Out-Null")
-    code, _, err = run_powershell(script, {"MYAV_NAME": name, "MYAV_TITLE": title, **env})
+              f"-Description 'Создано StretchBIT' {target_param} | Out-Null")
+    code, _, err = run_powershell(script, {"SBIT_NAME": name, "SBIT_TITLE": title, **env})
     if code != 0:
         if "Access is denied" in err or "Отказано в доступе" in err or "0x80070005" in err:
             raise PermissionError("Нет прав. Запустите программу от имени администратора")
@@ -52,8 +54,8 @@ def block_ip(ip: str) -> list[str]:
     names: list[str] = []
     try:
         for d in ("Outbound", "Inbound"):
-            names.append(_create(f"myav: блокировка {ip} ({d})", d, {"MYAV_IP": ip},
-                                 "-RemoteAddress $env:MYAV_IP"))
+            names.append(_create(f"SBIT: блокировка {ip} ({d})", d, {"SBIT_IP": ip},
+                                 "-RemoteAddress $env:SBIT_IP"))
     except OSError:
         if names:  # второе правило не создалось: первое без записи в журнал не оставляем
             _remove(names)
@@ -67,8 +69,8 @@ def block_program(exe: str) -> list[str]:
     """Запрещает программе исходящие соединения."""
     if not exe:
         raise ValueError("Путь программы неизвестен")
-    names = [_create(f"myav: блокировка программы {exe}", "Outbound", {"MYAV_EXE": exe},
-                     "-Program $env:MYAV_EXE")]
+    names = [_create(f"SBIT: блокировка программы {exe}", "Outbound", {"SBIT_EXE": exe},
+                     "-Program $env:SBIT_EXE")]
     journal.log_action(f"Брандмауэр: программе запрещён выход в сеть: {exe}", "firewall_remove",
                        {"names": names, "target": exe})
     return names
@@ -76,9 +78,9 @@ def block_program(exe: str) -> list[str]:
 
 def _remove(names: list[str]) -> None:
     code, _, err = run_powershell(
-        "$env:MYAV_NAMES -split ';' | ForEach-Object { "
+        "$env:SBIT_NAMES -split ';' | ForEach-Object { "
         "Remove-NetFirewallRule -Name $_ -ErrorAction SilentlyContinue }",
-        {"MYAV_NAMES": ";".join(names)})
+        {"SBIT_NAMES": ";".join(names)})
     if code != 0:
         raise OSError(err.strip() or f"код {code}")
 
@@ -134,13 +136,13 @@ def unblock(rule_names: list[str], target: str) -> None:
 @undo_op("firewall_restore")
 def _undo_unblock(d: dict) -> str:
     for r in d["rules"]:
-        param = "-Program $env:MYAV_EXE" if r["target"].lower().endswith(".exe") \
-            else "-RemoteAddress $env:MYAV_IP"
-        script = (f"New-NetFirewallRule -Name $env:MYAV_NAME -DisplayName $env:MYAV_TITLE "
+        param = "-Program $env:SBIT_EXE" if r["target"].lower().endswith(".exe") \
+            else "-RemoteAddress $env:SBIT_IP"
+        script = (f"New-NetFirewallRule -Name $env:SBIT_NAME -DisplayName $env:SBIT_TITLE "
                   f"-Group '{GROUP}' -Direction {r['direction']} -Action Block {param} | Out-Null")
         code, _, err = run_powershell(script, {
-            "MYAV_NAME": r["name"], "MYAV_TITLE": r["title"],
-            "MYAV_EXE": r["target"], "MYAV_IP": r["target"]})
+            "SBIT_NAME": r["name"], "SBIT_TITLE": r["title"],
+            "SBIT_EXE": r["target"], "SBIT_IP": r["target"]})
         if code != 0:
             raise OSError(err.strip() or f"код {code}")
     return f"Блокировка возвращена: {d['target']}"
@@ -156,7 +158,7 @@ class SystemRule:
     target: str        # программа, служба, адреса, порты
     enabled: bool
     group: str
-    own: bool          # создано этой программой (группа myav)
+    own: bool          # создано этой программой (группа SBIT; прежняя — myav)
 
 
 _indirect: dict[str, str] = {}
@@ -204,7 +206,7 @@ def list_system_rules() -> list[SystemRule]:
             if not isinstance(raw, str):
                 continue
             f = parse_rule_string(raw)
-            first = lambda k: (f.get(k) or [""])[0]  # noqa: E731
+            first = lambda k: (f.get(k) or [""])[0]  # noqa: B023 — вызывается в этом же шаге
             parts = []
             if first("App"):
                 parts.append(os.path.expandvars(first("App")))
@@ -223,13 +225,15 @@ def list_system_rules() -> list[SystemRule]:
                 "Исходящее" if first("Dir") == "Out" else "Входящее",
                 "Блокировать" if first("Action") == "Block" else "Разрешить",
                 "; ".join(parts) or "все", first("Active").upper() == "TRUE",
-                group, rule_id.startswith("myav-") or group == GROUP))
+                group, rule_id.startswith(OWN_PREFIXES) or group in (GROUP, *LEGACY_GROUPS)))
     return rules
 
 
 def list_rules() -> list[Rule]:
-    """Правила программы в брандмауэре (группа myav)."""
-    script = (f"$r = Get-NetFirewallRule -Group '{GROUP}' -ErrorAction SilentlyContinue; "
+    """Правила программы в брандмауэре (группа SBIT; прежняя — myav)."""
+    groups = ", ".join(f"'{g}'" for g in (GROUP, *LEGACY_GROUPS))
+    script = (f"$r = @({groups}) | ForEach-Object {{ Get-NetFirewallRule -Group $_ "
+              "-ErrorAction SilentlyContinue }; "
               "$r | ForEach-Object { $a = $_ | Get-NetFirewallAddressFilter; "
               "$p = $_ | Get-NetFirewallApplicationFilter; "
               "[pscustomobject]@{name=$_.Name; title=$_.DisplayName; "

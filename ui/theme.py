@@ -155,7 +155,8 @@ def _make_style():
 
         def drawPrimitive(self, element, option, painter, widget=None):
             if element != QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck:
-                return super().drawPrimitive(element, option, painter, widget)
+                super().drawPrimitive(element, option, painter, widget)
+                return
             from PySide6.QtCore import QPointF, QRectF
             from PySide6.QtGui import QPainter, QPainterPath, QPen
             rect = QRectF(option.rect)

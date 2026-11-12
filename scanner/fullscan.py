@@ -61,7 +61,7 @@ SKIP_DIRS = {"system volume information", "$winreagent", "$sysreset", "$windows.
              "$windows.~ws", "windows.old",
              # ловушки для шифровальщиков (toolbox.decoys.DECOY_NAME): свои файлы, а чтение
              # во время проверки поднимало тревогу «ловушки изменены, виновник не найден»
-             "!myav — файлы-ловушки"}
+             "!sbit — файлы-ловушки", "!myav — файлы-ловушки"}
 SKIP_FILES = {"pagefile.sys", "hiberfil.sys", "swapfile.sys", "dumpstack.log.tmp"}
 
 
@@ -186,7 +186,7 @@ def child_state(state: str, name: str) -> str:
 
 
 def system_drive() -> str:
-    """Корень системного диска: «C:\»."""
+    """Корень системного диска: «C:\\»."""
     return os.environ.get("SystemDrive", "C:").rstrip("\\/") + os.sep
 
 
@@ -286,10 +286,11 @@ def run(roots: list[str], on_progress, on_found, cancel: threading.Event,
     signatures, rules, whitelist = rules_and_bases()
     last = 0.0
 
-    def check(batch):
+    def check(paths):
         nonlocal last
-        for path, reason, error in scan_pool.check_files(batch, signatures, rules, whitelist,
-                                                         cancel=cancel):
+        # поток, а не пачки: обход диска и проверка идут одновременно (pool.check_stream)
+        for path, reason, error in scan_pool.check_stream(paths, signatures, rules, whitelist,
+                                                          cancel=cancel):
             stats.checked += 1
             if error is not None:
                 stats.errors += 1
@@ -314,16 +315,13 @@ def run(roots: list[str], on_progress, on_found, cancel: threading.Event,
 
     run_extras(mode, stats, signatures, rules, whitelist, found, cancel, say)
     plan = quick_plan() if mode == "quick" else [QuickRoot(r, True, None) for r in roots]
-    for item in plan:
-        batch = []
-        for path in walk(item.path, stats, cancel, item.recursive, item.limit):
-            batch.append(path)
+    def queued(paths):
+        for path in paths:
             stats.queued += 1
-            if len(batch) >= BATCH:
-                check(batch)
-                batch = []
-        if batch and not cancel.is_set():
-            check(batch)
+            yield path
+
+    for item in plan:
+        check(queued(walk(item.path, stats, cancel, item.recursive, item.limit)))
         if cancel.is_set():
             break
     on_progress(stats)

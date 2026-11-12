@@ -142,8 +142,9 @@ class DecompileTab(QWidget):
         self.btn_stop.show()
         self.btn_run.setEnabled(False)
         from diag import features
-        features.begin("analyzer.decompile")
-        features.step("analyzer.decompile", f"разбор {self._path.suffix or 'файла'}")
+        run = features.begin("analyzer.decompile")
+        run.step("разбор файла")  # имя шага одно для любых файлов: эталон сверяет шаги
+        run.fact("type", self._path.suffix.lower() or "без расширения")
         threading.Thread(target=self._job, args=(self._run, self._path, self._cancel),
                          daemon=True, name="decompile").start()
 
@@ -243,7 +244,10 @@ class DecompileTab(QWidget):
     def _toggle_bytecode(self, on: bool) -> None:
         node = self._node(self.tree.currentItem())
         if node is not None:
-            self._bytecode(node) if on else self._load_code(node)
+            if on:
+                self._bytecode(node)
+            else:
+                self._load_code(node)
 
     def _load_code(self, node: unpack.Node) -> None:
         self._request += 1

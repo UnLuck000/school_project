@@ -9,6 +9,7 @@ import platform
 import subprocess
 import time
 from pathlib import Path
+import syscmd
 
 CACHE = Path("logs") / "specs.json"
 MAX_AGE = 86400
@@ -47,7 +48,7 @@ def collect(timeout: int = 40) -> dict:
     """Свежий сбор (без кэша). При ошибке — то, что знает Python."""
     data: dict = {}
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SCRIPT],
+        r = subprocess.run(syscmd.PS_ARGS + [SCRIPT],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout, creationflags=CREATE_NO_WINDOW)
         data = json.loads(r.stdout.strip() or "{}")
@@ -55,14 +56,14 @@ def collect(timeout: int = 40) -> dict:
         pass
     data["python"] = platform.python_version()
     try:
-        from PySide6 import __version__ as qt
-        data["pyside6"] = qt
+        import PySide6
+        data["pyside6"] = PySide6.__version__
     except ImportError:
         pass
     try:
         from scanner import cpucores
         data["cpu_cores"] = cpucores.describe()
-    except Exception:
+    except Exception:  # noqa: S110 — нет сведений о ядрах — характеристики без них
         pass
     data["collected"] = time.time()
     return data

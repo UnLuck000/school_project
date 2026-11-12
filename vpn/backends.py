@@ -30,6 +30,8 @@ TUNNEL_DIR = Path("cache") / "vpn"
 CREATE_NO_WINDOW = 0x08000000
 
 DISCONNECTED, CONNECTING, CONNECTED, ERROR = "disconnected", "connecting", "connected", "error"
+# ядра ещё завершаются (sing-box — до 8 с): новое подключение заняло бы их порты
+DISCONNECTING = "disconnecting"
 
 
 def _find(names: list[str], folders: list[str]) -> str:
@@ -48,7 +50,7 @@ def _find(names: list[str], folders: list[str]) -> str:
 def tunnel_name(name: str) -> str:
     """Имя туннеля WireGuard: буквы, цифры, «_=+.-», до 32 символов."""
     clean = re.sub(r"[^A-Za-z0-9_=+.-]", "_", name)[:32].strip("_")
-    return clean or "myav"
+    return clean or "sbit"
 
 
 def add_local_proxy(config: dict, log, strict: bool = False) -> dict[str, int]:
@@ -401,8 +403,9 @@ class XrayBackend(Backend):
         self.adapter = ""
 
     def disconnect(self) -> None:
-        self._set(DISCONNECTED)
+        self._set(DISCONNECTING)
         self._cleanup()
+        self._set(DISCONNECTED)
         self.log("Xray: отключено")
 
     def counters(self) -> tuple[int, int]:
@@ -503,11 +506,32 @@ class SingBoxBackend(Backend):
         procguard.bind(self.proc, self.log)
         threading.Thread(target=self._read, args=(self.proc, "sing-box"), daemon=True).start()
         if not self._wait_adapter():
-            self._fail(self.error or "sing-box не создал адаптер TUN (смотрите журнал)")
+            if not self._aborted():
+                self._fail(self.error or "sing-box не создал адаптер TUN (смотрите журнал)")
             return
         self.adapter = self.sb.TUN_NAME
         features.step("vpn.connect", "адаптер TUN")
         from vpn import dnsguard
+        if self._aborted():
+            return
+        # Подмена DNS и kill switch друг от друга не зависят, а каждая — это запуски PowerShell
+        # по 1–3 с (из 11,5 с подключения на них уходило 9): выполняются одновременно.
+        ks_error: list[OSError] = []
+        ks_thread = None
+        if kill:
+            from vpn import killswitch
+
+            def enable_killswitch():
+                try:
+                    killswitch.enable(self.sb.TUN_NAME, [self.xray_exe, self.exe])
+                    self.killswitch = True
+                except OSError as e:
+                    ks_error.append(e)
+
+            ks_thread = threading.Thread(target=enable_killswitch, name="vpn-killswitch",
+                                         daemon=True)
+            ks_thread.start()
+        dns_error = None
         try:
             changed = dnsguard.protect()
             self.dns_changed = bool(changed)
@@ -515,18 +539,20 @@ class SingBoxBackend(Backend):
                 self.log(f"DNS {', '.join(changed)} на время VPN — "
                          f"{', '.join(dnsguard.PUBLIC_DNS)} (через туннель, без утечки)")
         except OSError as e:
-            self._fail(f"DNS не защищён, VPN отключён: {e}")
-            return
-        if kill:
-            from vpn import killswitch
-            try:
-                killswitch.enable(self.sb.TUN_NAME, [self.xray_exe, self.exe])
-                self.killswitch = True
+            dns_error = e
+        if ks_thread is not None:
+            ks_thread.join()  # до любого выхода: _fail снимает kill switch, если он включён
+            if self.killswitch:
                 features.step("vpn.connect", "kill switch")
                 self.log("Kill switch: интернет только через туннель")
-            except OSError as e:
-                self._fail(f"Kill switch не включён, VPN отключён: {e}")
-                return
+        if dns_error is not None:
+            self._fail(f"DNS не защищён, VPN отключён: {dns_error}")
+            return
+        if ks_error:
+            self._fail(f"Kill switch не включён, VPN отключён: {ks_error[0]}")
+            return
+        if self._aborted():
+            return
         self._set(CONNECTED)
         self.log(f"Подключено: весь трафик через {self.sb.TUN_NAME} → Xray → сервер"
                  + ", " + x.IP_MODES.get(ip_mode, ip_mode))
@@ -543,15 +569,34 @@ class SingBoxBackend(Backend):
             self.log("Настройки: " + ", ".join(parts))
 
     def _wait_adapter(self, timeout: float = 10.0) -> bool:
+        """Адаптер TUN появился и sing-box после этого жив. Адаптер создаётся раньше, чем ему
+        назначается адрес: ошибка («The object already exists») приходит следом, поэтому
+        после появления — ещё секунда проверки."""
         import psutil
         end = time.time() + timeout
         while time.time() < end:
-            if self.proc is None or self.proc.poll() is not None:
+            if self.proc is None or self.proc.poll() is not None or self.error:
                 return False
             if self.sb.TUN_NAME in psutil.net_if_stats():
-                return True
+                time.sleep(1.0)
+                return self.proc is not None and self.proc.poll() is None and not self.error
             time.sleep(0.3)
         return False
+
+    def _aborted(self) -> bool:
+        """Подключение уже сорвалось: ядро упало (его поток вывода поставил ERROR) или
+        пользователь нажал «Отключить». Тогда дальше DNS и kill switch не трогаем, а то, что
+        это подключение успело поменять, возвращаем — раньше после падения sing-box подмена
+        DNS и kill switch всё равно включались."""
+        alive = all(p is not None and p.poll() is None for p in (self.proc, self.xray_proc))
+        if self.state == CONNECTING and alive and not self.error:
+            return False
+        if self.killswitch or self.dns_changed or alive:
+            self._cleanup()
+        if self.state == CONNECTING:
+            self._set(ERROR, self.error or "ядро VPN завершилось во время подключения")
+            self.log(self.error)
+        return True
 
     def _read(self, proc: subprocess.Popen, title: str) -> None:
         for line in proc.stdout:
@@ -611,8 +656,9 @@ class SingBoxBackend(Backend):
         self.adapter = ""
 
     def disconnect(self) -> None:
-        self._set(DISCONNECTED)
+        self._set(DISCONNECTING)
         self._cleanup()
+        self._set(DISCONNECTED)
         self.log("Отключено")
 
 
@@ -626,6 +672,6 @@ def public_ip(timeout: int = 8) -> str:
     """Внешний IP-адрес (api.ipify.org): виден ли адрес сервера VPN."""
     import urllib.request
     req = urllib.request.Request("https://api.ipify.org",
-                                 headers={"User-Agent": "study-av/1.0"})
+                                 headers={"User-Agent": "StretchBIT/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("ascii", "replace").strip()

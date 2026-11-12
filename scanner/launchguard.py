@@ -31,12 +31,11 @@ import os
 import queue
 import re
 import threading
-import time
 from pathlib import Path
 
 POLL_SECONDS = 0.3
 SUSPEND_LIMIT = 64 * 1024 * 1024  # крупные программы (игры) не приостанавливаем: долго читать
-SESSION_NAME = "myav-proc"
+SESSION_NAME = "sbit-proc"
 EVENT_PROCESS_START = 1
 KEYWORD_PROCESS = 0x10
 
@@ -98,6 +97,23 @@ def chain_reason(parent: str, child: str) -> str | None:
     if parent.lower() in DOCUMENT_APPS and child.lower() in SHELLS:
         return f"{parent} запустил {child}: так работают вредоносные макросы и документы"
     return None
+
+
+# Удаление теневых копий и отключение восстановления: почти всегда — подготовка
+# шифровальщика (после этого файлы не вернуть: recovery/shadow.py).
+SHADOW_TOOLS = {"vssadmin.exe", "wmic.exe", "wbadmin.exe", "bcdedit.exe", "powershell.exe",
+                "pwsh.exe"}
+SHADOW_WIPE_RE = re.compile(
+    r"vssadmin(\.exe)?\W.*(delete\s+shadows|resize\s+shadowstorage)"
+    r"|wmic(\.exe)?\W.*shadowcopy\W.*delete"
+    r"|wbadmin(\.exe)?\W.*delete\s+(catalog|systemstatebackup|backup)"
+    r"|bcdedit(\.exe)?\W.*recoveryenabled\s+no"
+    r"|win32_shadowcopy.*(delete|remove-ciminstance|remove-wmiobject)", re.I | re.S)
+
+
+def shadow_wipe(cmdline: list[str]) -> bool:
+    """Команда удаляет теневые копии Windows или отключает восстановление."""
+    return bool(cmdline) and bool(SHADOW_WIPE_RE.search(" ".join(cmdline)))
 
 
 def encoded_command(cmdline: list[str]) -> bool:
@@ -183,6 +199,8 @@ class LaunchGuard:
 
     def stop(self) -> None:
         self._stop.set()
+        from processmanager.story import STORY
+        STORY.sources.discard("launch")
         if self._trace is not None:
             self._trace.stop()
             self._trace = None
@@ -199,11 +217,14 @@ class LaunchGuard:
         try:
             self.on_event(kind, info)
         except Exception:
-            pass
+            from diag.log import swallowed
+            swallowed("launchguard: обработчик события интерфейса")
 
     # ---------- источники событий ----------
     def _start_source(self) -> None:
         from processmanager import ntsnap
+        from processmanager.story import STORY
+        STORY.sources.add("launch")
         if ntsnap.AVAILABLE:  # уже запущенные: проверяются один раз, без завершения
             try:
                 procs = ntsnap.list_processes()
@@ -212,6 +233,7 @@ class LaunchGuard:
             for p in procs:
                 self._seen[p.pid] = p.created
                 self._names[p.pid] = p.name
+                STORY.known(p.pid, p.ppid, p.name)
             self._queue.put(("existing", [p.pid for p in procs]))
         from processmanager.etw import EtwTrace, KERNEL_PROCESS
         trace = EtwTrace(SESSION_NAME, KERNEL_PROCESS, KEYWORD_PROCESS, self._on_etw,
@@ -237,6 +259,8 @@ class LaunchGuard:
             # командная строка интерпретатора — сразу: короткий скрипт успеет завершиться,
             # пока очередь дойдёт до проверки
             cmdline = _cmdline(pid) if os.path.basename(exe).lower() in SCRIPT_HOSTS else None
+            from processmanager.story import STORY
+            STORY.started(pid, ppid, exe, cmdline or "")
             self._queue.put(("new", pid, ppid, exe, cmdline))
 
     def _poll(self) -> None:
@@ -253,6 +277,8 @@ class LaunchGuard:
                     self._seen[p.pid] = p.created
                     self._names[p.pid] = p.name
                     cmdline = _cmdline(p.pid) if p.name.lower() in SCRIPT_HOSTS else None
+                    from processmanager.story import STORY
+                    STORY.started(p.pid, p.ppid, "", cmdline or "", when=p.created, name=p.name)
                     self._queue.put(("new", p.pid, p.ppid, "", cmdline))
             for pid in set(self._seen) - alive:
                 self._seen.pop(pid, None)
@@ -344,20 +370,18 @@ class LaunchGuard:
         killed = False
         try:
             if cmdline is None:
-                cmdline = _cmdline(pid) if name.lower() in SCRIPT_HOSTS else []
+                cmdline = _cmdline(pid) if name.lower() in SCRIPT_HOSTS | SHADOW_TOOLS else []
+            from processmanager.story import STORY
+            STORY.identify(pid, exe, cmdline)
             targets = [exe] + script_args(cmdline)
             verdicts = self._verdict(targets)
             self.checked += 1
             for target in targets:
                 level, text = classify(verdicts.get(target))
                 if level == "threat":
-                    # ========================================================================
-                    # ЭКСТРЕННОЕ ЗАВЕРШЕНИЕ ВРЕМЕННО ОТКЛЮЧЕНО: ложное срабатывание не должно
-                    # завершать нужную программу. Чтобы включить: раскомментировать строку
-                    # «killed = _kill_tree(pid)» ниже. Карантин — только вручную из журнала
-                    # защиты (правый клик), как и у монитора папок.
-                    # ========================================================================
-                    # killed = _kill_tree(pid)
+                    # экстренное завершение: только уровень «угроза» (хэш или правило
+                    # вредоноса у неподписанного файла); в карантин — вручную из журнала
+                    killed = _kill_tree(pid)
                     self.blocked += killed
                     self._emit("blocked", {"pid": pid, "name": name, "exe": target,
                                            "text": text, "killed": killed,
@@ -378,6 +402,17 @@ class LaunchGuard:
                         "text": f"PowerShell с закодированной командой (-enc), запустил "
                                 f"{origin or parent or 'неизвестный процесс'}: так прячут команды "
                                 f"загрузчики" + (f". Команда: {decoded}" if decoded else "")})
+            if shadow_wipe(cmdline):
+                origin, _parent_exe = real_parent(ppid)
+                key = ("shadow", origin, " ".join(cmdline))
+                if key not in self._reported:
+                    self._reported.add(key)
+                    self._emit("suspicious", {
+                        "pid": pid, "name": name, "exe": exe, "killed": False,
+                        "text": f"Удаление теневых копий Windows (запустил "
+                                f"{origin or parent or 'неизвестный процесс'}): так шифровальщики "
+                                f"лишают возможности вернуть файлы. Команда: "
+                                f"{' '.join(cmdline)[:200]}"})
             chain = chain_reason(parent, name)
             if chain:
                 self._emit("suspicious", {"pid": pid, "name": name, "exe": exe, "text": chain,
@@ -417,7 +452,8 @@ def _resume(pid: int) -> None:
     try:
         _psutil_process(pid).resume()
     except Exception:
-        pass
+        from diag.log import swallowed
+        swallowed("launchguard: возобновление процесса")
 
 
 def _cmdline(pid: int) -> list[str]:
@@ -438,7 +474,8 @@ def _kill_tree(pid: int) -> bool:
         try:
             child.kill()
         except Exception:
-            pass
+            from diag.log import swallowed
+            swallowed("launchguard: завершение дочернего процесса")
     try:
         proc.kill()
         return True

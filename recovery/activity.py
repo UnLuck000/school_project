@@ -7,7 +7,6 @@ PERIOD_DAYS (отсчёт от первого запуска) готовый о�
 показывается пользователю кнопкой на вкладке «Отладка».
 """
 import json
-import os
 import platform
 import re
 import threading
@@ -37,6 +36,8 @@ KINDS = {
     "decoy": "Ловушки для шифровальщиков",
     "launch": "Контроль запуска программ",
     "stealer": "Защита от стилеров (доступ к паролям браузеров)",
+    "amsi": "Проверка скриптов перед выполнением (AMSI)",
+    "systool": "Сбои системных программ (PowerShell и др.)",
     "drivers": "Уязвимые драйверы",
     "extensions": "Расширения браузеров и уведомления сайтов",
     "schedule": "Плановая проверка",
@@ -48,6 +49,7 @@ KINDS = {
     "update": "Обновление баз",
     "settings": "Изменение настроек",
     "access": "Дополнительные настройки и отладка (ввод пароля)",
+    "trust": "Списки доверия: изменения не из программы",
     "program": "Запуск и завершение программы",
 }
 
@@ -122,7 +124,7 @@ def record(kind: str, text: str, **details) -> None:
         get("activity").info("[%s] %s%s", kind, text,
                              f" {json.dumps(details, ensure_ascii=False, default=str)}"
                              if details else "")
-    except Exception:
+    except Exception:  # noqa: S110 — дубль в app.log не обязателен
         pass
     try:
         with _lock:
@@ -215,8 +217,8 @@ def _build_report(since: float, until: float | None) -> str:
            f"Период: {_when(since) if since else 'с начала'} — {_when(shown_until)}",
            f"Составлен: {_when(time.time())}"]
     cached = specs.cached()
-    out += ["", "== Компьютер =="] + (specs.describe(cached) if cached else
-                                      ["характеристики ещё не собраны"]) + [""]
+    described = specs.describe(cached) if cached else ["характеристики ещё не собраны"]
+    out += ["", "== Компьютер =="] + described + [""]
 
     events = read_events(since, until)
     groups: dict[str, list[dict]] = {}

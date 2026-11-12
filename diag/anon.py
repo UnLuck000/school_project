@@ -36,7 +36,7 @@ def anonymize_user(text: str, env: dict | None = None) -> str:
             pairs.append((value, f"%{name}%"))
     pairs.sort(key=lambda p: len(p[0]), reverse=True)
     for value, token in pairs:
-        text = re.sub(re.escape(value) + r"(?=[\\/\s\"';:,)]|$)", lambda m: token, text,
+        text = re.sub(re.escape(value) + r"(?=[\\/\s\"';:,)]|$)", lambda m: token, text,  # noqa: B023
                       flags=re.I | re.M)
     text = re.sub(r"(?i)\b([a-z]:\\users\\)(?!%|public\\|default\\|all users\\)[^\\\s\"]+",
                   lambda m: m.group(1) + OTHER_USER, text)
@@ -100,7 +100,7 @@ def register_adapters() -> None:
                     ip = a.address.split("%")[0]
                     if ip and not ip.startswith(("127.", "::1")):
                         register_own_ip(ip)
-    except Exception:
+    except Exception:  # noqa: S110 — адаптеры недоступны: скрытие своих адресов остаётся по шаблонам
         pass
 
 
@@ -109,7 +109,16 @@ def register_vpn_profiles() -> None:
         from vpn import profiles
         for p in profiles.load():
             register_vpn_profile(p.name, p.server)
-    except Exception:
+    except Exception:  # noqa: S110 — профилей VPN нет или они не читаются: скрываются адреса по шаблонам
+        pass
+    # последний профиль из настроек («имя|сервер:порт») — даже если самого профиля уже нет:
+    # 11.11.2026 профилей не было, а снимок настроек записал адрес сервера в app.log открыто
+    try:
+        from ui import settings as cfg
+        name, _, server = str(cfg.get("vpn/last_profile") or "").partition("|")
+        if name or server:
+            register_vpn_profile(name, server)
+    except Exception:  # noqa: S110 — настроек ещё нет (ранний запуск)
         pass
 
 

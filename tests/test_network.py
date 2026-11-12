@@ -191,3 +191,31 @@ def test_shared_services_and_quiet_alerts(tmp_path, monkeypatch):
     assert mon.quiet_reason(1234, "powershell.exe", r"C:\powershell.exe") == ""  # LOLBin
     monkeypatch.setattr(mon, "_signature", lambda exe: ("Нет подписи", False))
     assert mon.quiet_reason(1234, "bot.exe", r"C:\Temp\bot.exe") == ""
+
+
+def test_socket_event_layout():
+    """WINDIVERT_ADDRESS уровня SOCKET: PID и порты по смещениям windivert.h 2.x."""
+    import struct
+    addr = bytearray(80)
+    struct.pack_into("<I", addr, 32, 4321)
+    struct.pack_into("<HH", addr, 68, 55123, 443)
+    assert tls.socket_event(bytes(addr)) == (4321, 55123, 443)
+    assert tls.socket_event(b"\0" * 10) is None
+
+
+def test_socket_map_names_process_at_connect():
+    import os
+    m = tls.SocketMap()
+    m.add(50001, os.getpid())
+    pid, name, _ = m.get(50001)
+    assert pid == os.getpid() and name.lower().startswith("python")
+    assert m.get(50002) is None
+
+
+def test_domain_level_apex_and_shared():
+    from networkmonitor import domains
+    feed = {"baidu.com": "threatfox", "evil.com": "threatfox", "x.bad.net": "urlhaus"}
+    assert domains.lookup(feed, "hm.baidu.com") is None            # крупный сайт — не судим
+    assert domains.lookup_level(feed, "evil.com")[2] == "critical"   # точное имя
+    assert domains.lookup_level(feed, "a.evil.com")[2] == "warning"  # только родитель 2-го уровня
+    assert domains.lookup_level(feed, "a.x.bad.net")[2] == "critical"

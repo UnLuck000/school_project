@@ -25,7 +25,9 @@ from pathlib import Path
 from recovery import journal
 from recovery.journal import active_check, undo_op
 
-DECOY_NAME = "!myav — файлы-ловушки"
+DECOY_NAME = "!SBIT — файлы-ловушки"
+LEGACY_NAMES = ("!myav — файлы-ловушки",)  # папки прежних версий
+ALL_NAMES = tuple(n.lower() for n in (DECOY_NAME, *LEGACY_NAMES))
 MANIFEST = journal.JOURNAL_DIR / "decoys.json"
 README = "ПРОЧТИТЕ.txt"
 SAMPLE_SECONDS = 1.0
@@ -39,7 +41,7 @@ FILES = {
     "Бюджет семьи.xlsx": b"PK\x03\x04\x14\x00\x06\x00",
     "Паспорт скан.pdf": b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
     "Фото 2024-07-12.jpg": b"\xff\xd8\xff\xe0\x00\x10JFIF\x00",
-    "Пароли.txt": "Не храните пароли в текстовых файлах.\r\n".encode("utf-8"),
+    "Пароли.txt": "Не храните пароли в текстовых файлах.\r\n".encode(),
 }
 
 
@@ -149,6 +151,9 @@ def is_protected(folder: Path) -> bool:
 def ensure() -> int:
     """Защита включена: ловушки на месте и папки защищены. Создаёт их, если их нет."""
     manifest = load_manifest()
+    if manifest and any(d.name in LEGACY_NAMES for d in decoy_dirs(manifest)):
+        _remove_dirs(decoy_dirs(manifest))  # папки с прежним названием программы
+        manifest = {}
     if not manifest:
         manifest = _create(default_folders())
         _save_manifest(manifest)
@@ -176,7 +181,7 @@ def install(folders: list[Path] | None = None) -> int:
 
 def _remove_dirs(dirs: list[Path]) -> None:
     for folder in dirs:
-        if folder.name == DECOY_NAME:  # удаляем только свои папки
+        if folder.name.lower() in ALL_NAMES:  # удаляем только свои папки
             set_attributes(folder, 0)
             shutil.rmtree(folder, ignore_errors=True)
 
@@ -224,7 +229,7 @@ def repair() -> int:
 
 def is_decoy(path) -> bool:
     """Файл внутри папки ловушек: проверка дисков и защита файлов их не читают."""
-    return any(part.lower() == DECOY_NAME.lower() for part in Path(path).parts)
+    return any(part.lower() in ALL_NAMES for part in Path(path).parts)
 
 
 LOCK_RETRIES = 6      # занятый файл (антивирус, индексатор) — ждём до ~3 с, это не изменение

@@ -137,14 +137,25 @@ class ProtectJournalPage(QWidget):
                 ("SHA-256", r.get("sha256", "")), ("Подпись", r.get("signature", "")),
                 ("ID в карантине", r.get("qid", ""))]
         actions = []
+
+        def then_close(action):
+            def run(d):
+                action([r])
+                d.accept()
+            return run
+
         if r["status"] == threatlog.FOUND and threatlog.exists(path):
-            actions.append(("В карантин", lambda d: (self._quarantine([r]), d.accept())))
+            actions.append(("В карантин", then_close(self._quarantine)))
         if r["status"] == threatlog.QUARANTINED:
-            actions.append(("Восстановить", lambda d: (self._restore([r]), d.accept())))
+            actions.append(("Восстановить", then_close(self._restore)))
         if r["status"] in threatlog.OPEN:
-            actions.append(("Удалить", lambda d: (self._delete([r]), d.accept())))
+            actions.append(("Удалить", then_close(self._delete)))
         if threatlog.exists(path):
             actions.append(("Открыть в сканере", lambda d: self.analyze.emit(path)))
+        if r.get("story"):
+            from processmanager import story
+            actions.append(("Что делал процесс", lambda d: story.show(d, r.get("pid", 0),
+                                                                     r["story"])))
         show_details(self, "Журнал защиты: описание", rows, actions)
 
     # ---------- действия ----------

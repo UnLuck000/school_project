@@ -23,7 +23,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scanner import cpucores, overrides, verdict_cache
+from scanner import archive, cpucores, overrides, verdict_cache
 from scanner import media
 from scanner.engine import cache_version, hash_verdict, revocation_enabled
 from scanner.heuristics import get_threshold
@@ -72,8 +72,9 @@ class _Worker:
         self.busy_since = 0.0
         flags = (BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW) if sys.platform == "win32" else 0
         self.proc = subprocess.Popen(
-            _command() + (["--background"] if background else []), cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, creationflags=flags)
+            _command() + (["--background"] if background else []), cwd=ROOT,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=flags)
         ready = read_frame(self.proc.stdout)
         if not ready or ready[0] != "ready":
             self.close()
@@ -416,6 +417,7 @@ def check_files(paths, signatures, rules, whitelist: set[str] | None = None,
                 (digest, md5), analyzed = job.parts["hash"], None
             else:
                 (digest, md5), analyzed = job.parts["hash"], job.parts["analyze"]
+            analyzed = archive.resolve(analyzed, signatures, hash_verdict)
             reason = overrides.filter_reason(
                 digest, hash_verdict(job.st.st_size, digest, md5, signatures) or analyzed)
             if version:
@@ -424,4 +426,106 @@ def check_files(paths, signatures, rules, whitelist: set[str] | None = None,
     finally:
         for future in futures:
             future.cancel()  # отмена или выход из генератора: ждущие задачи не нужны
+        verdict_cache.flush()
+
+
+def check_stream(paths, signatures, rules, whitelist: set[str] | None = None,
+                 heuristics: bool = True, cancel: threading.Event | None = None,
+                 pool: ScanPool | None = None, window: int | None = None):
+    """То же, что check_files, но для потока путей неизвестной длины (обход диска).
+
+    check_files сначала собирает весь список, а пачками его вызывали так: набрать 256
+    файлов → дождаться всех → следующая пачка. Пока дорабатывался один крупный файл пачки,
+    остальные процессы простаивали, а обход диска стоял. Здесь в работе постоянно держится
+    «окно» задач (по 8 на процесс): пришёл ответ — сразу берётся следующий файл, обход и
+    проверка идут одновременно. Порядок ответов — по готовности."""
+    pool = pool or get_pool()
+    version = cache_version(signatures, rules, heuristics)
+    options = {"heuristics": heuristics, "threshold": get_threshold(),
+               "revocation": revocation_enabled()}
+    window = window or max(16, pool.size * 8)
+    results: queue.Queue = queue.Queue()
+    inflight: dict[int, tuple[_Job, list[Future]]] = {}
+    source = iter(paths)
+    exhausted = False
+    try:
+        while True:
+            while not exhausted and len(inflight) < window:
+                if cancel is not None and cancel.is_set():
+                    return
+                try:
+                    path = next(source)
+                except StopIteration:
+                    exhausted = True
+                    break
+                p = Path(path)
+                try:
+                    st = p.stat()
+                except OSError as e:
+                    yield str(path), None, e
+                    continue
+                if version:
+                    cached = verdict_cache.get(p, st, version)
+                    if cached is not None:
+                        digest, reason = cached
+                        yield str(path), None if whitelist and digest in whitelist else reason, None
+                        continue
+                job = _Job(str(path), p, st)
+                job.media = media.plain_media(p, st.st_size)
+                if job.media and st.st_size > media.MEDIA_HASH_LIMIT:
+                    if version:
+                        verdict_cache.put(p, st, version, "", None)
+                    yield str(path), None, None  # крупный медиафайл целиком не читается
+                    continue
+                if job.media:
+                    kinds = ("hash",)
+                else:
+                    kinds = ("hash", "analyze") if st.st_size >= SPLIT_SIZE else ("full",)
+                job.waiting = len(kinds)
+                futures = []
+                for kind in kinds:
+                    future = pool.submit(kind, job.path, options)
+                    future.add_done_callback(
+                        lambda f, job=job, kind=kind: results.put((job, kind, f)))
+                    futures.append(future)
+                inflight[id(job)] = (job, futures)
+            if not inflight:
+                if exhausted:
+                    return
+                continue
+            if cancel is not None and cancel.is_set():
+                return
+            try:
+                job, kind, future = results.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            job.waiting -= 1
+            if future.cancelled():
+                job.error = job.error or OSError(None, "проверка отменена")
+            elif future.exception() is not None:
+                job.error = job.error or future.exception()
+            else:
+                job.parts[kind] = future.result()
+            if job.waiting:
+                continue
+            del inflight[id(job)]
+            if job.error is not None:
+                yield job.path, None, job.error
+                continue
+            if "full" in job.parts:
+                (digest, md5), analyzed = job.parts["full"]
+            elif job.media:
+                (digest, md5), analyzed = job.parts["hash"], None
+            else:
+                (digest, md5), analyzed = job.parts["hash"], job.parts["analyze"]
+            analyzed = archive.resolve(analyzed, signatures, hash_verdict)
+            reason = overrides.filter_reason(
+                digest, hash_verdict(job.st.st_size, digest, md5, signatures) or analyzed)
+            if version:
+                verdict_cache.put(job.p, job.st, version, digest, reason)
+            yield job.path, None if whitelist and digest in whitelist else reason, None
+    finally:
+        for _, futures in inflight.values():
+            for future in futures:
+                future.cancel()
         verdict_cache.flush()

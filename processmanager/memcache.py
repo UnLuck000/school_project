@@ -20,9 +20,14 @@ import os
 import threading
 import time
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 TTL = 30 * 60
 EXECUTE_MASK = 0x10 | 0x20 | 0x40 | 0x80  # PAGE_EXECUTE*
+
+
+if TYPE_CHECKING:
+    from processmanager.memscan import MemResult
 
 
 @dataclass
@@ -30,7 +35,7 @@ class _Entry:
     exe_stamp: tuple
     fingerprint: str
     rules_key: str
-    result: object        # MemResult
+    result: "MemResult"   # processmanager.memscan.MemResult
     checked_at: float     # time.time()
 
 

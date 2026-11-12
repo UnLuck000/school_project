@@ -146,3 +146,16 @@ def test_specs_describe_sample():
     text = "\n".join(specs.describe(data))
     assert "i5-12450H" in text and "RTX 3050" in text and "SSD" in text and "Intel Wi-Fi" in text
     assert "MAC" not in text
+
+
+def test_last_profile_server_hidden_without_profile(monkeypatch):
+    """Профилей нет, а в настройке vpn/last_profile остался сервер — в журнал он не попадает."""
+    from diag import anon
+    from ui import settings as cfg
+    from vpn import profiles
+    monkeypatch.setattr(profiles, "load", lambda *a: [])
+    monkeypatch.setattr(cfg, "get", lambda k: "Old-Profile|203.0.113.77:443"
+                        if k == "vpn/last_profile" else "")
+    anon.register_vpn_profiles()
+    text = anon.scrub("vpn/last_profile = Old-Profile|203.0.113.77:443")
+    assert "203.0.113.77" not in text and "Old-Profile" not in text

@@ -2,7 +2,6 @@
 DNS, заданный в Windows, в конфигурации sing-box."""
 import json
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 from recovery import journal
@@ -79,7 +78,9 @@ def test_scans_skip_decoys(tmp_path, monkeypatch):
     from scanner import fullscan
     from toolbox import decoys
     name = decoys.DECOY_NAME.lower()
-    assert name in fullscan.SKIP_DIRS and fileops.DECOY_DIR == name
+    assert name in fullscan.SKIP_DIRS and name in fileops.DECOY_DIR
+    for old in decoys.LEGACY_NAMES:  # папки прежних версий тоже не читаем
+        assert old.lower() in fullscan.SKIP_DIRS and old.lower() in fileops.DECOY_DIR
     assert decoys.is_decoy(tmp_path / decoys.DECOY_NAME / "Пароли.txt")
     trap = tmp_path / decoys.DECOY_NAME
     trap.mkdir()

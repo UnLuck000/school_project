@@ -16,6 +16,7 @@ xray.exe ищется: настройка vpn/xray_path, vpn/bin, PATH, уста
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -24,10 +25,11 @@ import urllib.parse
 from pathlib import Path
 
 from recovery import journal
+import syscmd
 
 SOCKS_PORT = 10808
 HTTP_PORT = 10809
-TUN_NAME = "myav-tun"
+TUN_NAME = "sbit-tun"
 TUN_ADDRESS = "172.19.0.1"
 INTERNET_SETTINGS = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 BYPASS = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;192.168.*;<local>"
@@ -52,33 +54,57 @@ def find_xray() -> str:
 
 
 # ---------- ссылка vless:// ----------
+# русские буквы, похожие на латинские: ссылку переписывали вручную, и Xray отвечал
+# «unsupported "encryption": nоne» (с русской «о») — так же с None, NONE и пробелом в конце
+_LOOKALIKE = str.maketrans("асеорхукмтвнАСЕОРХУКМТВН", "aceopxykmtbhACEOPXYKMTBH")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _token(value: str) -> str:
+    """Слово из ссылки (имя параметра, tcp, reality, none...): без пробелов, латиницей,
+    строчными — Xray различает регистр и не знает «None»."""
+    return value.strip().translate(_LOOKALIKE).lower()
+
+
 def parse_vless(uri: str) -> dict:
-    """vless://uuid@host:port?type=tcp&security=reality&pbk=...&sni=...#Название"""
+    """vless://uuid@host:port?type=tcp&security=reality&pbk=...&sni=...#Название
+
+    Ссылки, набранные вручную, выправляются: имена параметров и слова-значения (type,
+    security, flow, encryption, fp, mode, headerType) — латиницей и строчными, у UUID —
+    похожие русские буквы на латинские. Ключи (pbk, sid), адреса и пути — как есть."""
     uri = uri.strip()
     parsed = urllib.parse.urlsplit(uri)
-    if parsed.scheme.lower() != "vless" or not parsed.hostname or not parsed.username:
+    if _token(parsed.scheme) != "vless" or not parsed.hostname or not parsed.username:
         raise ValueError("Ссылка должна иметь вид vless://UUID@адрес:порт?параметры#название")
-    query = {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+    query = {_token(k): v[-1].strip() for k, v in urllib.parse.parse_qs(parsed.query).items()}
+    uid = urllib.parse.unquote(parsed.username).strip()
+    if UUID_RE.match(_token(uid)):
+        uid = _token(uid)
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        raise ValueError("Порт в ссылке — не число от 1 до 65535") from None
+    word = lambda key, default="": _token(query.get(key, "")) or default  # noqa: E731
     return {
-        "id": urllib.parse.unquote(parsed.username),
+        "id": uid,
         "address": parsed.hostname,
-        "port": parsed.port or 443,
-        "name": urllib.parse.unquote(parsed.fragment) or parsed.hostname,
-        "network": query.get("type", "tcp"),
-        "security": query.get("security", "none"),
-        "flow": query.get("flow", ""),
-        "encryption": query.get("encryption", "none"),
+        "port": port,
+        "name": urllib.parse.unquote(parsed.fragment).strip() or parsed.hostname,
+        "network": word("type", "tcp"),
+        "security": word("security", "none"),
+        "flow": word("flow"),
+        "encryption": word("encryption", "none"),
         "sni": query.get("sni") or query.get("peer", ""),
-        "fp": query.get("fp", ""),
+        "fp": word("fp"),
         "pbk": query.get("pbk", ""),
         "sid": query.get("sid", ""),
         "spx": query.get("spx", ""),
-        "alpn": [a for a in query.get("alpn", "").split(",") if a],
+        "alpn": [a.strip() for a in query.get("alpn", "").split(",") if a.strip()],
         "path": query.get("path", ""),
         "host": query.get("host", ""),
-        "service": query.get("serviceName", ""),
-        "mode": query.get("mode", ""),
-        "header": query.get("headerType", ""),
+        "service": query.get("servicename", ""),
+        "mode": word("mode"),
+        "header": word("headertype"),
     }
 
 
@@ -170,7 +196,8 @@ def port_owner(port: int) -> str | None:
             if c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN and c.pid:
                 return psutil.Process(c.pid).name()
     except Exception:
-        pass
+        from diag.log import swallowed
+        swallowed("xray: кто занял порт")
     return "другая программа"
 
 
@@ -394,7 +421,7 @@ def enable_system_proxy(path: str = INTERNET_SETTINGS) -> dict:
     write_proxy({"ProxyEnable": 1, "ProxyServer": f"127.0.0.1:{HTTP_PORT}",
                  "ProxyOverride": BYPASS}, path)
     if path == INTERNET_SETTINGS:
-        journal.log_action("VPN: включён системный прокси 127.0.0.1:%d" % HTTP_PORT,
+        journal.log_action(f"VPN: включён системный прокси 127.0.0.1:{HTTP_PORT}",
                            "vpn_proxy_restore", {"old": old})
     return old
 
@@ -423,7 +450,8 @@ def _save_backup(old: dict | None) -> None:
         from ui import settings as cfg
         cfg.set_("vpn/proxy_backup", json.dumps(old) if old is not None else "")
     except Exception:
-        pass
+        from diag.log import swallowed
+        swallowed("xray: копия настроек прокси")
 
 
 def recover_proxy() -> bool:
@@ -446,7 +474,7 @@ def recover_proxy() -> bool:
 def _powershell(script: str, env: dict) -> subprocess.CompletedProcess:
     """Значения — через переменные окружения, не подставляются в текст скрипта."""
     script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + script
-    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    return subprocess.run(syscmd.PS_ARGS + [script],
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env={**os.environ, **env}, creationflags=CREATE_NO_WINDOW)
 
@@ -457,7 +485,7 @@ def default_route() -> tuple[str, str]:
         "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | "
         "Select-Object -First 1; if ($r) { $r.NextHop; (Get-NetAdapter -InterfaceIndex "
         "$r.ifIndex).Name }", {})
-    lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+    lines = [s.strip() for s in result.stdout.splitlines() if s.strip()]
     return (lines[0], lines[1]) if len(lines) >= 2 else ("", "")
 
 

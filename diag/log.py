@@ -38,6 +38,17 @@ class _Formatter(logging.Formatter):
 FORMAT = "%(asctime)s %(levelname)-5s [%(name)s] %(threadName)s: %(message)s"
 
 
+def swallowed(where: str) -> None:
+    """Для «except Exception:», где ошибка намеренно не мешает работе: вместо молчаливого
+    pass — строка в app.log (DEBUG), чтобы причину можно было найти."""
+    try:
+        import traceback
+        last = traceback.format_exc(limit=2).strip().splitlines()[-1]
+        get("swallow").debug("%s: %s", where, last)
+    except Exception:  # noqa: BLE001, S110 — сам журнал недоступен: остаётся только молчать
+        pass
+
+
 def get(name: str) -> logging.Logger:
     """Журнал раздела: get("vpn") → «sbit.vpn» (в строке — [sbit.vpn])."""
     return log.getChild(name)

@@ -107,7 +107,7 @@ def test_firewall_rules():
 @pytest.mark.skipif(sys.platform != "win32", reason="нужен реестр Windows")
 def test_registry_fix_and_undo(tmp_journal):
     import winreg
-    path = r"Software\StudyAVTest\Fix"
+    path = r"Software\SBITTest\Fix"
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "Flag", 0, winreg.REG_DWORD, 0)
     try:
@@ -125,13 +125,13 @@ def test_registry_fix_and_undo(tmp_journal):
         assert read_value("HKCU", path, "Flag")[1] == 0
     finally:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\StudyAVTest")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\SBITTest")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="нужен реестр Windows")
 def test_policy_scan_unlock_and_undo(tmp_journal, monkeypatch):
     import winreg
-    pol = r"Software\StudyAVTest\Pol"
+    pol = r"Software\SBITTest\Pol"
     monkeypatch.setattr(policies, "CATALOG", [
         policies.Restriction("TestFlag", "Тест", (pol,)),
         policies.Restriction("TestDefault", "Тест со значением по умолчанию", (pol,),
@@ -152,13 +152,13 @@ def test_policy_scan_unlock_and_undo(tmp_journal, monkeypatch):
         assert read_value("HKCU", pol, "TestDefault")[1] == 0
     finally:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, pol)
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\StudyAVTest")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\SBITTest")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="нужен реестр Windows")
 def test_disallow_run_list_is_found(tmp_journal, monkeypatch):
     import winreg
-    explorer = r"Software\StudyAVTest\Explorer"
+    explorer = r"Software\SBITTest\Explorer"
     monkeypatch.setattr(policies, "EXPLORER", explorer)
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, explorer + r"\DisallowRun", 0,
                             winreg.KEY_SET_VALUE) as key:
@@ -172,4 +172,4 @@ def test_disallow_run_list_is_found(tmp_journal, monkeypatch):
     finally:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, explorer + r"\DisallowRun")
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, explorer)
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\StudyAVTest")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\SBITTest")

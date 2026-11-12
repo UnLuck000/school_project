@@ -43,6 +43,8 @@ def _handle(kind: str, path: Path, options: dict, rules):
     data = read_small(path, path.stat().st_size)  # до 32 МБ: одно чтение на все слои
     reason = analyze(path, rules, options.get("heuristics", True), options.get("threshold"),
                      options.get("revocation"), data=data)
+    from scanner import archive
+    reason = archive.pack(reason, path, data, rules)  # вложенные файлы ZIP (scanner/archive.py)
     if kind == "analyze":
         return reason
     return (data_hashes(data) if data is not None else file_hashes(path)), reason

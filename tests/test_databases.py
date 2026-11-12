@@ -98,7 +98,7 @@ def test_memory_batches_join_small_regions():
 @pytest.mark.skipif(memscan._read_native is None, reason="нет собранного модуля C++")
 def test_native_reader_finds_marker():
     import os
-    marker = bytearray(b"MYAV_NATIVE_" + b"Z" * 20)  # живёт в куче этого процесса
+    marker = bytearray(b"SBIT_NATIVE_" + b"Z" * 20)  # живёт в куче этого процесса
     chunks = memscan.read_regions(os.getpid())
     assert any(bytes(marker) in data for _, data in chunks)
     with pytest.raises(OSError):

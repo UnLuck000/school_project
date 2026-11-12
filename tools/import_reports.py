@@ -52,7 +52,8 @@ def import_zip(archive: Path, dest: Path = DEST, now: float | None = None) -> Pa
         try:
             manifest = json.loads(z.read("manifest.json").decode("utf-8"))
         except KeyError:
-            raise ValueError(f"{archive.name}: нет manifest.json — это не архив сведений StretchBIT")
+            raise ValueError(f"{archive.name}: нет manifest.json — это не архив сведений "
+                             "StretchBIT") from None
         stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(now))
         target = _free(dest / windows_folder(manifest) / stamp)
         target.mkdir(parents=True)

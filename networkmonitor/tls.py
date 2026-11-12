@@ -8,6 +8,13 @@
 WinDivert открывается в режиме «только смотреть» (SNIFF | RECV_ONLY): пакеты не
 задерживаются и не меняются, другие программы на WinDivert (например, zapret) не мешают.
 Нужны права администратора и WinDivert.dll с драйвером WinDivert64.sys рядом.
+
+Чья программа: у пакета (уровень NETWORK) процесса нет — как и в Wireshark, который видит
+пакеты на уровне сетевой карты. Поэтому второй дескриптор WinDivert слушает уровень SOCKET
+(фильтрующая платформа Windows, WFP): событие CONNECT приходит при вызове connect(), ещё до
+первого пакета, и в нём PID программы. Локальный порт -> PID запоминается (SocketMap), и
+ClientHello с этого порта получает программу наверняка, даже если соединение уже закрыто.
+Запасной путь (старый WinDivert без уровня SOCKET) — таблица соединений psutil.
 """
 import ctypes
 import glob
@@ -27,6 +34,9 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 # только исходящие TCP на 443 с данными, первый байт — TLS Handshake (22): это ClientHello
 FILTER = b"outbound and tcp.DstPort == 443 and tcp.PayloadLength > 5 and tcp.Payload[0] == 22"
 WINDIVERT_LAYER_NETWORK = 0
+WINDIVERT_LAYER_SOCKET = 3
+# connect() по TCP к порту 443 (и QUIC тоже не нужен: ClientHello только по TCP)
+SOCKET_FILTER = b"event == CONNECT and tcp and remotePort == 443 and not loopback"
 WINDIVERT_FLAG_SNIFF = 0x0001
 WINDIVERT_FLAG_RECV_ONLY = 0x0004
 ADDRESS_SIZE = 80          # WINDIVERT_ADDRESS (версия 2)
@@ -141,6 +151,63 @@ def find_windivert(configured: str = "") -> Path | None:
     return None
 
 
+def socket_event(addr: bytes) -> tuple[int, int, int] | None:
+    """WINDIVERT_ADDRESS уровня SOCKET -> (PID, локальный порт, удалённый порт).
+    Раскладка (windivert.h 2.x): Timestamp 8, битовые поля 4, Reserved2 4, затем
+    WINDIVERT_DATA_SOCKET: EndpointId 8, ParentEndpointId 8, ProcessId 4, LocalAddr 16,
+    RemoteAddr 16, LocalPort 2, RemotePort 2, Protocol 1 (числа — в порядке процессора)."""
+    if len(addr) < 73:
+        return None
+    pid, = struct.unpack_from("<I", addr, 32)
+    lport, rport = struct.unpack_from("<HH", addr, 68)
+    return pid, lport, rport
+
+
+class SocketMap:
+    """Локальный порт -> (PID, имя, путь) по событиям CONNECT. Имя узнаётся сразу при
+    событии: короткоживущая программа может завершиться раньше, чем уйдёт ClientHello."""
+    MAX = 20000
+
+    def __init__(self):
+        self._ports: dict[int, tuple[int, float]] = {}
+        self._names: dict[int, tuple[str, str, float]] = {}
+        self._lock = threading.Lock()
+
+    def add(self, port: int, pid: int) -> None:
+        name = self._name(pid)
+        with self._lock:
+            if len(self._ports) > self.MAX:
+                self._ports.clear()
+            self._ports[port] = (pid, time.monotonic())
+            self._names[pid] = (*name, time.monotonic())
+
+    def get(self, port: int) -> tuple[int, str, str] | None:
+        with self._lock:
+            hit = self._ports.get(port)
+            if not hit:
+                return None
+            name, exe, _ = self._names.get(hit[0], ("?", "", 0))
+        return hit[0], name, exe
+
+    def _name(self, pid: int) -> tuple[str, str]:
+        with self._lock:
+            cached = self._names.get(pid)
+        if cached and time.monotonic() - cached[2] < 60:   # PID мог достаться другой программе
+            return cached[0], cached[1]
+        if pid == 4:
+            return "System", ""
+        try:
+            proc = psutil.Process(pid)
+            name = proc.name()
+            try:
+                exe = proc.exe()
+            except psutil.Error:
+                exe = ""
+            return name, exe
+        except psutil.Error:
+            return "?", ""
+
+
 class _PortMap:
     """Локальный порт TCP -> процесс (обновляется, когда порт не найден)."""
 
@@ -188,8 +255,11 @@ class TlsWatcher:
         self.running = False
         self._stop = threading.Event()
         self._handle = None
+        self._socket_handle = None
         self._dll = None
         self._thread: threading.Thread | None = None
+        self._socket_thread: threading.Thread | None = None
+        self.sockets = SocketMap()
 
     def start(self) -> None:
         self._stop.clear()
@@ -200,8 +270,12 @@ class TlsWatcher:
         self._stop.set()
         if self._handle and self._dll:
             self._dll.WinDivertShutdown(self._handle, 3)  # прерывает ожидание WinDivertRecv
+        if self._socket_handle and self._dll:
+            self._dll.WinDivertShutdown(self._socket_handle, 3)
         if self._thread:
             self._thread.join(timeout=5)
+        if self._socket_thread:
+            self._socket_thread.join(timeout=5)
 
     def _open(self) -> str:
         """Пустая строка — открыто, иначе причина."""
@@ -231,7 +305,27 @@ class TlsWatcher:
                 return "нет прав администратора"
             return f"WinDivertOpen: ошибка {code}"
         self._dll, self._handle = dll, handle
+        sock = dll.WinDivertOpen(SOCKET_FILTER, WINDIVERT_LAYER_SOCKET, 0,
+                                 WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY)
+        if sock and sock != ctypes.c_void_p(-1).value:
+            self._socket_handle = sock
         return ""
+
+    def _run_sockets(self) -> None:
+        """Поток уровня SOCKET: каждое connect() к :443 — порт и PID в SocketMap."""
+        addr = ctypes.create_string_buffer(ADDRESS_SIZE)
+        try:
+            while not self._stop.is_set():
+                if not self._dll.WinDivertRecv(self._socket_handle, None, 0, None, addr):
+                    if self._stop.is_set():
+                        break
+                    continue
+                ev = socket_event(addr.raw)
+                if ev and ev[0]:
+                    self.sockets.add(ev[1], ev[0])
+        finally:
+            self._dll.WinDivertClose(self._socket_handle)
+            self._socket_handle = None
 
     def _run(self) -> None:
         error = self._open()
@@ -239,7 +333,15 @@ class TlsWatcher:
             self.on_status(f"TLS: перехват недоступен ({error})")
             return
         self.running = True
-        self.on_status("TLS: имена сайтов и отпечатки JA3 видны (WinDivert, только чтение)")
+        if self._socket_handle:
+            self._socket_thread = threading.Thread(target=self._run_sockets, daemon=True,
+                                                   name="tls-sockets")
+            self._socket_thread.start()
+            who = "программа — по событиям connect() (WFP)"
+        else:
+            who = "программа — по таблице соединений (WinDivert без уровня SOCKET)"
+        self.on_status(f"TLS: имена сайтов и отпечатки JA3 видны (WinDivert, только чтение; "
+                       f"{who})")
         ports = _PortMap()
         buf = ctypes.create_string_buffer(MAX_PACKET)
         addr = ctypes.create_string_buffer(ADDRESS_SIZE)
@@ -258,11 +360,12 @@ class TlsWatcher:
                 hello = parse_client_hello(payload)
                 if hello is None:
                     continue
-                pid, name, exe = ports.process(sport)
+                pid, name, exe = self.sockets.get(sport) or ports.process(sport)
                 try:
                     self.on_hello(TlsEvent(time.time(), pid, name, exe, f"{dst}:{dport}", hello))
                 except Exception:
-                    pass
+                    from diag.log import swallowed
+                    swallowed("tls: обработчик ClientHello")
         finally:
             self.running = False
             self._dll.WinDivertClose(self._handle)

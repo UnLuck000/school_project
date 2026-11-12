@@ -9,6 +9,9 @@ import xml.etree.ElementTree as ET
 DESIGNER_DIR = Path(__file__).resolve().parent / "designer"
 
 
+_loader: QUiLoader | None = None
+
+
 def load_ui(name: str, parent: QWidget | None = None) -> QWidget:
     """Загружает интерфейс из ui/designer/<name>.ui (файл редактируется в Qt Designer)."""
     path = DESIGNER_DIR / f"{name}.ui"
@@ -22,7 +25,10 @@ def load_ui(name: str, parent: QWidget | None = None) -> QWidget:
     file = QFile(str(path))
     if not file.open(QFile.OpenModeFlag.ReadOnly):
         raise FileNotFoundError(f"Не удалось открыть файл интерфейса: {path}")
-    loader = QUiLoader()
+    global _loader
+    if _loader is None:
+        _loader = QUiLoader()  # создание загрузчика — до 0,3 с; страниц восемь
+    loader = _loader
     try:
         widget = loader.load(file, parent)
     except RuntimeError as e:

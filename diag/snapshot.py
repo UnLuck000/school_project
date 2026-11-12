@@ -52,8 +52,8 @@ def bases() -> list[str]:
     out = []
     try:
         last = float(cfg.get("db/last_update") or 0)
-        out.append("Обновление баз: " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(last))
-                                         if last else "не было"))
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if last else "не было"
+        out.append("Обновление баз: " + when)
     except (TypeError, ValueError):
         pass
     for folder in ("feeds", "netfeeds"):

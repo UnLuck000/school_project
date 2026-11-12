@@ -30,7 +30,11 @@ def keep_window(window) -> None:
     пока его не закроют."""
     window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
     _windows.append(window)
-    window.destroyed.connect(lambda *_: _windows.remove(window) if window in _windows else None)
+    def forget(*_):
+        if window in _windows:
+            _windows.remove(window)
+
+    window.destroyed.connect(forget)
 
 
 def all_processes() -> list[tuple[int, str, str]]:

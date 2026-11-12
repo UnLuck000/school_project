@@ -16,6 +16,7 @@ import os
 import subprocess
 
 from recovery import journal
+import syscmd
 
 PUBLIC_DNS = ["1.1.1.1", "1.0.0.1"]
 CREATE_NO_WINDOW = 0x08000000
@@ -24,9 +25,20 @@ CREATE_NO_WINDOW = 0x08000000
 def _powershell(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
     script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = " \
              "'Stop'; " + script
-    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    return subprocess.run(syscmd.PS_ARGS + [script],
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env={**os.environ, **(env or {})}, creationflags=CREATE_NO_WINDOW)
+
+
+TUNNEL_HINTS = ("wintun", "wireguard", "tap-windows", "openvpn", "tun", "vpn", "throne",
+                "hiddify", "nekoray", "amnezia", "outline", "zerotier", "tailscale")
+
+
+def is_tunnel(alias: str, description: str) -> bool:
+    """Виртуальный адаптер VPN (свой sbit-tun или чужой: Throne, WireGuard, OpenVPN...). Его
+    DNS — адрес внутри туннеля (частный), но это не роутер: подменять его нельзя."""
+    text = f"{alias} {description}".lower()
+    return any(h in text for h in TUNNEL_HINTS)
 
 
 def private_dns_adapters() -> list[dict]:
@@ -37,21 +49,24 @@ def private_dns_adapters() -> list[dict]:
         "SilentlyContinue; if ($i -and $i.Status -eq 'Up') { "
         "$guid = $i.InterfaceGuid; $static = (Get-ItemProperty -EA SilentlyContinue "
         "\"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$guid\")"
-        ".NameServer; '{0}|{1}|{2}|{3}' -f $_.InterfaceIndex, $_.InterfaceAlias, "
-        "($_.ServerAddresses -join ','), [string]::IsNullOrEmpty($static) } }")
+        ".NameServer; '{0}|{1}|{2}|{3}|{4}' -f $_.InterfaceIndex, $_.InterfaceAlias, "
+        "($_.ServerAddresses -join ','), [string]::IsNullOrEmpty($static), "
+        "$i.InterfaceDescription } }")
     result = _powershell(script)
     import ipaddress
     found = []
     for line in result.stdout.splitlines():
-        parts = line.strip().split("|")
-        if len(parts) != 4:
+        parts = line.strip().split("|", 4)
+        if len(parts) != 5:
             continue
+        if is_tunnel(parts[1], parts[4]):
+            continue  # чужой VPN (throne-tun): у его адаптера свой DNS внутри туннеля
         servers = [s for s in parts[2].split(",") if s]
         try:
             private = any(ipaddress.ip_address(s).is_private for s in servers)
         except ValueError:
             continue
-        if private and not parts[1].startswith("myav-tun"):
+        if private:
             found.append({"index": int(parts[0]), "alias": parts[1], "servers": servers,
                           "dhcp": parts[3] == "True"})
     return found

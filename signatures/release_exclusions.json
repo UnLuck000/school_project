@@ -45,6 +45,18 @@
       "detail": "%TEMP%\\ll4fb3uy.4ka\\resources\\app\\ServiceHub\\Services\\Microsoft.VisualStudio.Setup.Service\\BackgroundDownload.exe",
       "fp": null,
       "added": "2026-11-09T17:18:45"
+    },
+    "powershell.exe|pub:Microsoft Windows": {
+      "title": "powershell.exe",
+      "detail": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "fp": null,
+      "added": "2026-11-09T21:45:39"
+    },
+    "aspia_host.exe|sha256:d73db9315cbcb8e16d20bfa6cbf6bf9727409193db035ab05af5d6d8fbb1cea3": {
+      "title": "aspia_host.exe",
+      "detail": "C:\\Program Files\\Aspia\\Host\\aspia_host.exe",
+      "fp": null,
+      "added": "2026-11-11T22:25:19"
     }
   }
 }

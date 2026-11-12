@@ -4,8 +4,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QApplication, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter,
-    QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
+    QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer.report import (
@@ -15,7 +15,7 @@ from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from processmanager.system import open_in_explorer
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist, trusted_hashes
+from scanner.whitelist import trusted_hashes
 
 from analyzer import fileops
 from ui.widgets import make_tree
@@ -36,6 +36,7 @@ SOURCE_TEXT = {"embedded": "встроена в файл", "catalog": "ката�
 class Bridge(QObject):
     done = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, str)  # процент, этап
 
 
 
@@ -88,7 +89,10 @@ class FileView(QWidget):
         self.bridge = Bridge()
         self.bridge.done.connect(self.on_done)
         self.bridge.failed.connect(self.on_failed)
+        self.bridge.progress.connect(self._on_progress)
         self.report: FileReport | None = None
+        self._last_percent = -1
+        self._name = ""
         self._busy = False
         self._build_ui()
 
@@ -100,6 +104,13 @@ class FileView(QWidget):
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet("padding: 10px; border-radius: 6px; font-size: 12pt;")
         layout.addWidget(self.banner)
+        # на время анализа вместо баннера — шкала с этапом (как у проверки папки)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(True)
+        self.progress.setMinimumHeight(28)
+        self.progress.hide()
+        layout.addWidget(self.progress)
 
         self.tabs = QTabWidget()
         self.general_tree = _file_tree(["Параметр", "Значение"], [220, 800])
@@ -152,16 +163,23 @@ class FileView(QWidget):
         self.busy_changed.emit(True)
         self._set_actions(False)
         self.banner.setStyleSheet("padding: 10px; border-radius: 6px; font-size: 12pt;")
-        self.banner.setText(f"Анализирую {file.name}...")
-        self.status.emit(
-            "Загружаю базы и правила (при первом запуске это занимает несколько секунд)...", 0)
+        self.banner.hide()
+        self._name = file.name
+        self._last_percent = -1
+        self._on_progress(0, "загрузка баз и правил")
+        self.progress.show()
         threading.Thread(target=self._job, args=(file,), daemon=True).start()
         return True
 
     def _job(self, path: Path):
+        def progress(percent: int, stage: str) -> None:
+            if (percent, stage) != self._last_percent:  # хэши крупного файла: раз на процент
+                self._last_percent = (percent, stage)
+                self.bridge.progress.emit(percent, stage)
+
         try:
             report = build_report(path, load_all_signatures(SIG_DIR),
-                                  get_rules("all"), trusted_hashes())
+                                  get_rules("all"), trusted_hashes(), progress=progress)
         except OSError as e:
             self.bridge.failed.emit(f"Не удалось прочитать файл: {e}")
             return
@@ -170,9 +188,18 @@ class FileView(QWidget):
             return
         self.bridge.done.emit(report)
 
+    def _on_progress(self, percent: int, stage: str) -> None:
+        self.progress.setValue(percent)
+        self.progress.setFormat(f"{self._name}: {stage} — %p%")
+
+    def _end_progress(self) -> None:
+        self.progress.hide()
+        self.banner.show()
+
     def on_failed(self, text: str):
         self._busy = False
         self.busy_changed.emit(False)
+        self._end_progress()
         self.banner.setText(text)
         self.status.emit("", 0)
 
@@ -181,6 +208,7 @@ class FileView(QWidget):
         features.end_if_active("scan.file", True, verdict=getattr(report, "verdict", ""))
         self._busy = False
         self.busy_changed.emit(False)
+        self._end_progress()
         self.report = report
         self._set_actions(True)
 

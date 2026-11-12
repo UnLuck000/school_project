@@ -17,8 +17,10 @@ import os
 import subprocess
 
 from recovery import journal
+import syscmd
 
-GROUP = "myav-killswitch"
+GROUP = "SBIT-killswitch"
+LEGACY_GROUP = "myav-killswitch"  # правила прежних версий — снимаются вместе с нашими
 LAN = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4",
        "255.255.255.255"]
 CREATE_NO_WINDOW = 0x08000000
@@ -27,7 +29,7 @@ CREATE_NO_WINDOW = 0x08000000
 def _powershell(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
     script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = " \
              "'Stop'; " + script
-    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    return subprocess.run(syscmd.PS_ARGS + [script],
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env={**os.environ, **(env or {})}, creationflags=CREATE_NO_WINDOW)
 
@@ -70,15 +72,15 @@ def enable(tun_alias: str, programs: list[str]) -> None:
            "KS_PROGRAMS": "\n".join(p for p in programs if p)}
     script = (
         "Remove-NetFirewallRule -Group $env:KS_GROUP -EA SilentlyContinue; "
-        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName 'myav kill switch: туннель' "
+        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName 'SBIT kill switch: туннель' "
         "-Direction Outbound -Action Allow -InterfaceAlias $env:KS_TUN | Out-Null; "
         "foreach ($p in ($env:KS_PROGRAMS -split \"`n\")) { if ($p) { "
-        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName ('myav kill switch: ' + "
+        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName ('SBIT kill switch: ' + "
         "(Split-Path $p -Leaf)) -Direction Outbound -Action Allow -Program $p | Out-Null } }; "
-        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName 'myav kill switch: DHCP' "
+        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName 'SBIT kill switch: DHCP' "
         "-Direction Outbound -Action Allow -Protocol UDP -LocalPort 68 -RemotePort 67 "
         "| Out-Null; "
-        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName 'myav kill switch: локальная "
+        "New-NetFirewallRule -Group $env:KS_GROUP -DisplayName 'SBIT kill switch: локальная "
         "сеть' -Direction Outbound -Action Allow -RemoteAddress ($env:KS_LAN -split ',') "
         "| Out-Null; "
         "Set-NetFirewallProfile -All -DefaultOutboundAction Block")
@@ -104,12 +106,13 @@ def disable() -> bool:
 
 
 def _restore(outbound: dict[str, str]) -> None:
-    env = {"KS_GROUP": GROUP, "KS_OLD": json.dumps(outbound)}
+    env = {"KS_GROUP": GROUP, "KS_LEGACY": LEGACY_GROUP, "KS_OLD": json.dumps(outbound)}
     _powershell(
         "$old = $env:KS_OLD | ConvertFrom-Json; "
         "foreach ($p in $old.PSObject.Properties) { "
         "Set-NetFirewallProfile -Name $p.Name -DefaultOutboundAction $p.Value }; "
-        "Remove-NetFirewallRule -Group $env:KS_GROUP -EA SilentlyContinue", env)
+        "Remove-NetFirewallRule -Group $env:KS_GROUP -EA SilentlyContinue; "
+        "Remove-NetFirewallRule -Group $env:KS_LEGACY -EA SilentlyContinue", env)
 
 
 @journal.active_check("vpn_killswitch_off")

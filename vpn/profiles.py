@@ -13,7 +13,9 @@ from ctypes import wintypes
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-PROFILES_FILE = Path("vpn_profiles") / "profiles.dat"
+import userdata
+
+PROFILES_FILE = userdata.VPN_PROFILES_DIR / "profiles.dat"  # папка конфигурации
 KINDS = {"vless": "VLESS (Xray)", "wireguard": "WireGuard", "openvpn": "OpenVPN",
          "demo": "Демо (без сервера)"}
 MODES = {"tun": "TUN: sing-box + Xray (весь трафик)",
@@ -122,7 +124,7 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
     blob_out = _Blob()
     fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
     if protect:
-        ok = fn(ctypes.byref(blob_in), "myav vpn", None, None, None, 0, ctypes.byref(blob_out))
+        ok = fn(ctypes.byref(blob_in), "StretchBIT VPN", None, None, None, 0, ctypes.byref(blob_out))
     else:
         ok = fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
     if not ok:

@@ -136,7 +136,7 @@ def save_comment(fid: str, kind: str, text: str, with_log: bool = True,
         try:
             if shot_of.grab().save(str(base.with_suffix(".png"))):
                 item["screenshot"] = base.with_suffix(".png").name
-        except Exception:
+        except Exception:  # noqa: S110 — снимок окна не удался — комментарий сохраняется без него
             pass
     with COMMENTS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(item, ensure_ascii=False) + "\n")
@@ -198,8 +198,8 @@ class CornerPanel(QFrame):
         self.move(self.host.width() - self.width() - 12, self.host.height() - self.height() - 12)
         self.raise_()
 
-    def eventFilter(self, obj, event):
-        if obj is self.host and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+    def eventFilter(self, watched, event):
+        if watched is self.host and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
             self._place()
         return False
 
@@ -321,10 +321,10 @@ class WindowAttacher(QObject):
         self._done: set[int] = set()
         app.installEventFilter(self)
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
-            name = type(obj).__name__
-            if features_for(name) and id(obj) not in self._done:
-                self._done.add(id(obj))
-                CornerPanel(obj, name)
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Show and isinstance(watched, QWidget) and watched.isWindow():
+            name = type(watched).__name__
+            if features_for(name) and id(watched) not in self._done:
+                self._done.add(id(watched))
+                CornerPanel(watched, name)
         return False

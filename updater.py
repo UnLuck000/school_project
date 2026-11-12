@@ -67,7 +67,7 @@ DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9_-]{1,63}\.)+[a-z][a-z0-9-]{1,62}
 # ---------- общее ----------
 def _download(url: str, timeout: int = 120, data: bytes | None = None,
               headers: dict | None = None) -> bytes:
-    req = urllib.request.Request(url, data=data, headers={"User-Agent": "study-av-updater/1.0",
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": "StretchBIT-updater/1.0",
                                                           **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
@@ -211,7 +211,7 @@ def _host(value: str) -> str | None:
 
 def _virusshare_exists(n: int) -> bool:
     req = urllib.request.Request(VIRUSSHARE_URL.format(n=n), method="HEAD",
-                                 headers={"User-Agent": "study-av-updater/1.0"})
+                                 headers={"User-Agent": "StretchBIT-updater/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=30):
             return True

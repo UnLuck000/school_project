@@ -68,7 +68,7 @@ assert ProcItem.SORT_ROLE == SORT_ROLE
 WINDOW_SIZE = (1860, 720)
 PROPERTIES_SIZE = (1540, 560)
 # эти действия — только в меню «Процесс» и по правой кнопке, на панели их нет
-MENU_ONLY = {"props", "scan", "memdeep", "inject"}
+MENU_ONLY = {"props", "story", "scan", "memdeep", "inject"}
 
 
 def fit_size(widget, size: tuple[int, int]):
@@ -146,6 +146,8 @@ class ProcessWindow(QMainWindow):
             ("resume", "Возобновить", lambda: self.do_action("resume")),
             ("folder", "Папка файла", self.open_folder),
             ("props", "Свойства", self.show_properties),
+            ("story", "Что делал процесс (кто запустил, что создал, куда подключался)",
+             self.show_story),
             None,
             ("check", "Проверить файл", self.check_selected_file),
             ("scan", "Сканировать память", self.scan_selected_memory),
@@ -370,7 +372,8 @@ class ProcessWindow(QMainWindow):
                         p.sig = "Без файла (ядро Windows)" if p.core else ""
                 self.bridge.snapshot.emit(procs)
             except Exception:
-                pass
+                from diag.log import swallowed
+                swallowed("диспетчер процессов: снимок")
             self._stop_snapshots.wait(float(cfg.get("process/interval")))
 
     def _start_snapshots(self):
@@ -615,6 +618,12 @@ class ProcessWindow(QMainWindow):
         threading.Thread(
             target=lambda: self.bridge.task_done.emit(title, process_details(p.pid, p.created)),
             daemon=True).start()
+
+    def show_story(self):
+        p = self._selected()
+        if p:
+            from processmanager import story
+            story.show(self, p.pid)
 
     def check_selected_file(self):
         p = self._selected()

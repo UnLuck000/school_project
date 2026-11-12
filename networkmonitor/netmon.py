@@ -9,20 +9,30 @@ import psutil
 from networkmonitor.beacon import Beacon, BeaconDetector
 from networkmonitor.connections import LOLBINS, Alert, analyze, snapshot
 from networkmonitor.dns_etw import DnsQuery, DnsWatcher
-from networkmonitor.domains import load_domains, load_ja3, looks_generated, lookup
+from networkmonitor.domains import load_domains, load_ja3, looks_generated, lookup_level
 from networkmonitor.ioc import load_ip_blocklist
 from networkmonitor.tls import TlsEvent, TlsWatcher
 from scanner import exclusions
 from scanner.engine import check_file, revocation_enabled
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist, trusted_hashes
+from scanner.whitelist import trusted_hashes
 from processmanager.memscan import shared_rules
 from scanner.signature import VALID, check_revocation, describe, inspect_signature
+from processmanager.story import STORY
 
 # правила, срабатывание которых у своей или подписанной программы — не повод пугать
 # пользователя: адрес или домен из списка (общие CDN и сервисы туда тоже попадают), DGA
 QUIET_RULES = {"IOC", "DOMAIN", "SNI", "DGA"}
 MAX_NAMES = 50000     # адрес -> домен из ответов DNS
+def _domain_verdict(what: str, found: tuple[str, str, str]) -> tuple[str, str]:
+    """Текст и уровень для совпадения со списком доменов (domains.lookup_level)."""
+    domain, source, level = found
+    text = f"{what} в списке вредоносных ({source}: {domain})"
+    if level == "warning":
+        text += "; в базе весь домен второго уровня — возможна ошибка базы"
+    return text, level
+
+
 DNS_STATUS = {0: "без адресов (другой тип записи)", 9003: "имя не существует",
               9501: "нет записей", 1460: "время ожидания истекло", 87: "отменён"}
 BEACON_FORGET = 3 * 3600
@@ -101,11 +111,15 @@ class NetworkMonitor:
 
     def start(self):
         self._stop.clear()
+        from processmanager.story import STORY
+        STORY.sources.add("net")
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
+        from processmanager.story import STORY
+        STORY.sources.discard("net")
         for watcher in (self._dns, self._tls):
             if watcher is not None:
                 watcher.stop()
@@ -120,7 +134,8 @@ class NetworkMonitor:
         try:
             self.on_event(kind, payload)
         except Exception:
-            pass
+            from diag.log import swallowed
+            swallowed("netmon: обработчик события интерфейса")
 
     def _substatus(self, text: str) -> None:
         self._emit("substatus", text)
@@ -239,7 +254,7 @@ class NetworkMonitor:
         системных утилит, которыми пользуются вредоносы (powershell, mshta, certutil...).
         Файл программы, распознанный как угроза, оповещение получает всегда."""
         if pid in self._own:
-            return "это сама программа myav"
+            return "это сама программа StretchBIT"
         if not exe or (name or os.path.basename(exe)).lower() in LOLBINS or self._verdict(exe):
             return ""
         text, valid = self._signature(exe)
@@ -286,9 +301,9 @@ class NetworkMonitor:
                     self._names[ip] = q.name
                 self._addresses.setdefault(q.name, set()).update(q.results)
         verdict, level = "", ""
-        found = lookup(self._domains, q.name)
+        found = lookup_level(self._domains, q.name)
         if found:
-            verdict, level = f"домен в списке вредоносных ({found[1]}: {found[0]})", "critical"
+            verdict, level = _domain_verdict("домен", found)
         else:
             dga = looks_generated(q.name)
             if dga:
@@ -298,7 +313,7 @@ class NetworkMonitor:
             if quiet:
                 verdict, level = f"{verdict}; оповещения нет: {quiet}", "info"
             elif self._once(q.pid, "dns", q.name):
-                self._alert(level, "DOMAIN" if level == "critical" else "DGA", q.pid, q.name,
+                self._alert(level, "DOMAIN" if found else "DGA", q.pid, q.name,
                             f"DNS-запрос: {verdict}", name, exe)
         if not q.final:  # начало запроса: одно обращение — одно событие для маячков
             beacon = self.beacons.feed(name, exe, q.name, q.time, "dns") if q.pid else None
@@ -306,6 +321,8 @@ class NetworkMonitor:
                 self._on_beacon(beacon)
             return  # строка в список добавится с ответом (3008)
         answer = ", ".join(q.results) or DNS_STATUS.get(q.status, f"нет ответа (код {q.status})")
+        if q.pid:
+            STORY.contacted(q.pid, q.name, "dns", ", ".join(q.results[:3]), q.time)
         if not q.pid:
             answer = "из кэша DNS"
         record = DnsRecord(time.strftime("%H:%M:%S", time.localtime(q.time)), q.pid,
@@ -318,11 +335,11 @@ class NetworkMonitor:
         h = ev.hello
         verdict, level = "", ""
         family = self._ja3.get(h.ja3)
-        found = lookup(self._domains, h.sni) if h.sni else None
+        found = lookup_level(self._domains, h.sni) if h.sni else None
         if family:
             verdict, level = f"отпечаток JA3 вредоносного клиента: {family}", "critical"
         elif found:
-            verdict, level = f"сайт в списке вредоносных ({found[1]}: {found[0]})", "critical"
+            verdict, level = _domain_verdict("сайт", found)
         elif h.sni and looks_generated(h.sni):
             verdict, level = looks_generated(h.sni), "warning"
         rule = "JA3" if family else ("SNI" if found else "DGA")
@@ -336,6 +353,7 @@ class NetworkMonitor:
                                    ev.time, "tls")
         if beacon:
             self._on_beacon(beacon)
+        STORY.contacted(ev.pid, h.sni or ev.remote, "tls", ev.remote if h.sni else "", ev.time)
         record = TlsRecord(time.strftime("%H:%M:%S", time.localtime(ev.time)), ev.pid, ev.name,
                            ev.exe, ev.remote, h.sni, h.ja3, h.alpn, verdict, level)
         with self._lock:
@@ -412,6 +430,8 @@ class NetworkMonitor:
                 for c in conns:  # новые соединения — события для поиска маячков
                     if (c.pid, c.rip, c.rport, c.lport) not in self._conns and not c.inbound:
                         target = self._names.get(c.rip) or c.rip
+                        STORY.contacted(c.pid, f"{c.rip}:{c.rport}", "tcp",
+                                        self._names.get(c.rip, ""), now)
                         beacon = self.beacons.feed(c.name, c.exe, target, now, "tcp")
                         if beacon:
                             self._on_beacon(beacon)

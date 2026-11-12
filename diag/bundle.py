@@ -33,7 +33,7 @@ MAX_FILE = 64 * 2 ** 20   # больше — обрезается до посл�
 
 def default_name(now: float | None = None) -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
-    return f"{appinfo.APP_NAME}-{edition.edition()}-{appinfo.VERSION}-{stamp}.zip"
+    return f"logs-{appinfo.SHORT_NAME}-v{appinfo.VERSION}-{stamp}.zip"
 
 
 def windows_info() -> dict:

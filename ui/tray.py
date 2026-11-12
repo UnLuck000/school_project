@@ -113,7 +113,8 @@ class TrayIcon(QSystemTrayIcon):
     def apply_access(self, allowed) -> None:
         """Запрещённые инструменты (ui/access.allowed) в меню не показываются."""
         for button_id, action in self.tool_actions.items():
-            visible = any(map(allowed, RECOVERY_TOOLS)) if button_id == RECOVERY                 else allowed(button_id)
+            visible = (any(map(allowed, RECOVERY_TOOLS)) if button_id == RECOVERY
+                       else allowed(button_id))
             action.setVisible(visible)
 
     def set_exit_allowed(self, allowed: bool) -> None:

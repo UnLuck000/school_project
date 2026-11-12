@@ -33,19 +33,22 @@ class Feature:
     title: str
     area: str            # страница главного меню или класс окна — для панели в углу
     kind: str = "action"  # action | session
+    # время зависит от объёма работы (размер папки, число файлов): сравнивать с эталоном
+    # нельзя — 48 с на System32 против 0,8 с на маленькой папке давали ложное «ОТКЛОНЕНИЕ»
+    timed: bool = True
 
 
 _F = Feature
 FEATURES: dict[str, Feature] = {f.id: f for f in [
     _F("app.start", "Запуск программы", "Главная"),
-    _F("home.quick_scan", "Быстрая проверка (кнопка главной)", "Главная"),
-    _F("db.update", "Обновление баз", "Главная"),
-    _F("scan.file", "Проверка файла", "Сканирование папки/файла"),
-    _F("scan.folder", "Проверка папки", "Сканирование папки/файла"),
+    _F("home.quick_scan", "Быстрая проверка (кнопка главной)", "Главная", timed=False),
+    _F("db.update", "Обновление баз", "Главная", timed=False),
+    _F("scan.file", "Проверка файла", "Сканирование папки/файла", timed=False),
+    _F("scan.folder", "Проверка папки", "Сканирование папки/файла", timed=False),
     _F("analyzer.decompile", "Декомпилятор: разбор файла и проверка частей",
-       "Сканирование папки/файла"),
+       "Сканирование папки/файла", timed=False),
     _F("protect.realtime", "Защита файлов: включение и выключение", "Защита"),
-    _F("protect.full_scan", "Проверка дисков (полная и быстрая)", "Защита"),
+    _F("protect.full_scan", "Проверка дисков (полная и быстрая)", "Защита", timed=False),
     _F("protect.threat_actions", "Журнал защиты: карантин найденного", "Защита"),
     _F("protect.schedule", "Плановая проверка", "Защита"),
     _F("protect.decoys", "Ловушки для шифровальщиков", "Защита"),
@@ -69,6 +72,7 @@ FEATURES: dict[str, Feature] = {f.id: f for f in [
     _F("win.vpn", "Окно VPN", "VpnWindow", "session"),
     _F("vpn.connect", "VPN: подключение", "VpnWindow"),
     _F("vpn.checks", "VPN: проверка сайтов и сертификатов", "VpnWindow"),
+    _F("vpn.netdiag", "VPN: «Почему нет интернета?»", "VpnWindow"),
     _F("settings.collect_info", "Сбор сведений о программе (.zip)", "Настройки"),
     _F("win.false_positives", "Ложные срабатывания", "FalsePositiveWindow", "session"),
     _F("win.resource_report", "Отчёт и графики (окно)", "ResourceReportWindow", "session"),
@@ -264,6 +268,7 @@ def _remember(run: Run) -> None:
         previous = _runs.get(run.feature, {})
         if run.ok:
             item["last_ok"] = {k: item[k] for k in ("time", "duration", "steps")}
+            item["last_ok"]["variant"] = str((item.get("facts") or {}).get("kind", ""))
         elif previous.get("last_ok"):
             item["last_ok"] = previous["last_ok"]
         _runs[run.feature] = item
@@ -275,7 +280,7 @@ def _remember(run: Run) -> None:
     for listener in list(listeners):
         try:
             listener(run.feature)
-        except Exception:
+        except Exception:  # noqa: S110 — слушатель (панель тестирования) не мешает учёту запусков
             pass
 
 
@@ -295,6 +300,7 @@ def mark_ok(fid: str, note: str = "") -> dict:
     last = runs().get(fid, {}).get("last_ok") or {}
     entry = {"verified_at": time.strftime("%Y-%m-%d %H:%M:%S"), "version": appinfo.VERSION,
              "steps": last.get("steps", []), "duration": last.get("duration"),
+             "variant": last.get("variant", ""),
              "pc": _pc_short(specs), "note": note, "had_run": bool(last)}
     with _lock:
         if _baseline is None:
@@ -345,16 +351,25 @@ def _compare(run: Run) -> None:
         log.error("ОТКЛОНЕНИЕ от проверенной версии: %s (%s) — %s", name, where,
                   "; ".join(run.errors) or "завершилось неудачно")
         return
+    variant = str((run.facts or {}).get("kind", ""))
+    if variant and variant != ref.get("variant", ""):
+        # эталон снят в другом режиме (VPN: TUN, а сейчас локальный прокси): шаги и время
+        # у режимов разные, сравнение давало ложное «ОТКЛОНЕНИЕ»
+        log.info("Готово: %s за %.2f с%s (эталон — для другого режима)", name, run.duration,
+                 _facts(run))
+        return
     missing = [s for s in ref.get("steps", []) if s not in run.steps]
     if missing and run.kind == "action":
         log.error("ОТКЛОНЕНИЕ от проверенной версии: %s (%s) — не пройдены шаги: %s",
                   name, where, ", ".join(missing))
     duration = ref.get("duration")
-    if run.kind == "action" and duration and \
+    feature = FEATURES.get(run.feature)
+    timed = feature is None or feature.timed
+    if run.kind == "action" and timed and duration and \
             run.duration > max(duration * SLOW_FACTOR, duration + SLOW_MIN_SEC):
         log.warning("ОТКЛОНЕНИЕ от проверенной версии: %s выполнялась %.1f с, эталон %.1f с (%s)",
                     name, run.duration, duration, where)
-    if not missing:
+    elif not missing:
         log.info("Готово (как в проверенной версии): %s за %.2f с%s", name, run.duration,
                  _facts(run))
 
@@ -378,7 +393,7 @@ def install_dialog_hook() -> None:
                 getattr(ui_log, _level)("Окно «%s»: %s", head, body)
                 if _level == "error":
                     on_error_dialog(head, body)
-            except Exception:
+            except Exception:  # noqa: S110 — перехват окна сообщения не должен мешать самому окну
                 pass
             return _orig(*args, **kwargs)
 

@@ -15,11 +15,13 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import trustseal
+import userdata
 from recovery import journal
 from recovery.journal import active_check, undo_op
 
-OVERRIDES_FILE = Path(__file__).resolve().parent.parent / "signatures" / "overrides.json"
-RELEASE_FILE = OVERRIDES_FILE.with_name("release_overrides.json")
+OVERRIDES_FILE = userdata.OVERRIDES_FILE  # папка конфигурации пользователя
+RELEASE_FILE = Path(__file__).resolve().parent.parent / "signatures" / "release_overrides.json"
 KINDS = ("hashes", "rules", "files")
 
 _lock = threading.Lock()
@@ -36,7 +38,10 @@ def _mtime(path: Path) -> int:
 def read_file(path: Path) -> dict:
     """Один файл: {"hashes": {...}, "rules": {...}, "files": {...}}."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        if path == OVERRIDES_FILE:  # файл пользователя — через защиту от подмены
+            data = json.loads(trustseal.read(path).decode("utf-8"))
+        else:
+            data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = {}
     if not isinstance(data, dict):
@@ -50,6 +55,8 @@ def write_file(path: Path, data: dict) -> None:
     tmp.write_text(json.dumps({k: data.get(k, {}) for k in KINDS}, ensure_ascii=False,
                               indent=2, sort_keys=True), encoding="utf-8")
     os.replace(tmp, path)
+    if path == OVERRIDES_FILE:
+        trustseal.saved(path)
 
 
 def merge(*sources: dict) -> dict:

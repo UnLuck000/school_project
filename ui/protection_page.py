@@ -120,6 +120,8 @@ class ProtectionPage(QWidget):
         layout.addWidget(launch_row)
         stealer_row, self.stealer_label, _ = self._item("🔐", "Пароли и cookies браузеров", "")
         layout.addWidget(stealer_row)
+        amsi_row, self.amsi_label, _ = self._item("📜", "Скрипты и макросы (AMSI)", "")
+        layout.addWidget(amsi_row)
         layout.addStretch()
         self.also_card = card
         grid.addWidget(card, 0, 1)
@@ -264,9 +266,10 @@ class ProtectionPage(QWidget):
                                       " background: transparent;")
         self.protect_status.setStyleSheet("background: transparent;")
         self.protect_btn.setText("Выключить защиту" if running else "Включить защиту")
-        self.usb_label.setText(
-            "Проверяются при подключении, вирус-ярлык лечится сразу." if running else "Не проверяются: защита выключена.")
+        self.usb_label.setText("Проверяются при подключении, вирус-ярлык лечится сразу."
+                               if running else "Не проверяются: защита выключена.")
         if not running:
             self.launch_label.setText("Не проверяется: защита выключена.")
             self.stealer_label.setText("Не охраняются: защита выключена.")
+            self.amsi_label.setText("Не проверяются: защита выключена.")
         self.refit()

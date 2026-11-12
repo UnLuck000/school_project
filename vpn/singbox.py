@@ -13,9 +13,33 @@ import os
 import shutil
 from pathlib import Path
 
-TUN_NAME = "myav-tun"
+TUN_NAME = "sbit-tun"
 TUN_ADDRESS = "172.19.0.1/30"
 TUN_ADDRESS6 = "fdfe:dcba:9876::1/126"
+# 172.19.0.1/30 — адрес sing-box по умолчанию, его же берут Throne, Hiddify, NekoBox: при их
+# включённом TUN sing-box падал с «set ipv4 address: The object already exists»
+TUN_CANDIDATES = ("172.19.0.1/30", "172.23.231.1/30", "10.211.97.1/30", "192.168.251.1/30")
+
+
+def free_tun_address(used: list[str] | None = None) -> str:
+    """Первый адрес из TUN_CANDIDATES, чья подсеть не пересекается с адресами других
+    адаптеров (used — для проверки; по умолчанию — адреса адаптеров Windows, кроме своего)."""
+    import ipaddress
+    if used is None:
+        import psutil
+        used = [a.address for name, addrs in psutil.net_if_addrs().items() if name != TUN_NAME
+                for a in addrs if a.family.name == "AF_INET"]
+    taken = []
+    for address in used:
+        try:
+            taken.append(ipaddress.ip_address(address))
+        except ValueError:
+            continue
+    for candidate in TUN_CANDIDATES:
+        net = ipaddress.ip_interface(candidate).network
+        if not any(ip in net for ip in taken):
+            return candidate
+    return TUN_CANDIDATES[-1]
 SEARCH = [r"%ProgramFiles%\sing-box", r"%ProgramFiles%\FlyFrogLLC\Happ\tun",
           r"%LOCALAPPDATA%\Programs\sing-box"]
 
@@ -68,7 +92,7 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
         if chosen and not (family == "v6" and ip_mode == "ipv4"):  # IPv6 в туннеле закрыт
             servers.append({"type": net, "tag": tag, "server": chosen, "detour": "proxy"})
             dns_rules.append({"query_type": [query], "action": "route", "server": tag})
-    address = [TUN_ADDRESS, TUN_ADDRESS6]
+    address = [free_tun_address(), TUN_ADDRESS6]
     extra = [] if ip_mode in ("prefer_ipv6", "ipv6") else [{"ip_version": 6, "action": "reject"}]
     if block_udp:
         extra.append({"network": "udp", "action": "reject"})

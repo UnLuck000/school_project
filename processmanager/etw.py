@@ -5,7 +5,7 @@
 из networkmonitor/dns_etw.py. Открыть сеанс может только администратор: без прав
 start() возвращает код ошибки, и вызывающий переходит на запасной вариант (опрос).
 
-trace = EtwTrace("myav-proc", GUID, keywords, on_record); trace.start() → 0 или ошибка;
+trace = EtwTrace("sbit-proc", GUID, keywords, on_record); trace.start() → 0 или ошибка;
 on_record(event_id, pid, user_data: bytes) вызывается из потока трассировки.
 """
 import ctypes
@@ -124,7 +124,7 @@ class EtwTrace:
                 return
             data = ctypes.string_at(record.UserData, record.UserDataLength)
             self.on_record(event_id, header.ProcessId, data)
-        except Exception:  # исключение в обратном вызове ETW уронило бы трассировку
+        except Exception:  # noqa: S110 — исключение в обратном вызове ETW уронило бы трассировку
             pass
 
     def _stop_session(self) -> None:

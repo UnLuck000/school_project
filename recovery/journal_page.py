@@ -69,7 +69,9 @@ class JournalPage(QWidget):
             "Исправления, которые сделала программа: автозапуск, проверка системы, карантин, "
             "сеть, VPN. Выберите действия (несколько: с Ctrl или Shift) и нажмите «Отменить "
             "действие»; правый клик — отменить или перейти к месту действия. Действия, которые "
-            "уже сняты другим путём, и повторы одного и того же из журнала убираются сами.")
+            "уже сняты другим путём, и повторы одного и того же из журнала убираются сами. "
+            "Записи «Сбой» (оранжевые) — системная программа не выполнила работу: двойной "
+            "щелчок покажет, что случилось и что сделать.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -108,14 +110,25 @@ class JournalPage(QWidget):
         if record is None:
             return
         menu = QMenu(self)
+        if record.get("notice"):
+            menu.addAction("Подробнее", lambda: self._details(record))
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         undo = menu.addAction("Отменить действие", self.undo_selected)
         undo.setEnabled(not record["undone"])
         place = menu.addAction("Перейти к месту действия", lambda: self._goto(item))
         place.setEnabled(place_of(record["op"]) is not None)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
+    def _details(self, record: dict) -> None:
+        from toolbox.windows import info_dialog
+        info_dialog(self, record["title"], record["data"].get("details", ""), width=760)
+
     def _goto(self, item) -> None:
         record = self._record(item)
+        if record is not None and record.get("notice"):
+            self._details(record)
+            return
         place = place_of(record["op"]) if record is not None else None
         if place is not None:
             self.goto.emit(place, record)
@@ -125,9 +138,14 @@ class JournalPage(QWidget):
         self.tree.clear()
         for record in reversed(journal.read_all()):
             status = f"Отменено {record['undone_at']}" if record["undone"] else "Выполнено"
+            if record.get("notice"):
+                status = "Сбой (подробнее — двойной щелчок)"
             item = QTreeWidgetItem([record["time"].replace("T", " "), record["title"], status])
             item.setData(0, ID_ROLE, record["id"])
-            if record["undone"]:
+            if record.get("notice"):
+                for col in range(3):
+                    item.setForeground(col, QBrush(QColor("darkorange")))
+            elif record["undone"]:
                 for col in range(3):
                     item.setForeground(col, QBrush(QColor("gray")))
             self.tree.addTopLevelItem(item)
@@ -137,7 +155,8 @@ class JournalPage(QWidget):
         # порядок списка: сверху новые, поэтому действия отменяются от последнего к первому
         items = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
         items = [it for it in items if it.isSelected()
-                 and not records.get(it.data(0, ID_ROLE), {}).get("undone", True)]
+                 and not records.get(it.data(0, ID_ROLE), {}).get("undone", True)
+                 and not records.get(it.data(0, ID_ROLE), {}).get("notice")]
         if not items:
             QMessageBox.information(self, "Журнал",
                                     "Выберите в списке действия, которые ещё не отменены")

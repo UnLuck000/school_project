@@ -69,7 +69,7 @@ def supported() -> bool:
 
 def manual_dns() -> dict:
     """{"v4": [серверы], "v6": [серверы], "adapters": [имена]} — DNS, заданный вручную у
-    подключённых адаптеров с основным шлюзом (не у туннеля myav-tun)."""
+    подключённых адаптеров с основным шлюзом (не у туннеля sbit-tun)."""
     result = {"v4": [], "v6": [], "adapters": []}
     if not supported():
         return result
@@ -81,7 +81,7 @@ def manual_dns() -> dict:
     guids = _adapter_guids()
     for name in up:
         guid = guids.get(name)
-        if not guid or name.lower().startswith("myav-tun"):
+        if not guid or name.lower().startswith(("sbit-tun", "myav-tun")):
             continue
         v4_key, v6_key = rf"{TCPIP}\{guid}", rf"{TCPIP6}\{guid}"
         gateway = (_value(v4_key, "DefaultGateway") or _value(v4_key, "DhcpDefaultGateway")

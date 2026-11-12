@@ -208,8 +208,8 @@ class ExtensionsWindow(QDialog):
                 ("Права", ", ".join(e.permissions) or "нет"),
                 ("Папка на диске", e.path), ("Папка профиля", e.prefs),
                 ("Программа браузера", e.exe),
-                ("Записи реестра", "; ".join("\\".join(r[:2]) + (f" ({r[2]})" if r[2] else "")
-                                             for r in e.registry))]
+                ("Записи реестра", "; ".join(
+                    "\\".join(r[:2]) + (f" ({r[2]})" if r[2] else "") for r in e.registry))]
         exists = bool(e.path) and os.path.exists(e.path)
         actions = []
         if exists:
@@ -218,7 +218,11 @@ class ExtensionsWindow(QDialog):
                 actions.append(("Проверить папку сканером",
                                 lambda d: self.window_ref.open_analyzer(e.path)))
         if not e.removed or e.registry:
-            actions.append(("Удалить полностью", lambda d: (d.accept(), self._remove(e))))
+            def remove(d):
+                d.accept()
+                self._remove(e)
+
+            actions.append(("Удалить полностью", remove))
         actions.append(("Копировать ID", lambda d: QApplication.clipboard().setText(e.ext_id)))
         show_details(self, f"Расширение {e.name or e.ext_id}", rows, actions, width=860)
 

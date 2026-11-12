@@ -17,6 +17,53 @@ STATUS_RESTORED = "restored"
 STATUS_DELETED = "deleted"
 
 
+# Файл в карантине не должен оставаться рабочей программой: его нельзя запустить из папки
+# карантина, и на него не срабатывают другие антивирусы. Содержимое — XOR с ключом по кругу
+# (это не шифрование от человека, а обезвреживание). В метаданных — "encoding": "xor1";
+# записи прежних версий без этого поля лежат как есть и восстанавливаются по-старому.
+XOR_KEY = bytes.fromhex("5342495451a7c33e9d18f06b2c74e5b1")
+ENCODING = "xor1"
+_CHUNK = 1 << 20
+
+
+def _xor_copy(src: Path, dst: Path) -> None:
+    """Копия src в dst через XOR (операция обратима: тем же вызовом обратно)."""
+    table = [bytes(b ^ k for b in range(256)) for k in XOR_KEY]
+    width = len(XOR_KEY)
+    block = _CHUNK - _CHUNK % width  # кусок кратен ключу: его фаза не сбивается
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        while True:
+            chunk = fin.read(block)
+            if not chunk:
+                break
+            out = bytearray(chunk)
+            for i in range(width):
+                out[i::width] = chunk[i::width].translate(table[i])
+            fout.write(out)
+
+
+def _stored_sha256(meta: dict) -> str:
+    """SHA-256 исходного содержимого файла, лежащего в карантине."""
+    import hashlib
+    stored = _stored_path(meta["id"])
+    if meta.get("encoding") != ENCODING:
+        return sha256_of(stored)
+    digest = hashlib.sha256()
+    table = [bytes(b ^ k for b in range(256)) for k in XOR_KEY]
+    width = len(XOR_KEY)
+    block = _CHUNK - _CHUNK % width
+    with open(stored, "rb") as f:
+        while True:
+            chunk = f.read(block)
+            if not chunk:
+                break
+            out = bytearray(chunk)
+            for i in range(width):
+                out[i::width] = chunk[i::width].translate(table[i])
+            digest.update(out)
+    return digest.hexdigest()
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -84,12 +131,16 @@ def quarantine_file(path: Path, reason: str) -> str:
         "reason": reason,
         "signature": signature_text,
         "quarantined_at": _now(),
+        "encoding": ENCODING,
     }
 
     _write_meta(meta)
+    stored = _stored_path(item_id)
     try:
-        shutil.move(str(path), _stored_path(item_id))
+        _xor_copy(path, stored)
+        path.unlink()  # исходный файл убираем только после готовой копии
     except Exception:
+        stored.unlink(missing_ok=True)
         _meta_path(item_id).unlink(missing_ok=True)
         raise
     return item_id
@@ -115,7 +166,7 @@ def restore_file(item_id: str, overwrite: bool = False, whitelist: bool = True) 
         raise ValueError("Этот элемент уже восстановлен или удалён")
 
     stored = _stored_path(item_id)
-    if sha256_of(stored) != meta["sha256"]:
+    if _stored_sha256(meta) != meta["sha256"]:
         raise ValueError("Хэш изменился: файл в карантине повреждён")
 
     dest = Path(meta["original_path"])
@@ -123,7 +174,17 @@ def restore_file(item_id: str, overwrite: bool = False, whitelist: bool = True) 
         raise FileExistsError(f"По пути {dest} уже есть файл")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(stored), dest)
+    if meta.get("encoding") == ENCODING:
+        tmp = dest.with_name(dest.name + ".sbit-restore")
+        try:
+            _xor_copy(stored, tmp)
+            os.replace(tmp, dest)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        stored.unlink(missing_ok=True)
+    else:
+        shutil.move(str(stored), dest)
 
     meta["status"] = STATUS_RESTORED
     meta["restored_at"] = _now()

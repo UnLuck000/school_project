@@ -15,7 +15,7 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 
-SESSION_NAME = "myav-dns"
+SESSION_NAME = "sbit-dns"
 EVENT_QUERY = 3006
 EVENT_RESULT = 3008
 POLL_SECONDS = 5  # запасной вариант: как часто читать кэш DNS
@@ -296,7 +296,7 @@ class DnsWatcher:
             query = parse_event(event_id, header.ProcessId, data)
             if query is not None:
                 self.on_query(query)
-        except Exception:  # исключение в обратном вызове ETW уронило бы трассировку
+        except Exception:  # noqa: S110 — исключение в обратном вызове ETW уронило бы трассировку
             pass
 
     def _stop_session(self) -> None:

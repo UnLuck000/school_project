@@ -354,7 +354,7 @@ class RecoveryWindow(QMainWindow):
             code, "завершено с ошибкой или остановлено")
         self.output.appendPlainText(f"\nКод возврата: {code} ({meaning})")
         from recovery import activity
-        lines = [l for l in self.output.toPlainText().splitlines() if l.strip()][-6:-1]
+        lines = [s for s in self.output.toPlainText().splitlines() if s.strip()][-6:-1]
         activity.record("integrity", f"{getattr(self, '_cmd_title', 'Команда')}: {meaning} "
                                      f"(код {code})", output=lines)
         self.output.appendPlainText(r"Подробности sfc: C:\Windows\Logs\CBS\CBS.log")

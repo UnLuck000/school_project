@@ -6,7 +6,7 @@ from recovery import assoc, journal
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="нужен реестр Windows")
 
-EXT = ".studyavtest"
+EXT = ".sbittest"
 
 
 @pytest.fixture
@@ -20,9 +20,9 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(assoc, "SNAPSHOT_EXTS", [EXT])
     monkeypatch.setattr(assoc, "all_extensions", lambda: [])
     yield winreg
-    for path in (rf"{assoc.CLASSES}\{EXT}", rf"{assoc.CLASSES}\studyavevil\shell\open\command",
-                 rf"{assoc.CLASSES}\studyavevil\shell\open", rf"{assoc.CLASSES}\studyavevil\shell",
-                 rf"{assoc.CLASSES}\studyavevil"):
+    for path in (rf"{assoc.CLASSES}\{EXT}", rf"{assoc.CLASSES}\sbitevil\shell\open\command",
+                 rf"{assoc.CLASSES}\sbitevil\shell\open", rf"{assoc.CLASSES}\sbitevil\shell",
+                 rf"{assoc.CLASSES}\sbitevil"):
         try:
             winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
         except OSError:
@@ -40,14 +40,14 @@ def test_snapshot_compare_restore_and_undo(sandbox):
     assert assoc.compare(snapshot) == []
 
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{assoc.CLASSES}\{EXT}") as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "studyavevil")
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "sbitevil")
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
-                          rf"{assoc.CLASSES}\studyavevil\shell\open\command") as key:
+                          rf"{assoc.CLASSES}\sbitevil\shell\open\command") as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, r'"C:\evil.exe" "%1"')
 
     diffs = assoc.compare(snapshot)
-    assert any(d.field == "ProgID (HKCU)" and d.now == "studyavevil" for d in diffs)
-    assert any("studyavevil" in d.field and "evil.exe" in d.now for d in diffs)
+    assert any(d.field == "ProgID (HKCU)" and d.now == "sbitevil" for d in diffs)
+    assert any("sbitevil" in d.field and "evil.exe" in d.now for d in diffs)
     ops = [op for d in diffs for op in d.ops]
     assert ops and all(op.hive == "HKCU" for op in ops)
 
@@ -57,7 +57,7 @@ def test_snapshot_compare_restore_and_undo(sandbox):
     record = journal.read_all()[-1]
     assert record["op"] == "assoc_restore"
     journal.undo(record["id"])
-    assert assoc.read_state(EXT)["ProgID (HKCU)"]["value"] == "studyavevil"
+    assert assoc.read_state(EXT)["ProgID (HKCU)"]["value"] == "sbitevil"
 
 
 def test_critical_check_on_clean_system_has_no_hkcu_ops():

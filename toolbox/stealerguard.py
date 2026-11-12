@@ -29,7 +29,7 @@ from recovery import journal
 
 TRUST_FILE = journal.JOURNAL_DIR / "stealer_trust.json"
 POLL_SECONDS = 5.0
-SESSION_NAME = "myav-files"
+SESSION_NAME = "sbit-files"
 EVENT_CREATE = 12
 KEYWORD_CREATE = 0x80 | 0x10  # KERNEL_FILE_KEYWORD_CREATE | FILENAME
 DEVICE = "\\Device\\".encode("utf-16-le")
@@ -195,6 +195,8 @@ class StealerGuard:
         if trace.start() == 0:
             self._trace = trace
             self.mode = "etw"
+            from processmanager.story import STORY
+            STORY.sources.add("files")  # то же событие Create — и для сводки по процессу
             self.on_status("Защита от стилеров: видно каждое открытие паролей и cookies (ETW)")
             return
         self.mode = "rm"
@@ -205,6 +207,8 @@ class StealerGuard:
 
     def stop(self) -> None:
         self._stop.set()
+        from processmanager.story import STORY
+        STORY.sources.discard("files")
         if self._trace is not None:
             self._trace.stop()
             self._trace = None
@@ -233,6 +237,12 @@ class StealerGuard:
         while end > 0 and (end - start) % 2:
             end = data.find(b"\0\0", end + 1)
         path = data[start:end if end > 0 else len(data)].decode("utf-16-le", "replace")
+        if start == 32 and len(data) >= 24:  # раскладка события известна (story.py)
+            from processmanager import story
+            if int.from_bytes(data[20:24], "little") >> 24 in story.WRITE_DISPOSITIONS and \
+                    os.path.splitext(path)[1].lower() in story.WATCH_EXTS:
+                from processmanager.etw import kernel_path
+                story.STORY.file_written(pid, kernel_path(path))
         kind = secret_kind(path)
         if kind:
             from processmanager.etw import kernel_path
@@ -301,7 +311,8 @@ class StealerGuard:
         try:
             self.on_alarm(info)
         except Exception:
-            pass
+            from diag.log import swallowed
+            swallowed("stealerguard: обработчик тревоги")
 
 
 def _signed(exe: str) -> bool:

@@ -310,22 +310,27 @@ class PasswordLeakWindow(QDialog):
 
 
 # ---------- ловушки ----------
-def decoy_alarm(parent, changed: list[str], culprit: dict | None, watcher=None) -> None:
+def decoy_alarm(parent, changed: list[str], culprit: dict | None, watcher=None,
+                burst: bool = False) -> None:
     """Окно срабатывания ловушки: завершить процесс и убрать файл в карантин или отпустить."""
     from toolbox import decoys
     files = "\n".join(os.path.basename(p) for p in changed[:5])
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Icon.Critical)
     box.setWindowTitle("Похоже на шифровальщик")
+    # burst: тревога не от ловушек, а по самим документам (toolbox/ransomguard.py)
+    what = (f"за минуту переписал документы ({len(changed)}), и их содержимое стало похоже на "
+            "зашифрованное") if burst else "изменил файлы-ловушки"
     if culprit:
         state = "приостановлен" if culprit.get("suspended") else "НЕ удалось приостановить"
-        box.setText(f"Процесс {culprit['name']} (PID {culprit['pid']}) изменил файлы-ловушки "
+        box.setText(f"Процесс {culprit['name']} (PID {culprit['pid']}) {what} "
                     f"и {state}.\n\n{culprit['exe'] or 'путь неизвестен'}\n\n"
                     f"Изменены:\n{files}")
         kill = box.addButton("Завершить и в карантин", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton("Это не вирус — продолжить", QMessageBox.ButtonRole.RejectRole)
     else:
-        box.setText(f"Изменены файлы-ловушки, но программу, которая это сделала, определить "
+        box.setText(("Документы подряд становятся нечитаемыми" if burst else
+                     "Изменены файлы-ловушки") + f", но программу, которая это сделала, определить "
                     f"не удалось.\n\nИзменены:\n{files}\n\nЕсли файлы на компьютере начали "
                     "менять расширения или не открываются — выключите компьютер.")
         kill = None

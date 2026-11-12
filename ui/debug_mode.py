@@ -11,15 +11,19 @@ import hashlib
 import secrets
 from pathlib import Path
 
+import userdata
+
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QLineEdit, QMessageBox, QVBoxLayout,
 )
 
-PASSWORDS_FILE = Path(__file__).resolve().parent.parent / "debug_mode" / "passwords.txt"
+PASSWORDS_FILE = userdata.ADMIN_DIR / "passwords.txt"  # папка конфигурации пользователя
 MAX_LEN = 64
-DEFAULT_SALT = "myav-release"
-DEFAULT_HASH = "6d1d08940134c90e4a2b00a618fadef0c0831e215501c32c545f9519195d4dd8"
+DEFAULT_SALT = "sbit-release"
+DEFAULT_HASH = "9b501b22a1e2447f0f22bd30931c1598623a2334e6c2d4cc661ba8e0a2a42383"
 DEFAULT_HINT = "1qaz2wsx3edc"  # подсказка в окне ввода, пока пароль по умолчанию не убран
+PBKDF2_PREFIX = "pbkdf2:"
+PBKDF2_ROUNDS = 200_000
 DEFAULT_OFF = "default:off"     # строка в PASSWORDS_FILE: пароль по умолчанию убран
 MIN_LEN = 6
 HEADER = ("# Хэши допустимых паролей (не сами пароли).\n"
@@ -40,7 +44,7 @@ class PasswordGate:
         except OSError:
             return "", set(), False
         salt, hashes, off = "", set(), False
-        for line in (l.strip() for l in lines):
+        for line in (s.strip() for s in lines):
             if not line or line.startswith("#"):
                 continue
             if line == DEFAULT_OFF:
@@ -65,7 +69,17 @@ class PasswordGate:
 
     @staticmethod
     def _hash(salt: str, text: str) -> str:
+        """Прежний вид (один проход SHA-256): пароль по умолчанию и пароли, заданные в
+        прежних версиях. Новые пароли — _strong."""
         return hashlib.sha256((salt + text.lower()).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _strong(salt: str, text: str) -> str:
+        """PBKDF2-HMAC-SHA256, 200 000 проходов: перебор украденного файла паролей в сотни
+        тысяч раз медленнее. Регистр по-прежнему не учитывается."""
+        raw = hashlib.pbkdf2_hmac("sha256", text.lower().encode("utf-8"),
+                                  salt.encode("utf-8"), PBKDF2_ROUNDS)
+        return PBKDF2_PREFIX + raw.hex()
 
     def has_default(self) -> bool:
         """Действует ли пароль по умолчанию (и показывается ли подсказка)."""
@@ -80,8 +94,12 @@ class PasswordGate:
     def check(self, typed: str) -> bool:
         """Верен ли пароль (без учёта регистра)."""
         text = typed.strip()[:MAX_LEN]
-        if self._hashes and self._hash(self._salt, text) in self._hashes:
-            return True
+        if self._hashes:
+            strong = any(h.startswith(PBKDF2_PREFIX) for h in self._hashes)
+            if strong and self._strong(self._salt, text) in self._hashes:
+                return True
+            if self._hash(self._salt, text) in self._hashes:
+                return True
         return self.has_default() and self._hash(self._default[0], text) == self._default[1]
 
     def set_password(self, password: str) -> None:
@@ -89,7 +107,7 @@ class PasswordGate:
         if len(password) < MIN_LEN or len(password) > MAX_LEN:
             raise ValueError(f"Длина пароля: от {MIN_LEN} до {MAX_LEN} символов")
         salt = secrets.token_hex(8)
-        self._save(salt, {self._hash(salt, password)}, self._default_off)
+        self._save(salt, {self._strong(salt, password)}, self._default_off)
 
     def remove_password(self) -> None:
         """Убирает свой пароль. Нельзя, если пароль по умолчанию тоже убран."""

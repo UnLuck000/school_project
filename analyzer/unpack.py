@@ -367,7 +367,7 @@ def _explore_pyinstaller(node: Node, blob: bytes, work: Path, budget: Budget,
         i += size
     # магическое число .pyc — из PYZ, иначе по версии Python
     magic = struct.pack("<H", PYC_MAGIC.get(ver, 0)) + b"\r\n"
-    for name, off, clen, compressed, code in entries:
+    for _name, off, clen, _compressed, code in entries:
         if code in "zZ":
             data = blob[start + off:start + off + clen]
             if data[:4] == b"PYZ\x00":
@@ -395,7 +395,7 @@ def _explore_pyinstaller(node: Node, blob: bytes, work: Path, budget: Budget,
                         budget, depth, "Скрипт, который PyInstaller запускает первым — "
                                        "обычно здесь главная логика программы")
         elif code in "mM":
-            if not data[2:4] == b"\r\n":
+            if data[2:4] != b"\r\n":
                 data = _pyc_header(magic, ver) + data
             _child_file(pyi, name + ".pyc", "pyc", data, work, f"pyinstaller/{name}.pyc",
                         budget, depth, what)

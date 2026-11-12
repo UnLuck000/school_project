@@ -316,6 +316,7 @@ class SettingsPage(_UiPage):
         self.chk_decoys = child(ui, QCheckBox, "chkDecoys")
         self.chk_launch = child(ui, QCheckBox, "chkLaunchGuard")
         self.chk_stealer = child(ui, QCheckBox, "chkStealerGuard")
+        self.chk_amsi = child(ui, QCheckBox, "chkAmsi")
         from PySide6.QtWidgets import QTimeEdit
         from scanner import schedule
         self.chk_schedule = child(ui, QCheckBox, "chkSchedule")
@@ -380,7 +381,7 @@ class SettingsPage(_UiPage):
                      self.chk_on_top, self.cmb_theme, self.spn_threshold,
                      self.spn_workers, self.spn_interval,
                      self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
-                     self.chk_revocation, self.chk_launch, self.chk_stealer,
+                     self.chk_revocation, self.chk_launch, self.chk_stealer, self.chk_amsi,
                      self.chk_schedule, self.cmb_schedule_kind, self.cmb_schedule_period,
                      self.time_schedule, *self.locks.values())
         self.load_values()
@@ -393,6 +394,7 @@ class SettingsPage(_UiPage):
         self.chk_decoys.toggled.connect(lambda v: self._save("protect/decoys", v))
         self.chk_launch.toggled.connect(lambda v: self._save("protect/launch", v))
         self.chk_stealer.toggled.connect(lambda v: self._save("protect/stealer", v))
+        self.chk_amsi.toggled.connect(lambda v: self._save("protect/amsi", v))
         self.chk_schedule.toggled.connect(self._on_schedule_enabled)
         self.cmb_schedule_kind.currentIndexChanged.connect(
             lambda i: self._save("schedule/kind", self._kinds[i]))
@@ -485,6 +487,7 @@ class SettingsPage(_UiPage):
         self.chk_decoys.setChecked(cfg.get("protect/decoys"))
         self.chk_launch.setChecked(cfg.get("protect/launch"))
         self.chk_stealer.setChecked(cfg.get("protect/stealer"))
+        self.chk_amsi.setChecked(cfg.get("protect/amsi"))
         from PySide6.QtCore import QTime
         from scanner import schedule
         self.chk_schedule.setChecked(cfg.get("schedule/enabled"))

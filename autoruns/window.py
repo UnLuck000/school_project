@@ -18,7 +18,7 @@ from processmanager.memscan import get_rules
 from processmanager.system import is_admin, open_in_explorer
 from scanner import exclusions, pool as scan_pool
 from scanner.hashing import load_all_signatures
-from scanner.whitelist import load_whitelist, trusted_hashes
+from scanner.whitelist import trusted_hashes
 from ui.textutil import elide
 from ui.widgets import SortItem, make_tree
 

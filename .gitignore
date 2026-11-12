@@ -51,3 +51,5 @@ release/
 
 # присланные архивы «Сведения о программе» (tools/import_reports.py)
 user_reports/
+# провайдер AMSI собирается native/amsi/build.py
+native/amsi/bin/

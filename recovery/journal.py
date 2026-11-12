@@ -4,10 +4,12 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
+
+import userdata
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-JOURNAL_DIR = BASE_DIR / "journal"
+JOURNAL_DIR = userdata.JOURNAL_DIR  # папка конфигурации пользователя (userdata.py)
 JOURNAL_FILE = JOURNAL_DIR / "actions.jsonl"
 BACKUP_DIR = JOURNAL_DIR / "backup"
 
@@ -60,8 +62,21 @@ def log_action(title: str, op: str, data: dict) -> str:
     try:
         from diag.log import get
         get("journal").info("Действие: %s (%s)", title, op)
-    except Exception:
+    except Exception:  # noqa: S110 — дубль в app.log не обязателен
         pass
+    with _lock:
+        JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+        with JOURNAL_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record["id"]
+
+
+def log_notice(title: str, op: str, data: dict) -> str:
+    """Запись-сообщение (сбой системной программы и т. п.): видна в журнале действий, но
+    отменять в ней нечего. data["details"] — подробное описание (двойной щелчок)."""
+    record = {"id": uuid.uuid4().hex, "time": datetime.now().isoformat(timespec="seconds"),
+              "title": title, "op": op, "data": data, "undone": False, "undone_at": "",
+              "notice": True}
     with _lock:
         JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
         with JOURNAL_FILE.open("a", encoding="utf-8") as f:
@@ -127,7 +142,7 @@ def cleanup() -> int:
         from diag.log import get
         get("journal").info("Журнал: убрано записей, которые уже сняты или повторяются: %d",
                             len(drop))
-    except Exception:
+    except Exception:  # noqa: S110 — дубль в app.log не обязателен
         pass
     return len(drop)
 
@@ -138,6 +153,8 @@ def undo(record_id: str) -> str:
         record = next((r for r in _read() if r["id"] == record_id), None)
     if record is None:
         raise ValueError("Запись журнала не найдена")
+    if record.get("notice"):
+        raise ValueError("Это запись о сбое: отменять нечего")
     if record["undone"]:
         raise ValueError("Это действие уже отменено")
     handler = UNDO_HANDLERS.get(record["op"])

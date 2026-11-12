@@ -26,25 +26,25 @@ def _button_text(b: QAbstractButton) -> str:
 
 
 class UiAudit(QObject):
-    def eventFilter(self, obj, event):
+    def eventFilter(self, watched, event):
         try:
             kind = event.type()
             if kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                self._click(obj, event)
+                self._click(watched, event)
             elif kind == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return,
                                                                   Qt.Key.Key_Enter, Qt.Key.Key_Space):
-                if isinstance(obj, QAbstractButton) and obj.hasFocus():
-                    log.info("Клавиша на кнопке «%s» (%s) — окно «%s»", _button_text(obj),
-                             obj.objectName() or type(obj).__name__, _window_title(obj))
-            elif kind == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow() \
-                    and not isinstance(obj, QMenu) and obj.windowTitle():
-                log.info("Открыто окно «%s» (%s)", obj.windowTitle(), type(obj).__name__)
-                features.window_shown(type(obj).__name__)
-            elif kind == QEvent.Type.Close and isinstance(obj, QWidget) and obj.isWindow() \
-                    and obj.windowTitle():
-                log.info("Закрыто окно «%s»", obj.windowTitle())
-                features.window_closed(type(obj).__name__)
-        except Exception:
+                if isinstance(watched, QAbstractButton) and watched.hasFocus():
+                    log.info("Клавиша на кнопке «%s» (%s) — окно «%s»", _button_text(watched),
+                             watched.objectName() or type(watched).__name__, _window_title(watched))
+            elif kind == QEvent.Type.Show and isinstance(watched, QWidget) and watched.isWindow() \
+                    and not isinstance(watched, QMenu) and watched.windowTitle():
+                log.info("Открыто окно «%s» (%s)", watched.windowTitle(), type(watched).__name__)
+                features.window_shown(type(watched).__name__)
+            elif kind == QEvent.Type.Close and isinstance(watched, QWidget) and watched.isWindow() \
+                    and watched.windowTitle():
+                log.info("Закрыто окно «%s»", watched.windowTitle())
+                features.window_closed(type(watched).__name__)
+        except Exception:  # noqa: S110 — учёт действий не должен мешать событиям интерфейса
             pass
         return False
 

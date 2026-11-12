@@ -10,20 +10,23 @@ import time
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer.fileops import human_size
 from recovery import activity
 from ui import settings as cfg
 from vpn import backends, profiles
+import re
 
 GREEN, ORANGE, RED, GREY, ACCENT = "#2e9e4f", "#d68910", "#c0392b", "#8a8a8a", "#2f7ed8"
 STATE_TEXT = {backends.DISCONNECTED: ("Не подключено", GREY),
               backends.CONNECTING: ("Подключение...", ORANGE),
               backends.CONNECTED: ("Подключено", GREEN),
+              backends.DISCONNECTING: ("Отключение...", ORANGE),
               backends.ERROR: ("Ошибка", RED)}
 SECURITY = {"reality": "REALITY", "tls": "TLS", "none": "без шифрования"}
 NETWORK = {"tcp": "TCP", "raw": "TCP", "ws": "WebSocket", "grpc": "gRPC", "xhttp": "XHTTP",
@@ -102,6 +105,7 @@ class _Bridge(QObject):
     cert_alarm = Signal(object)      # checks.Probe с подменённым сертификатом
     apps = Signal(object)            # список apps.App
     apps_progress = Signal(str)
+    netdiag = Signal(object)         # список netdiag.Finding
 
 
 # ================================ диалоги ================================
@@ -359,8 +363,10 @@ class VpnWindow(QDialog):
         self._probes: list = []
         self._cert_last = 0.0
         self.bridge = _Bridge()
+        self._core_key, self._core_since, self._core_repeats = "", 0.0, 0
         self.bridge.log.connect(self._append_log)
         self.bridge.ip.connect(self._on_ip)
+        self.bridge.netdiag.connect(self._on_netdiag)
         self.bridge.probes.connect(self._on_probes)
         self.bridge.cert_alarm.connect(self._on_cert_alarm)
         self._ip_text = ""
@@ -432,6 +438,11 @@ class VpnWindow(QDialog):
         self.unblock_btn.setStyleSheet(f"color: {RED}; font-weight: 600;")
         self.unblock_btn.clicked.connect(self._release_block)
         texts.addWidget(self.unblock_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self.netdiag_btn = QPushButton("Почему нет интернета?")
+        self.netdiag_btn.setToolTip("Проверить связь, kill switch, брандмауэр, системный прокси "
+                                    "и чужие VPN-клиенты с туннелем (ничего не меняет)")
+        self.netdiag_btn.clicked.connect(self._run_netdiag)
+        texts.addWidget(self.netdiag_btn, 0, Qt.AlignmentFlag.AlignLeft)
         texts.addStretch()
         hrow.addLayout(texts, 1)
         tiles = QGridLayout()
@@ -642,8 +653,7 @@ class VpnWindow(QDialog):
             box = QCheckBox(text)
             box.setToolTip(tip)
             box.setChecked(cfg.get(f"vpn/{key}"))
-            box.toggled.connect(lambda on, k=key: (cfg.set_(f"vpn/{k}", on),
-                                                   self._show_builtin()))
+            box.toggled.connect(lambda on, k=key: self._set_option(k, on))
             grid.addWidget(box, i // 2, i % 2)
             self.route_boxes[key] = box
         cl.addLayout(grid)
@@ -727,6 +737,10 @@ class VpnWindow(QDialog):
         layout.addStretch()
         self._show_builtin()
         return page
+
+    def _set_option(self, key: str, on: bool) -> None:
+        cfg.set_(f"vpn/{key}", on)
+        self._show_builtin()
 
     def _show_builtin(self) -> None:
         """Что зависит от режима: программы мимо VPN — только TUN (это правило sing-box);
@@ -947,9 +961,23 @@ class VpnWindow(QDialog):
         super().showEvent(event)
         self._win_dns = None  # DNS в Windows могли поменять, пока окно было закрыто
         self._show_builtin()
+        # в QDialog у каждой кнопки autoDefault: Enter нажимал кнопку с фокусом или первую
+        # («Подключить») — VPN включался от Enter в поле профиля
+        for btn in self.findChildren(QPushButton):
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
+
+    def keyPressEvent(self, event):
+        """Enter окно не обрабатывает: подключение — только щелчком (или пробелом на кнопке)."""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def toggle(self) -> None:
         self._win_dns = None
+        if self.backend is not None and self.backend.state == backends.DISCONNECTING:
+            return  # ядра ещё завершаются: их порты заняты (10808 — «уже занят»)
         if self.backend is not None and self.backend.state in (backends.CONNECTED,
                                                                backends.CONNECTING):
             backend = self.backend
@@ -963,6 +991,8 @@ class VpnWindow(QDialog):
         if not backend.available:
             QMessageBox.information(self, "VPN", f"Для профиля {p.kind} нужен клиент: "
                                                  f"{backend.missing}.")
+            return
+        if not self._foreign_tunnels_ok(p):
             return
         self.backend, self.active = backend, p
         self._last = (0, 0, time.monotonic())
@@ -1009,7 +1039,10 @@ class VpnWindow(QDialog):
         busy = state in (backends.CONNECTED, backends.CONNECTING)
         self.state_label.setText(f"● {text}")
         self.state_label.setStyleSheet(f"font-size: 20pt; font-weight: 700; color: {color};")
-        self.connect_btn.setText(("Отключить" if busy else "Подключить"))
+        stopping = state == backends.DISCONNECTING
+        self.connect_btn.setText("Отключаю..." if stopping else
+                                 ("Отключить" if busy else "Подключить"))
+        self.connect_btn.setEnabled(not stopping)
         ring = GREEN if state == backends.CONNECTED else (ORANGE if busy else ACCENT)
         self.connect_btn.setStyleSheet(
             f"QPushButton {{ border-radius: 75px; border: 4px solid {ring}; "
@@ -1023,12 +1056,15 @@ class VpnWindow(QDialog):
         for w in (self.chk_tun, self.chk_proxy, self.chk_kill, self.cmb_ip, self.cmb_dns,
                   self.apps_btn, self.rules_btn, self.cmb_profile,
                   *self.route_boxes.values(), *self.opt_boxes.values(), *self.port_widgets):
-            w.setEnabled(not busy)  # действуют со следующего подключения
-        if not busy:
+            w.setEnabled(not busy and not stopping)  # действуют со следующего подключения
+        if not busy and not stopping:
             p = self._current()
             for box in (self.chk_tun, self.chk_proxy):
                 box.setEnabled(bool(p and p.kind == "vless"))
-        self._show_builtin()  # программы мимо VPN — только TUN, DNS — по настройкам Windows
+        key = (self._mode_from_boxes(), self._busy())
+        if key != getattr(self, "_builtin_key", None):  # раз в секунду читались настройки
+            self._builtin_key = key
+            self._show_builtin()  # программы мимо VPN — только TUN, DNS — по настройкам Windows
         p = self.active if busy else self._current()
         self.protocol_label.setText(protocol_text(p))
         self.mode_label_big.setText(mode_text(p, backend if busy else None))
@@ -1043,7 +1079,7 @@ class VpnWindow(QDialog):
             seconds = int(time.time() - backend.since)
             self.tiles["time"].setText(f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:"
                                        f"{seconds % 60:02d}")
-            rx, tx = backend.counters()
+            rx, tx = self._counters(backend)
             last_rx, last_tx, last_t = self._last
             dt = max(0.5, time.monotonic() - last_t)
             if last_rx or last_tx:
@@ -1057,6 +1093,26 @@ class VpnWindow(QDialog):
             for key in ("time", "speed", "rx", "tx"):
                 self.tiles[key].setText("—")
 
+    def _counters(self, backend) -> tuple[int, int]:
+        """Принято/отправлено через туннель — в фоне: psutil.net_io_counters перебирает все
+        адаптеры и бывал по 0,5 с (зависание окна VPN в журнале 10.11.2026). Значение
+        отстаёт на один такт — для плиток скорости это не заметно."""
+        if getattr(self, "_counter_backend", None) is not backend:
+            self._counter_backend, self._counter_value = backend, (0, 0)
+        if not getattr(self, "_counting", False):
+            self._counting = True
+
+            def job():
+                try:
+                    value = backend.counters()
+                    if self._counter_backend is backend:
+                        self._counter_value = value
+                finally:
+                    self._counting = False
+
+            threading.Thread(target=job, daemon=True, name="vpn-counters").start()
+        return self._counter_value
+
     def _engine(self, p: profiles.Profile):
         key = (p.kind, p.mode)
         if getattr(self, "_engine_key", None) != key:
@@ -1069,7 +1125,19 @@ class VpnWindow(QDialog):
         from diag.log import get
         # строки ядер (Xray, sing-box) — подробности, их сотни; свои сообщения — INFO
         core = text.startswith(("Xray: ", "sing-box: "))
-        get("vpn").log(10 if core else 20, "%s", text)
+        if not core:
+            get("vpn").log(20, "%s", text)
+        elif " accepted " not in text:  # куда ходит пользователь — только в окне, не в файле
+            # одна и та же ошибка ядра (тайм-аут до сервера) шла сотнями строк подряд
+            key = re.sub(r"\d+", "N", text)
+            now = time.monotonic()
+            if key == self._core_key and now - self._core_since < 300:
+                self._core_repeats += 1
+            else:
+                if self._core_repeats:
+                    get("vpn").log(10, "…такая же строка ядра ещё %d раз", self._core_repeats)
+                self._core_key, self._core_since, self._core_repeats = key, now, 0
+                get("vpn").log(10, "%s", text)
         line = f"{time.strftime('%H:%M:%S')}  {text}"
         self._log_lines.append(line)
         del self._log_lines[:-2000]
@@ -1082,7 +1150,7 @@ class VpnWindow(QDialog):
     def _render_log(self) -> None:
         if not hasattr(self, "log_view"):
             return
-        self.log_view.setPlainText("\n".join(l for l in self._log_lines if self._show_line(l)))
+        self.log_view.setPlainText("\n".join(s for s in self._log_lines if self._show_line(s)))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     def _clear_log(self) -> None:
@@ -1164,7 +1232,7 @@ class VpnWindow(QDialog):
                 if (col == 2 and not r.ok) or (col == 3 and r.cert == "substituted"):
                     item.setForeground(Qt.GlobalColor.red)
                 self.probe_table.setItem(row, col, item)
-        for name, r in results:
+        for _name, r in results:
             if r.cert == "substituted":
                 self.bridge.cert_alarm.emit(r)
 
@@ -1236,6 +1304,56 @@ class VpnWindow(QDialog):
             cfg.set_("vpn/direct_apps", "\n".join(dialog.apps()))
             self._apps_text()
             self._show_builtin()
+
+    def _run_netdiag(self) -> None:
+        """Проверка в фоне: соединения ждут до 3 с, список фильтров WFP — несколько секунд."""
+        from diag import features
+        self.netdiag_btn.setEnabled(False)
+        self.netdiag_btn.setText("Проверяю...")
+        features.begin("vpn.netdiag")
+        connected = bool(self.backend and self.backend.state == backends.CONNECTED)
+
+        def job():
+            from vpn import netdiag
+            try:
+                found = netdiag.diagnose(connected)
+            except Exception as e:  # noqa: BLE001 — показать, а не упасть
+                found = [netdiag.Finding(netdiag.BAD, "Проверка не удалась", str(e))]
+            self.bridge.netdiag.emit(found)
+
+        threading.Thread(target=job, daemon=True, name="vpn-netdiag").start()
+
+    def _on_netdiag(self, found) -> None:
+        from diag import features
+        from toolbox.windows import info_dialog
+        from vpn import netdiag
+        self.netdiag_btn.setEnabled(True)
+        self.netdiag_btn.setText("Почему нет интернета?")
+        bad = [f.title for f in found if f.level == netdiag.BAD]
+        features.end_if_active("vpn.netdiag", True, problems=len(bad))
+        self.bridge.log.emit("Проверка сети: " + ("; ".join(bad) if bad else "явных проблем нет"))
+        info_dialog(self, "Почему нет интернета?", netdiag.report(found), 720)
+
+    def _foreign_tunnels_ok(self, p) -> bool:
+        """Перед подключением TUN: другой VPN-клиент со своим туннелем мешает нашему (два
+        набора маршрутов и фильтров), а при сбое его фильтры перекрывают весь интернет."""
+        mode = p.mode or "tun"
+        if p.kind != "vless" or mode not in ("tun", "tun-xray"):
+            return True
+        from vpn import netdiag
+        found = netdiag.foreign_tunnels()
+        if not found:
+            return True
+        self.bridge.log.emit("Работает другой VPN с туннелем: " + ", ".join(found))
+        answer = QMessageBox.question(
+            self, "VPN",
+            "Уже работает другой VPN-клиент со своим туннелем:\n" + "\n".join(found) +
+            "\n\nДва туннеля мешают друг другу: часть соединений обрывается, а при сбое "
+            "фильтры другого клиента перекрывают весь интернет — и выключение брандмауэра "
+            "этого не снимает. Лучше закрыть его полностью (из трея).\n\nПодключить всё равно?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
 
     def _release_block(self) -> None:
         from vpn import dnsguard, killswitch

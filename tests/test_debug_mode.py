@@ -16,7 +16,7 @@ def app():
 
 
 def test_single_instance(app):
-    name = f"StudyAV-test-{uuid.uuid4().hex}"
+    name = f"SBIT-test-{uuid.uuid4().hex}"
     first = SingleInstance(name)
     assert first.listen()
     assert SingleInstance(name).already_running(notify=False)

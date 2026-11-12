@@ -176,8 +176,8 @@ def judge_autorun(path: str) -> Finding:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         text = str(e)
-    commands = [l.strip() for l in text.splitlines()
-                if re.match(r"\s*(open|shellexecute|shell\\.*\\command)\s*=", l, re.I)]
+    commands = [s.strip() for s in text.splitlines()
+                if re.match(r"\s*(open|shellexecute|shell\\.*\\command)\s*=", s, re.I)]
     level = "threat" if commands else "suspicious"
     return Finding(path, "autorun", level,
                    "autorun.inf с командой запуска" if commands else "Файл autorun.inf",

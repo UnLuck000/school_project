@@ -1,0 +1,227 @@
+; Установщик StretchBIT (Inno Setup 6). Собирается из build_release.py --installer:
+;   ISCC installer.iss /DEdition=release|test /DAppVersion=... /DSourceDir=dist\StretchBIT
+; Релизная ставится в C:\Utils\SBIT, тестовая — в C:\Utils\SBIT-test (свои AppId: не мешают
+; друг другу). Нужны права администратора (с 1.0.0): папка программы закрывается от записи. Поверх прежней версии: заменяются только файлы программы — журналы, кэш и
+; карантин в папке и настройки в %APPDATA%\StretchBitConfiguration[-test] остаются.
+; Удаление: StretchBIT.exe --uninstall --silent [--wipe] (uninstall.py: сеть после VPN,
+; брандмауэр, ETW, ловушки, автозапуск, меню Проводника), затем Inno удаляет папку целиком.
+; Флажок «Удалить все настройки пользователя» — ещё и папку конфигурации (userdata.py).
+
+#ifndef Edition
+  #define Edition "release"
+#endif
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
+#ifndef SourceDir
+  #define SourceDir "dist\StretchBIT"
+#endif
+#ifndef OutputDir
+  #define OutputDir "release"
+#endif
+
+#define ExeName "StretchBIT.exe"
+#if Edition == "test"
+  #define AppKey "StretchBIT-test"
+  #define DisplayName "StretchBIT (тест)"
+  #define InstallDir "C:\Utils\SBIT-test"
+  #define ConfigName "StretchBitConfiguration-test"
+#else
+  #define AppKey "StretchBIT"
+  #define DisplayName "StretchBIT"
+  #define InstallDir "C:\Utils\SBIT"
+  #define ConfigName "StretchBitConfiguration"
+#endif
+
+[Setup]
+AppId={#AppKey}
+AppName={#DisplayName}
+AppVersion={#AppVersion}
+AppVerName={#DisplayName} {#AppVersion}
+AppPublisher=StretchBIT
+DefaultDirName={#InstallDir}
+DisableDirPage=yes
+DisableProgramGroupPage=yes
+DisableReadyPage=no
+; Установка — с правами администратора: программа работает с ними же (автозапуск — задание
+; с наивысшими правами), а папку, куда может писать любая программа пользователя, можно
+; было подменить (положить свою DLL — и получить права администратора при следующем входе).
+; После копирования файлов права папки закрываются ([Run], icacls): код программы
+; пользователям только на чтение, запись — лишь в папки данных ([Dirs]).
+PrivilegesRequired=admin
+OutputDir={#OutputDir}
+OutputBaseFilename={#AppKey}-{#AppVersion}-setup
+SetupIconFile=ui\assets\icon.ico
+UninstallDisplayIcon={app}\{#ExeName}
+UninstallDisplayName={#DisplayName}
+Compression=lzma2/ultra64
+SolidCompression=yes
+LZMAUseSeparateProcess=yes
+WizardStyle=modern
+; запущенную программу просит закрыть (Restart Manager), сама потом не перезапускает
+CloseApplications=yes
+RestartApplications=no
+ShowLanguageDialog=no
+
+[Languages]
+Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Ярлык на рабочем столе"; GroupDescription: "Ярлыки:"
+
+[Dirs]
+; папки данных: сюда программа пишет и без прав администратора (отказ в окне UAC)
+Name: "{app}\app\logs"
+Name: "{app}\app\cache"
+Name: "{app}\app\reports"
+Name: "{app}\app\quarantine_data"
+Name: "{app}\app\signatures"
+#if Edition == "test"
+Name: "{app}\app\diag"
+#endif
+
+[Files]
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{autoprograms}\{#DisplayName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"
+Name: "{autodesktop}\{#DisplayName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\Удалить {#DisplayName}"; Filename: "{uninstallexe}"
+
+[Run]
+; владелец — «Администраторы» (файлы прежней установки без прав принадлежали пользователю, а
+; владелец может вернуть себе запись); наследование от C:\Utils убрано; S-1-5-32-544 —
+; администраторы, S-1-5-18 — система, S-1-5-32-545 — пользователи
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /setowner *S-1-5-32-544 /T /C /Q"; Flags: runhidden; StatusMsg: "Закрываю папку программы от изменений..."
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /reset /T /C /Q"; Flags: runhidden
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /C /Q"; Flags: runhidden
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\logs"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\cache"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\reports"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\quarantine_data"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\signatures"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
+#if Edition == "test"
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\diag"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
+#endif
+Filename: "{app}\{#ExeName}"; Description: "Запустить {#DisplayName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; карантин, журналы работы, кэш, скачанные базы — всё, что программа создала в своей папке
+Type: filesandordirs; Name: "{app}"
+
+[Code]
+var
+  WipeSettings: Boolean;
+
+{ прежний установщик (installer.py) писал запись «Приложения» под именем без _is1;
+  версии до 1.0.0 ставились без прав администратора: их запись «Приложения» и ярлыки были
+  у пользователя (HKCU, меню «Пуск» пользователя) — убираем, иначе всё задвоится }
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    RegDeleteKeyIncludingSubkeys(HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppKey}');
+    RegDeleteKeyIncludingSubkeys(HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppKey}_is1');
+    DeleteFile(ExpandConstant('{userprograms}\{#DisplayName}.lnk'));
+    DeleteFile(ExpandConstant('{userprograms}\Удалить {#DisplayName}.lnk'));
+    if FileExists(ExpandConstant('{commondesktop}\{#DisplayName}.lnk')) then
+      DeleteFile(ExpandConstant('{userdesktop}\{#DisplayName}.lnk'));
+  end;
+end;
+
+{ перед заменой файлов программу закроют: её сторож (selfguard.py) не должен вернуть её }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if DirExists(ExpandConstant('{app}\app')) then
+  begin
+    ForceDirectories(ExpandConstant('{app}\app\cache'));
+    SaveStringToFile(ExpandConstant('{app}\app\cache\no_restart'), 'setup', False);
+  end;
+end;
+
+{ окно перед удалением: флажок «Удалить все настройки пользователя» }
+function InitializeUninstall(): Boolean;
+var
+  Form: TSetupForm;
+  Text: TNewStaticText;
+  Box: TNewCheckBox;
+  OkButton, CancelButton: TNewButton;
+begin
+  WipeSettings := False;
+  if UninstallSilent then
+  begin
+    Result := True;
+    exit;
+  end;
+  Form := CreateCustomForm(ScaleX(460), ScaleY(190), False, True);
+  try
+    Form.Caption := 'Удаление {#DisplayName}';
+    Text := TNewStaticText.Create(Form);
+    Text.Parent := Form;
+    Text.Left := ScaleX(16);
+    Text.Top := ScaleY(16);
+    Text.Width := Form.ClientWidth - ScaleX(32);
+    Text.AutoSize := False;
+    Text.WordWrap := True;
+    Text.Height := ScaleY(64);
+    Text.Caption := 'Программа будет закрыта, её автозапуск и пункт меню Проводника убраны, ' +
+      'настройки сети после VPN возвращены. Папка {#InstallDir} будет удалена целиком — ' +
+      'вместе с карантином, журналами и отчётами.';
+    Box := TNewCheckBox.Create(Form);
+    Box.Parent := Form;
+    Box.Left := ScaleX(16);
+    Box.Top := ScaleY(88);
+    Box.Width := Form.ClientWidth - ScaleX(32);
+    Box.Height := ScaleY(36);
+    Box.Caption := 'Удалить все настройки пользователя (настройки, журнал действий, ' +
+      'белый список, исключения, профили VPN, правила брандмауэра)';
+    Box.Checked := False;
+    OkButton := TNewButton.Create(Form);
+    OkButton.Parent := Form;
+    OkButton.Caption := 'Удалить';
+    OkButton.Width := ScaleX(96);
+    OkButton.Height := ScaleY(26);
+    OkButton.Left := Form.ClientWidth - ScaleX(16 + 96 + 8 + 96);
+    OkButton.Top := Form.ClientHeight - ScaleY(16 + 26);
+    OkButton.ModalResult := mrOk;
+    OkButton.Default := True;
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Caption := 'Отмена';
+    CancelButton.Width := ScaleX(96);
+    CancelButton.Height := ScaleY(26);
+    CancelButton.Left := Form.ClientWidth - ScaleX(16 + 96);
+    CancelButton.Top := OkButton.Top;
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+    Result := Form.ShowModal() = mrOk;
+    WipeSettings := Box.Checked;
+  finally
+    Form.Free();
+  end;
+end;
+
+{ шаги удаления самой программы — с правами администратора (брандмауэр, ETW);
+  отказ в UAC — без прав: то, что можно, всё равно уберётся }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Params: String;
+  Code: Integer;
+begin
+  if CurUninstallStep <> usUninstall then
+    exit;
+  Params := '--uninstall --silent';
+  if WipeSettings then
+    Params := Params + ' --wipe';
+  if FileExists(ExpandConstant('{app}\{#ExeName}')) then
+    if not ShellExec('runas', ExpandConstant('{app}\{#ExeName}'), Params,
+                     ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+      Exec(ExpandConstant('{app}\{#ExeName}'), Params, ExpandConstant('{app}'), SW_HIDE,
+           ewWaitUntilTerminated, Code);
+  { на случай, если программа не смогла (нет файла, ошибка) }
+  if WipeSettings then
+    DelTree(ExpandConstant('{userappdata}\{#ConfigName}'), True, True, True);
+end;

@@ -320,7 +320,7 @@ class BlockPanel(QWidget):
         row.addStretch()
         layout.addLayout(row)
         self.status = QLabel("Правила брандмауэра Windows, созданные программой (группа "
-                             "«myav»). Создание и снятие блокировок пишется в журнал действий "
+                             "«SBIT»). Создание и снятие блокировок пишется в журнал действий "
                              "и отменяется оттуда. Нужны права администратора.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)

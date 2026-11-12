@@ -1,0 +1,5 @@
+# Только для разработки (в сборку не входят): тесты и проверка кода
+-r requirements.txt
+pytest
+ruff
+pyflakes
