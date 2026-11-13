@@ -21,6 +21,7 @@ r"""Защита списков доверия от подмены.
 Папку можно подменить переменной STRETCHBIT_SEAL_DIR (тесты); STRETCHBIT_SEAL=off выключает.
 """
 import ctypes
+import sys
 import hashlib
 import os
 import secrets
@@ -76,15 +77,64 @@ def _icacls(*args: str) -> None:
         pass
 
 
+def _root_secured(root: Path) -> bool:
+    """Владелец корня — администраторы или система и наследование от ProgramData снято."""
+    if sys.platform != "win32":
+        return True
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL("advapi32")
+    owner, dacl, sd = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, SE_FILE_OBJECT
+    err = advapi.GetNamedSecurityInfoW(str(root), 1, 0x1 | 0x4, ctypes.byref(owner), None,
+                                       ctypes.byref(dacl), None, ctypes.byref(sd))
+    if err:
+        return False
+    try:
+        control, revision = wintypes.WORD(), wintypes.DWORD()
+        advapi.GetSecurityDescriptorControl(sd, ctypes.byref(control), ctypes.byref(revision))
+        protected = bool(control.value & 0x1000)  # SE_DACL_PROTECTED
+        # WinBuiltinAdministratorsSid = 26, WinLocalSystemSid = 22
+        owner_ok = any(advapi.IsWellKnownSid(owner, kind) for kind in (26, 22))
+        return protected and owner_ok
+    finally:
+        ctypes.windll.kernel32.LocalFree(sd)
+
+
+def ensure_root() -> Path:
+    """Корень защищённой папки — создать и закрыть: владелец — администраторы, запись —
+    администраторам и системе, пользователям только чтение. Папку в ProgramData любой
+    пользователь может создать заранее и остаться её владельцем (а владелец вернёт себе
+    запись) — поэтому проверяется не наличие папки, а её владелец и права."""
+    root = protected_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    if os.environ.get(ENV_DIR) or not is_admin() or _root_secured(root):
+        return root
+    _icacls(str(root), "/setowner", "*S-1-5-32-544", "/T", "/C", "/Q")
+    _icacls(str(root), "/inheritance:r", "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX")
+    _icacls(str(root / "*"), "/reset", "/T", "/C", "/Q")  # чужие права внутри — вон
+    key = root / "cache.key"
+    if key.exists():  # ключ кэша вердиктов: читать — только администраторам
+        _icacls(str(key), "/inheritance:r", "/grant:r", "*S-1-5-32-544:F", "*S-1-5-18:F")
+    return root
+
+
+def protected_subdir(name: str) -> Path | None:
+    """Папка внутри защищённой для данных, которые пишет только программа с правами
+    администратора (скомпилированные правила YARA, библиотеки AMSI). None — писать нельзя
+    (нет прав): тогда данные не сохраняются, а только читаются, если уже есть."""
+    if not enabled() or not can_write():
+        return None
+    folder = ensure_root() / name
+    folder.mkdir(exist_ok=True)
+    return folder
+
+
 def _trusted_dir(create: bool = False) -> Path:
     folder = protected_dir() / "trusted"
     if create and not folder.is_dir():
+        ensure_root()
         folder.mkdir(parents=True, exist_ok=True)
-        if not os.environ.get(ENV_DIR):
-            # администраторы и система — полный доступ, пользователи — только чтение;
-            # наследование от ProgramData (там пользователям можно создавать файлы) убираем
-            _icacls(str(protected_dir()), "/inheritance:r", "/grant:r",
-                    "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX")
     return folder
 
 

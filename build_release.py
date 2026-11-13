@@ -9,12 +9,13 @@
    (кнопки «✓ Исправно», «✎ Комментарий», страница «Тестирование», подробный журнал).
    Отличаются только файлом app/edition.txt.
 4. Эталон исправных функций diag/baseline.json входит в обе. Перед сборкой в него
-   добавляются отметки из установленной тестовой версии (C:\\Utils\\SBIT-test), если там новее,
+   добавляются отметки из установленной тестовой версии (Program Files\\StretchBIT-test), если там новее,
    а в signatures/release_overrides.json и release_exclusions.json — её исключения.
 5. --zip — архивы release/StretchBIT-<версия>.zip и StretchBIT-test-<версия>.zip;
    --installer — установщики Inno Setup 6 (installer.iss, ISCC.exe): release/StretchBIT-
-   <версия>-setup.exe ставит в C:\\Utils\\SBIT, StretchBIT-test-...-setup.exe — в
-   C:\\Utils\\SBIT-test; LZMA2, при удалении — флажок «Удалить все настройки пользователя».
+   <версия>-setup.exe ставит в C:\\Program Files\\StretchBIT, StretchBIT-test-...-setup.exe —
+   в ...\\StretchBIT-test (прежнее C:\\Utils\\SBIT переносится); LZMA2, при удалении — флажок
+   «Удалить все настройки пользователя».
 
 Журналы, карантин, кэш в сборку не попадают; настройки, журнал действий, профили VPN и пароль
 администратора — в %APPDATA%\\StretchBitConfiguration[-test] (userdata.py), не в папке программы.
@@ -32,7 +33,13 @@ ROOT = Path(__file__).resolve().parent
 NAME = appinfo.APP_NAME
 DIST = ROOT / "dist" / NAME
 EDITIONS = {"release": NAME, "test": f"{NAME}-test"}   # версия → папка в dist
-INSTALLED_TEST = Path(r"C:\Utils\SBIT-test")
+def _installed_test() -> Path:
+    """Установленная тестовая версия: Program Files (с 1.0.0) или прежнее C:\\Utils."""
+    new = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / f"{NAME}-test"
+    return new if new.is_dir() else Path(r"C:\Utils\SBIT-test")
+
+
+INSTALLED_TEST = _installed_test()
 BASELINE = ROOT / "diag" / "baseline.json"
 # из signatures/ в сборку — только эти файлы (они в Git); базы скачиваются при первом запуске
 RELEASE_SIGNATURES = ("release_exclusions.json", "release_overrides.json")

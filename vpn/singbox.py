@@ -9,8 +9,11 @@ Xray к серверу sing-box пропускает напрямую (прав�
 Настройки TUN — по образцу Throne (github.com/throneproj/Throne, src/configs/generate.cpp),
 формат sing-box 1.12+. Нужны права администратора.
 """
+import ipaddress
 import os
+import re
 import shutil
+import urllib.parse
 from pathlib import Path
 
 TUN_NAME = "sbit-tun"
@@ -40,6 +43,76 @@ def free_tun_address(used: list[str] | None = None) -> str:
         if not any(ip in net for ip in taken):
             return candidate
     return TUN_CANDIDATES[-1]
+
+
+# DNS через VPN (vpn/dns_server): в списке окна — только эти; вручную — любой адрес вида
+# 1.2.3.4, udp://, tcp://, tls:// (DoT), https://.../dns-query (DoH), quic://, h3://
+DNS_PRESETS = ["1.1.1.1", "1.0.0.1", "8.8.8.8",
+               "https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query",
+               "https://8.8.8.8/dns-query",
+               "tls://1.1.1.1", "tls://1.0.0.1", "tls://8.8.8.8"]
+DNS_SCHEMES = {"udp": ("udp", 53), "tcp": ("tcp", 53), "tls": ("tls", 853),
+               "https": ("https", 443), "quic": ("quic", 853), "h3": ("h3", 443)}
+_HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_dns(text: str) -> dict:
+    """Адрес DNS → {"type", "server", "server_port"[, "path"]} в виде sing-box. ValueError —
+    адрес записан не так (текст ошибки — для окна)."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("DNS не указан")
+    scheme, rest = (text.split("://", 1) if "://" in text else ("udp", text))
+    scheme = scheme.lower()
+    if scheme not in DNS_SCHEMES:
+        raise ValueError(f"DNS: неизвестный вид «{scheme}://» — можно udp, tcp, tls, https, "
+                         "quic, h3")
+    kind, default_port = DNS_SCHEMES[scheme]
+    parsed = urllib.parse.urlsplit("//" + rest)
+    host = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port or default_port
+    except ValueError:
+        raise ValueError("DNS: порт — число от 1 до 65535") from None
+    if not host or not (_is_ip(host) or _HOST_RE.match(host)):
+        raise ValueError(f"DNS: «{text}» — нужен IP-адрес или имя сервера")
+    path = parsed.path
+    if kind in ("https", "h3"):
+        result = {"type": kind, "server": host, "server_port": port,
+                  "path": path or "/dns-query"}
+    else:
+        if path not in ("", "/") or parsed.query:
+            raise ValueError(f"DNS: у {scheme}:// не бывает пути — только адрес и порт")
+        result = {"type": kind, "server": host, "server_port": port}
+    return result
+
+
+def dns_servers(text: str, tag: str, net: str = "udp", detour: str = "proxy") -> list[dict]:
+    """Сервер DNS sing-box (через туннель) и, если он задан именем, сервер для этого имени.
+    net — tcp, когда весь UDP заблокирован: обычный DNS переходит на TCP, QUIC — ошибка."""
+    server = parse_dns(text)
+    if net == "tcp" and server["type"] == "udp":
+        server["type"] = "tcp"
+    if net == "tcp" and server["type"] in ("quic", "h3"):
+        raise ValueError("DNS по QUIC и HTTP/3 идёт по UDP, а в профиле маршрутизации весь UDP "
+                         "заблокирован — выберите tls:// или https://")
+    server = {"tag": tag, **server, "detour": detour}
+    result = [server]
+    if not _is_ip(server["server"]):
+        result.append({"type": net, "tag": tag + "-boot", "server": "1.1.1.1",
+                       "detour": detour})
+        server["domain_resolver"] = tag + "-boot"
+    return result
+
+
 SEARCH = [r"%ProgramFiles%\sing-box", r"%ProgramFiles%\FlyFrogLLC\Happ\tun",
           r"%LOCALAPPDATA%\Programs\sing-box"]
 
@@ -62,7 +135,7 @@ def find_singbox() -> str:
 def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
                  direct_apps: list[str] | None = None, block_quic: bool = False,
                  block_udp: bool = False, dns_server: str = "1.1.1.1",
-                 windows_dns: dict | None = None) -> dict:
+                 windows_dns: dict | None = None, strict_route: bool = True) -> dict:
     """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray).
 
     xray_exe — полный путь: мимо туннеля пропускается только этот файл (не любой xray.exe).
@@ -76,16 +149,17 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
     direct_apps — программы (полные пути), которые идут напрямую, мимо VPN.
     block_quic — UDP 443 отклоняется (браузер переходит на TCP); block_udp — весь UDP
     отклоняется, а DNS через сервер идёт по TCP (иначе он тоже был бы UDP).
+    dns_server — адрес DNS через туннель (parse_dns: 1.1.1.1, tls://, https://...).
+    strict_route — строгая маршрутизация sing-box (vpn/strict_route): фильтры WFP не дают
+    программам обойти туннель и отправить DNS мимо него; без неё совместимее с другими
+    программами, работающими с сетью (виртуальные машины, локальные серверы).
     windows_dns — DNS, заданный вручную в Windows 11 (vpn/windns.py): A-запросы — на его
     сервер IPv4, AAAA — на сервер IPv6 (тоже через туннель); dns_server — для остального."""
     net = "tcp" if block_udp else "udp"
     windows_dns = windows_dns or {}
-    servers = [
-        # обычный DNS по UDP через сервер: DoH держит одно долгое соединение HTTP/2,
-        # оно через туннель обрывается, и все запросы на нём разом падают
-        {"type": net, "tag": "dns-remote", "server": dns_server, "detour": "proxy"},
-        {"type": "local", "tag": "dns-local"},
-    ]
+    # по умолчанию — обычный DNS по UDP через сервер: DoH держит одно долгое соединение
+    # HTTP/2, через туннель оно бывает обрывается, и все запросы на нём разом падают
+    servers = [*dns_servers(dns_server, "dns-remote", net), {"type": "local", "tag": "dns-local"}]
     dns_rules = []
     for family, query, tag in (("v4", "A", "dns-win4"), ("v6", "AAAA", "dns-win6")):
         chosen = (windows_dns.get(family) or [None])[0]
@@ -109,7 +183,7 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
         "inbounds": [{
             "type": "tun", "tag": "tun-in", "interface_name": TUN_NAME,
             "address": address, "mtu": 9000,
-            "auto_route": True, "strict_route": True,
+            "auto_route": True, "strict_route": bool(strict_route),
             "route_exclude_address": ["127.0.0.0/8", "255.255.255.255/32", "::1/128"],
         }],
         "outbounds": [

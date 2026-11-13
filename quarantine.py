@@ -12,6 +12,25 @@ from scanner.signature import describe, inspect_signature
 QUARANTINE_DIR = Path("quarantine_data").resolve()
 SIGNATURES_FILE = Path("signatures/hashes.txt")
 
+class NeedAdmin(PermissionError):
+    """Папка карантина закрыта от записи (установленная программа, с 1.0.0), а программа
+    запущена без прав администратора."""
+
+
+NEED_ADMIN_TEXT = ("нужны права администратора: папка карантина закрыта от записи, а программа "
+                   "запущена без них. Перезапустите её от имени администратора")
+
+
+def _check_writable() -> None:
+    QUARANTINE_DIR.mkdir(exist_ok=True)
+    probe = QUARANTINE_DIR / f".probe-{uuid.uuid4().hex[:8]}"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+    except PermissionError:
+        raise NeedAdmin(NEED_ADMIN_TEXT) from None
+
+
 STATUS_QUARANTINED = "quarantined"
 STATUS_RESTORED = "restored"
 STATUS_DELETED = "deleted"
@@ -111,8 +130,9 @@ def add_hash_to_signatures(sha256: str) -> bool:
 
 
 def quarantine_file(path: Path, reason: str) -> str:
-    """Перемещает файл в карантин и возвращает его идентификатор."""
-    QUARANTINE_DIR.mkdir(exist_ok=True)
+    """Перемещает файл в карантин и возвращает его идентификатор. NeedAdmin — нет прав на
+    папку карантина; PermissionError — файл занят."""
+    _check_writable()
     path = Path(path).resolve()
 
     # сначала подпись, потом словарь: переменная должна существовать до его создания

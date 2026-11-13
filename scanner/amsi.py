@@ -341,6 +341,8 @@ def dll_sources(bin_dir: Path = BIN_DIR) -> dict[int, Path]:
 
 def install_dir() -> Path:
     import trustseal
+    if trustseal.is_admin():
+        trustseal.ensure_root()  # корень закрыт от записи до того, как туда лягут библиотеки
     return trustseal.protected_dir() / "amsi"
 
 

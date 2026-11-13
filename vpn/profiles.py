@@ -105,6 +105,12 @@ def import_file(path: str) -> Profile:
     return from_text(p.stem, p.read_text(encoding="utf-8", errors="replace"), p.name)
 
 
+def unique_name(name: str, names) -> str:
+    """Одинаковые имена профилей VPN: «Имя», «Имя (1)», «Имя (2)»..."""
+    from vpn.routing import unique_name as unique
+    return unique(name, names)
+
+
 def demo_profile() -> Profile:
     return Profile(name="Демо-сервер", kind="demo", server="demo.example:51820")
 

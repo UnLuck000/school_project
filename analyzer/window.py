@@ -18,6 +18,7 @@ from scanner.hashing import load_all_signatures
 from scanner.whitelist import trusted_hashes
 
 from analyzer import fileops
+from quarantine import NeedAdmin
 from ui.widgets import make_tree
 from analyzer.codeview import CodeTab
 
@@ -398,6 +399,9 @@ class FileView(QWidget):
             return
         try:
             fileops.quarantine(str(path), "Сканирование файла: " + r.verdict[:80])
+        except NeedAdmin as e:
+            QMessageBox.critical(self, "Карантин", f"Не удалось: {e}.")
+            return
         except PermissionError:
             QMessageBox.critical(self, "Карантин",
                                  "Файл занят: вероятно, программа запущена. "

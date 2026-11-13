@@ -222,26 +222,56 @@ def add_local_inbound(config: dict, kind: str, port: int) -> None:
                                    "protocol": "http", "settings": {}})
 
 
-def options_from_settings() -> dict:
-    keys = ("route_ru", "block_ads", "mux", "fragment", "block_quic", "block_udp")
-    options = {key: bool(_cfg(f"vpn/{key}", False)) for key in keys}
-    for kind in ("direct", "proxy", "block"):
-        options[f"rules_{kind}"] = [line.strip() for line in
-                                    str(_cfg(f"vpn/rules_{kind}", "") or "").splitlines()
-                                    if line.strip() and not line.strip().startswith("#")]
+def options_from_settings(mode: str = "proxy", log=None, xray_exe: str = "") -> dict:
+    """Настройки для apply_options: выбранный профиль маршрутизации (vpn/routing.py) и
+    настройки клиента (Mux, фрагментация, подменённые сертификаты, DNS для WARP).
+    mode — какие входящие есть в конфигурации: singbox (TUN sing-box → socks-in), tun
+    (TUN Xray), proxy, local. xray_exe — для папки geo-файлов профиля (options["assets"])."""
+    from vpn import routing
+    profile = routing.active()
+    options = routing.options(profile, log)
+    options["profile"] = profile.name
+    for key in ("mux", "fragment"):
+        options[key] = bool(_cfg(f"vpn/{key}", False))
     options["cert_blocked"] = [h for h in str(_cfg("vpn/cert_blocked", "") or "").splitlines()
                                if h.strip()]
+    options["mode"] = mode
+    options["ip_mode"] = str(_cfg("vpn/ip_mode", "ipv4") or "ipv4")
+    options["dns"] = str(_cfg("vpn/dns_server", "1.1.1.1") or "1.1.1.1")
+    options["assets"] = routing.assets_dir(profile, Path(xray_exe).parent) if xray_exe else ""
     return options
 
 
-def split_rule_entries(entries: list[str]) -> tuple[list[str], list[str]]:
-    """Свои правила: строки → (домены, адреса). Адрес — IP, сеть CIDR или geoip:...;
-    домен — имя (как domain:, вместе с поддоменами), full:, keyword:, regexp:, geosite:..."""
+DOMAIN_PREFIXES = ("domain", "full", "keyword", "regexp", "geosite", "dotless", "ext")
+
+
+def domain_entry(entry: str) -> str:
+    """Строка домена в виде Xray: с префиксом (domain:, full:, ...) как есть, иначе domain:."""
+    entry = entry.strip()
+    low = entry.lower()
+    if ":" in entry and low.split(":", 1)[0] in DOMAIN_PREFIXES:
+        prefix, rest = entry.split(":", 1)
+        return prefix.lower() + ":" + rest
+    return "domain:" + entry.strip(".").lstrip("*.")
+
+
+def ip_entry(entry: str) -> str:
+    low = entry.strip().lower()
+    return low if low.startswith(("geoip:", "ext:")) else entry.strip()
+
+
+def split_rule_entries(entries: list[str], ip_files=()) -> tuple[list[str], list[str]]:
+    """Свои правила: строки → (домены, адреса). Адрес — IP, сеть CIDR, geoip:... или
+    ext:файл.dat:метка, если файл — geoip (ip_files: имена строчными); домен — имя (как
+    domain:, вместе с поддоменами), full:, keyword:, regexp:, geosite:, ext:..."""
     domains, ips = [], []
     for entry in entries:
         low = entry.lower()
         if low.startswith("geoip:"):
             ips.append(low)
+            continue
+        if low.startswith("ext:") and low.split(":")[1] in ip_files:
+            ips.append(entry)
             continue
         try:
             ipaddress.ip_network(entry, strict=False)
@@ -249,16 +279,59 @@ def split_rule_entries(entries: list[str]) -> tuple[list[str], list[str]]:
             continue
         except ValueError:
             pass
-        if ":" in entry and low.split(":", 1)[0] in ("domain", "full", "keyword", "regexp",
-                                                     "geosite", "dotless", "ext"):
-            domains.append(entry)
-        else:
-            domains.append("domain:" + entry.strip(".").lstrip("*."))
+        domains.append(domain_entry(entry))
     return domains, ips
 
 
-def _rules_for(entries: list[str], tag: str) -> list[dict]:
-    domains, ips = split_rule_entries(entries)
+# входящие для правил «Дополнительно»: имя в профиле → метки входящих в режиме подключения
+INBOUND_TAGS = {"tun": {"singbox": ["socks-in"], "tun": ["tun-in"]},
+                "proxy": {"proxy": ["socks-in", "http-in"]}}
+
+
+def inbound_tags(name: str, mode: str) -> list[str]:
+    if name == "local-socks":
+        return [LOCAL_SOCKS_TAG]
+    if name == "local-http":
+        return [LOCAL_HTTP_TAG]
+    return INBOUND_TAGS.get(name, {}).get(mode, [])
+
+
+def advanced_rule(rule: dict, mode: str, tunnel: str = "proxy", ip_files=()) -> dict | None:
+    """Правило «Дополнительно» → правило маршрутизации Xray (условия — через «И»).
+    None — правило выключено или его входящих в этом режиме нет (без проверки входящего
+    оно поймало бы весь трафик)."""
+    if rule.get("enabled") is False:
+        return None
+    out: dict = {"type": "field"}
+    if rule.get("inbound"):
+        tags = sorted({t for name in rule["inbound"] for t in inbound_tags(name, mode)})
+        if not tags:
+            return None
+        out["inboundTag"] = tags
+    domains = [domain_entry(d) for d in rule.get("domain") or [] if d.strip()]
+    if domains:
+        out["domain"] = domains
+    ips = [ip_entry(i) for i in rule.get("ip") or [] if i.strip()]
+    if ips:
+        out["ip"] = ips
+    if rule.get("port"):
+        out["port"] = str(rule["port"])
+    if rule.get("source_port"):
+        out["sourcePort"] = str(rule["source_port"])
+    if rule.get("network"):
+        out["network"] = rule["network"]
+    if rule.get("protocol"):
+        out["protocol"] = list(rule["protocol"])
+    sources = [ip_entry(s) for s in rule.get("source") or [] if s.strip()]
+    if sources:
+        out["source"] = sources
+    out["outboundTag"] = {"proxy": tunnel, "vpn": "proxy", "direct": "direct",
+                          "block": "block"}.get(rule.get("outbound"), tunnel)
+    return out
+
+
+def _rules_for(entries: list[str], tag: str, ip_files=()) -> list[dict]:
+    domains, ips = split_rule_entries(entries, ip_files)
     rules = []
     if domains:
         rules.append({"type": "field", "domain": domains, "outboundTag": tag})
@@ -268,29 +341,44 @@ def _rules_for(entries: list[str], tag: str) -> list[dict]:
 
 
 def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
-    """Маршрутизация, блокировки, Mux и фрагментация в готовой конфигурации Xray.
+    """Маршрутизация, блокировки, WARP, Mux и фрагментация в готовой конфигурации Xray.
 
-    Порядок правил: сертификат подменён (cert_blocked) и свои «блокировать» → свои «через VPN»
-    → свои «напрямую» → реклама → QUIC/UDP → российские сайты напрямую → остальное через VPN.
+    Порядок правил: DNS самого Xray (для WARP) → сертификат подменён (cert_blocked) →
+    «Дополнительно» (advanced, по порядку) → свои «Блокировать» → «Туннель» → «Обход» →
+    реклама и AdBlock → QUIC/UDP → российские сайты напрямую → остальное в туннель.
     • свои правила (rules_block/proxy/direct): домены (domain:, full:, keyword:, regexp:,
-      geosite:...) и адреса (IP, CIDR, geoip:...);
+      geosite:, ext:файл:метка...) и адреса (IP, CIDR, geoip:..., ext: файла geoip);
     • route_ru — geosite:category-ru, зоны .ru/.рф/.su, geoip:ru напрямую;
-    • block_ads — geosite:category-ads-all;
+    • block_ads — geosite:category-ads-all; adblock — домены списка AdBlock;
     • block_quic — UDP на порт 443 (браузеры переходят на TCP), block_udp — весь UDP: по UDP
       внутри VLESS VPN чаще распознают и режут;
+    • warp — WireGuard Cloudflare (vpn/warp.py): over_vpn — «туннель» ведёт в warp, а warp
+      подключается через VPN; under_vpn — сам VPN подключается через warp;
     • домен для правил — из трафика (sniffing routeOnly), сам Xray адреса не спрашивает (AsIs);
     • mux — не с flow=xtls-rprx-vision; fragment — ClientHello до сервера кусочками."""
     say = log or (lambda text: None)
     rules = config.setdefault("routing", {"domainStrategy": "AsIs", "rules": []})["rules"]
+    w = options.get("warp")
+    tunnel = "warp" if w and w.get("chain") == "over_vpn" else "proxy"
+    ip_files = options.get("ip_files") or ()
     head = []
+    if w:  # WireGuard до сервера WARP по имени — DNS Xray, и тот только через VPN
+        head.append({"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "proxy"})
     if options.get("cert_blocked"):
         head.append({"type": "field", "domain": ["full:" + h for h in options["cert_blocked"]],
                      "outboundTag": "block"})
-    head += _rules_for(options.get("rules_block", []), "block")
-    head += _rules_for(options.get("rules_proxy", []), "proxy")
-    head += _rules_for(options.get("rules_direct", []), "direct")
+    for rule in options.get("advanced", []):
+        converted = advanced_rule(rule, options.get("mode", ""), tunnel, ip_files)
+        if converted is not None:
+            head.append(converted)
+    head += _rules_for(options.get("rules_block", []), "block", ip_files)
+    head += _rules_for(options.get("rules_proxy", []), tunnel, ip_files)
+    head += _rules_for(options.get("rules_direct", []), "direct", ip_files)
     if options.get("block_ads"):
         head.append({"type": "field", "domain": list(ADS), "outboundTag": "block"})
+    if options.get("adblock"):
+        head.append({"type": "field", "domain": ["domain:" + d for d in options["adblock"]],
+                     "outboundTag": "block"})
     if options.get("block_udp"):
         head.append({"type": "field", "network": "udp", "outboundTag": "block"})
     elif options.get("block_quic"):
@@ -299,7 +387,7 @@ def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
     if options.get("route_ru"):
         rules.append({"type": "field", "domain": list(RU_DOMAINS), "outboundTag": "direct"})
         rules.append({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})
-    if any(r.get("domain") for r in rules):
+    if any(r.get("domain") or r.get("protocol") for r in rules):
         for inbound in config["inbounds"]:  # домен для правил — из трафика, без своего DNS
             if inbound["protocol"] in ("socks", "http", "mixed"):
                 inbound["sniffing"] = {"enabled": True, "routeOnly": True,
@@ -311,11 +399,46 @@ def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
         else:
             proxy["mux"] = dict(MUX)
     if options.get("fragment"):
-        config["outbounds"].append({"tag": "fragment", "protocol": "freedom",
-                                    "settings": {"fragment": dict(FRAGMENT)}})
-        proxy.setdefault("streamSettings", {}).setdefault("sockopt", {})["dialerProxy"] = \
-            "fragment"
+        if w and w.get("chain") == "under_vpn":
+            say("Фрагментация не включена: соединение с сервером VPN идёт через WARP")
+        else:
+            config["outbounds"].append({"tag": "fragment", "protocol": "freedom",
+                                        "settings": {"fragment": dict(FRAGMENT)}})
+            proxy.setdefault("streamSettings", {}).setdefault("sockopt", {})["dialerProxy"] = \
+                "fragment"
+    if w:
+        _add_warp(config, proxy, w, options, say)
     return config
+
+
+def _xray_dns(text: str) -> str:
+    """DNS для самого Xray (WARP): DoH — как есть, tls:// и прочее — тот же адрес по UDP."""
+    text = (text or "").strip()
+    if text.lower().startswith("https://"):
+        return text
+    host = urllib.parse.urlsplit(text if "://" in text else "//" + text).hostname or ""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        return "1.1.1.1"
+
+
+def _add_warp(config: dict, proxy: dict, w: dict, options: dict, say) -> None:
+    from vpn import warp
+    interface = options.get("interface", "")
+    extra = warp.outbounds(w, interface, say)
+    if w.get("chain") == "over_vpn":
+        config["outbounds"].insert(0, extra[0])  # первое исходящее — для всего остального
+        config["outbounds"] += extra[1:]
+        say("WARP: VPN → WARP, сайты видят адрес Cloudflare")
+    else:
+        config["outbounds"] += extra
+        proxy.setdefault("streamSettings", {}).setdefault("sockopt", {})["dialerProxy"] = "warp"
+        say("WARP: WARP → VPN, провайдер видит только обмен с Cloudflare")
+    ipv6 = options.get("ip_mode", "ipv4") != "ipv4" and bool(w.get("address_v6"))
+    config["dns"] = {"servers": [_xray_dns(options.get("dns", ""))], "tag": "dns-internal",
+                     "queryStrategy": "UseIP" if ipv6 else "UseIPv4"}
 
 
 def server_address(host: str, ip_mode: str = "ipv4") -> str:
@@ -341,6 +464,7 @@ def server_address(host: str, ip_mode: str = "ipv4") -> str:
 
 def build_config(v: dict, mode: str, interface: str = "", options: dict | None = None,
                  log=None) -> dict:
+    """Конфигурация Xray: mode tun — входящее TUN, иначе SOCKS и HTTP на 127.0.0.1."""
     if mode == "tun":
         inbounds = [{"tag": "tun-in", "protocol": "tun",
                      "settings": {"name": TUN_NAME, "MTU": 1500}}]

@@ -38,8 +38,12 @@ DEFAULTS = {
     "vpn/cert_blocked": "",         # сайты с подменённым сертификатом (до разрешения)
     "vpn/cert_watch": True,         # проверять сертификаты сайтов во время подключения
     "vpn/last_profile": "",         # последний подключённый профиль (выбирается при открытии)
+    # vpn/route_ru, block_ads, block_quic, block_udp, rules_* — прежние настройки маршрутизации:
+    # с профилями (vpn/routing.py) только переносятся в Default при первом запуске
     "vpn/route_ru": True,           # российские сайты напрямую (vpn/xray.apply_options)
     "vpn/block_ads": False,         # реклама и трекеры блокируются
+    "vpn/routing_profile": "default",  # выбранный профиль маршрутизации (vpn/routing.py)
+    "vpn/strict_route": True,       # строгая маршрутизация sing-box (TUN): фильтры WFP
     "vpn/mux": False,               # Mux (не с flow=xtls-rprx-vision)
     "vpn/fragment": False,          # фрагментация ClientHello до сервера (обход DPI)
     "vpn/direct_apps": "",          # программы напрямую, мимо VPN (пути, по строке; TUN)

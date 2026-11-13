@@ -9,7 +9,12 @@ import yara
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_FILE = BASE_DIR / "logs" / "yara_errors.log"
-CACHE_DIR = BASE_DIR / "cache"
+# Скомпилированные правила загружаются без проверки содержимого: подменённый файл (пустой
+# набор правил) молча выключил бы YARA. Поэтому они лежат в %ProgramData%\StretchBIT\yara
+# (trustseal.protected_subdir: запись — только администраторам, читать могут все); без прав
+# администратора правила компилируются в памяти и не сохраняются. Тесты подменяют CACHE_DIR.
+CACHE_DIR: Path | None = None
+OLD_CACHE_DIR = BASE_DIR / "cache"  # прежнее место (до 1.0.0): папка, открытая для записи
 MAX_FILE_SIZE = 100 * 1024 * 1024  # файлы больше 100 МБ пропускаем
 MAX_FIXES = 60  # сколько исправлений пробовать в одном файле правил
 RULE_RE = re.compile(r"^\s*(?:(?:private|global)\s+)*rule\s+[A-Za-z_]\w*", re.MULTILINE)
@@ -220,10 +225,23 @@ def _fingerprint(files: list[Path]) -> str:
     return h.hexdigest()
 
 
-def _cache_paths(dirs: list[Path], skip: str, purpose: str = "file") -> tuple[Path, Path]:
+def _cache_dir(write: bool = False) -> Path | None:
+    if CACHE_DIR is not None:
+        return CACHE_DIR
+    import trustseal
+    if write:
+        return trustseal.protected_subdir("yara")
+    return trustseal.protected_dir() / "yara" if trustseal.enabled() else None
+
+
+def _cache_paths(dirs: list[Path], skip: str, purpose: str = "file",
+                 folder: Path | None = None) -> tuple[Path, Path] | None:
+    folder = folder or _cache_dir()
+    if folder is None:
+        return None
     key = "|".join(str(d.resolve()).lower() for d in dirs) + "|" + skip + "|" + purpose
     tag = hashlib.sha256(key.encode()).hexdigest()[:12]
-    return CACHE_DIR / f"yara_{tag}.bin", CACHE_DIR / f"yara_{tag}.json"
+    return folder / f"yara_{tag}.bin", folder / f"yara_{tag}.json"
 
 
 def rule_files(dirs, skip: str = "") -> list[Path]:
@@ -251,8 +269,9 @@ def load_rules(rules_dir, use_cache: bool = True, skip: str = "", purpose: str =
     if not files:
         return None, []
     fingerprint = _fingerprint(files) + FILTER_VERSION
-    bin_path, meta_path = _cache_paths(dirs, skip, purpose)
-    if use_cache:
+    paths = _cache_paths(dirs, skip, purpose)
+    if use_cache and paths is not None:
+        bin_path, meta_path = paths
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("fingerprint") == fingerprint:
@@ -308,10 +327,15 @@ def load_rules(rules_dir, use_cache: bool = True, skip: str = "", purpose: str =
         return None, errors
     rules = yara.compile(sources=sources, externals=externals)
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        rules.save(str(bin_path))
-        meta_path.write_text(json.dumps({"fingerprint": fingerprint, "errors": errors},
-                                        ensure_ascii=False), encoding="utf-8")
+        folder = _cache_dir(write=True)
+        if folder is not None:  # без прав администратора — только в памяти
+            folder.mkdir(parents=True, exist_ok=True)
+            bin_path, meta_path = _cache_paths(dirs, skip, purpose, folder)
+            rules.save(str(bin_path))
+            meta_path.write_text(json.dumps({"fingerprint": fingerprint, "errors": errors},
+                                            ensure_ascii=False), encoding="utf-8")
+            for old in OLD_CACHE_DIR.glob("yara_*.*"):  # прежнее открытое место
+                old.unlink(missing_ok=True)
     except (OSError, yara.Error):
         pass  # без кэша просто медленнее
     _remember(rules, fingerprint)

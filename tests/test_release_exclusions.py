@@ -111,9 +111,9 @@ def test_watchdog_ignores_reads():
 
 
 def test_vpn_builtin_rules_listed():
-    from ui import settings as cfg
+    from vpn import routing
     from vpn.window import builtin_rules
     rules = builtin_rules()
     assert any("geoip:private" in line for line in rules["rules_direct"])
-    if cfg.get("vpn/route_ru"):
+    if routing.active().route_ru:
         assert "geosite:category-ru" in rules["rules_direct"]

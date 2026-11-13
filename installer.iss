@@ -1,8 +1,11 @@
 ; Установщик StretchBIT (Inno Setup 6). Собирается из build_release.py --installer:
 ;   ISCC installer.iss /DEdition=release|test /DAppVersion=... /DSourceDir=dist\StretchBIT
-; Релизная ставится в C:\Utils\SBIT, тестовая — в C:\Utils\SBIT-test (свои AppId: не мешают
-; друг другу). Нужны права администратора (с 1.0.0): папка программы закрывается от записи. Поверх прежней версии: заменяются только файлы программы — журналы, кэш и
-; карантин в папке и настройки в %APPDATA%\StretchBitConfiguration[-test] остаются.
+; Релизная ставится в C:\Program Files\StretchBIT, тестовая — в C:\Program Files\StretchBIT-test
+; (свои AppId: не мешают друг другу). Нужны права администратора: папка программы закрыта от
+; записи. Поверх прежней версии: заменяются только файлы программы — журналы, кэш и карантин
+; в папке и настройки в %APPDATA%\StretchBitConfiguration[-test] остаются. Прежнее место
+; (C:\Utils\SBIT[-test], до 1.0.0 включительно) переносится: карантин, журналы и отчёты —
+; в новую папку, старая копия удаляется своим «--uninstall --silent» и папкой целиком.
 ; Удаление: StretchBIT.exe --uninstall --silent [--wipe] (uninstall.py: сеть после VPN,
 ; брандмауэр, ETW, ловушки, автозапуск, меню Проводника), затем Inno удаляет папку целиком.
 ; Флажок «Удалить все настройки пользователя» — ещё и папку конфигурации (userdata.py).
@@ -24,12 +27,14 @@
 #if Edition == "test"
   #define AppKey "StretchBIT-test"
   #define DisplayName "StretchBIT (тест)"
-  #define InstallDir "C:\Utils\SBIT-test"
+  #define InstallDir "{autopf}\StretchBIT-test"
+  #define OldDir "C:\Utils\SBIT-test"
   #define ConfigName "StretchBitConfiguration-test"
 #else
   #define AppKey "StretchBIT"
   #define DisplayName "StretchBIT"
-  #define InstallDir "C:\Utils\SBIT"
+  #define InstallDir "{autopf}\StretchBIT"
+  #define OldDir "C:\Utils\SBIT"
   #define ConfigName "StretchBitConfiguration"
 #endif
 
@@ -41,13 +46,18 @@ AppVerName={#DisplayName} {#AppVersion}
 AppPublisher=StretchBIT
 DefaultDirName={#InstallDir}
 DisableDirPage=yes
+; установка 1.0.0 в C:\Utils не должна удерживать новую там же: переезд — PrepareToInstall
+UsePreviousAppDir=no
 DisableProgramGroupPage=yes
 DisableReadyPage=no
 ; Установка — с правами администратора: программа работает с ними же (автозапуск — задание
 ; с наивысшими правами), а папку, куда может писать любая программа пользователя, можно
 ; было подменить (положить свою DLL — и получить права администратора при следующем входе).
-; После копирования файлов права папки закрываются ([Run], icacls): код программы
-; пользователям только на чтение, запись — лишь в папки данных ([Dirs]).
+; После копирования файлов права папки закрываются ([Run], icacls): пользователям только
+; чтение, запись — лишь в журналы, отчёты и кэш ([Dirs]). Базы (signatures) и карантин
+; пишет только программа с правами администратора: иначе вредонос без прав мог бы дописать
+; себя в исключения или стереть базы. Скомпилированные правила YARA — в
+; %ProgramData%\StretchBIT\yara (scanner/yara_engine, trustseal), не в открытом кэше.
 PrivilegesRequired=admin
 OutputDir={#OutputDir}
 OutputBaseFilename={#AppKey}-{#AppVersion}-setup
@@ -70,7 +80,8 @@ Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "desktopicon"; Description: "Ярлык на рабочем столе"; GroupDescription: "Ярлыки:"
 
 [Dirs]
-; папки данных: сюда программа пишет и без прав администратора (отказ в окне UAC)
+; logs, cache, reports — сюда программа пишет и без прав администратора (отказ в окне UAC);
+; quarantine_data и signatures — только с правами (запись для пользователей не выдаётся)
 Name: "{app}\app\logs"
 Name: "{app}\app\cache"
 Name: "{app}\app\reports"
@@ -90,7 +101,7 @@ Name: "{autoprograms}\Удалить {#DisplayName}"; Filename: "{uninstallexe}"
 
 [Run]
 ; владелец — «Администраторы» (файлы прежней установки без прав принадлежали пользователю, а
-; владелец может вернуть себе запись); наследование от C:\Utils убрано; S-1-5-32-544 —
+; владелец может вернуть себе запись); наследуемые права сброшены; S-1-5-32-544 —
 ; администраторы, S-1-5-18 — система, S-1-5-32-545 — пользователи
 Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /setowner *S-1-5-32-544 /T /C /Q"; Flags: runhidden; StatusMsg: "Закрываю папку программы от изменений..."
 Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /reset /T /C /Q"; Flags: runhidden
@@ -98,8 +109,6 @@ Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /inheritance:r /grant:r *S-
 Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\logs"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
 Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\cache"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
 Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\reports"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
-Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\quarantine_data"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
-Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\signatures"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
 #if Edition == "test"
 Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\diag"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
 #endif
@@ -131,6 +140,41 @@ begin
   end;
 end;
 
+{ копия папки данных (robocopy: коды 0–7 — успех) }
+procedure CopyData(const Src, Dst: String);
+var
+  Code: Integer;
+begin
+  if DirExists(Src) then
+    Exec(ExpandConstant('{sys}\robocopy.exe'),
+         '"' + Src + '" "' + Dst + '" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP', '', SW_HIDE,
+         ewWaitUntilTerminated, Code);
+end;
+
+{ прежнее место установки (C:\Utils\SBIT): данные — в новую папку, старая копия убирает за
+  собой (сеть после VPN, брандмауэр, ETW, автозапуск, меню Проводника, провайдер AMSI) — её
+  же «--uninstall --silent», настройки в AppData остаются; затем папка удаляется }
+procedure MoveOldInstall();
+var
+  Old, App: String;
+  Code: Integer;
+begin
+  Old := '{#OldDir}';
+  App := ExpandConstant('{app}');
+  if (not DirExists(Old + '\app')) or (CompareText(Old, App) = 0) then
+    exit;
+  ForceDirectories(Old + '\app\cache');
+  SaveStringToFile(Old + '\app\cache\no_restart', 'setup', False);
+  ForceDirectories(App + '\app');
+  CopyData(Old + '\app\quarantine_data', App + '\app\quarantine_data');
+  CopyData(Old + '\app\logs', App + '\app\logs');
+  CopyData(Old + '\app\reports', App + '\app\reports');
+  if FileExists(Old + '\{#ExeName}') then
+    Exec(Old + '\{#ExeName}', '--uninstall --silent', Old, SW_HIDE, ewWaitUntilTerminated, Code);
+  DelTree(Old, True, True, True);
+  RemoveDir(ExtractFileDir(Old));  { C:\Utils — только если пустая }
+end;
+
 { перед заменой файлов программу закроют: её сторож (selfguard.py) не должен вернуть её }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
@@ -140,6 +184,7 @@ begin
     ForceDirectories(ExpandConstant('{app}\app\cache'));
     SaveStringToFile(ExpandConstant('{app}\app\cache\no_restart'), 'setup', False);
   end;
+  MoveOldInstall();
 end;
 
 { окно перед удалением: флажок «Удалить все настройки пользователя» }
@@ -168,7 +213,8 @@ begin
     Text.WordWrap := True;
     Text.Height := ScaleY(64);
     Text.Caption := 'Программа будет закрыта, её автозапуск и пункт меню Проводника убраны, ' +
-      'настройки сети после VPN возвращены. Папка {#InstallDir} будет удалена целиком — ' +
+      'настройки сети после VPN возвращены. Папка ' + ExpandConstant('{app}') +
+      ' будет удалена целиком — ' +
       'вместе с карантином, журналами и отчётами.';
     Box := TNewCheckBox.Create(Form);
     Box.Parent := Form;

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from analyzer import fileops
+from quarantine import NeedAdmin
 from processmanager.colors import text_color
 from processmanager.memscan import get_rules
 from scanner import pool as scan_pool
@@ -564,6 +565,8 @@ class FolderView(QWidget):
         for path in files:
             try:
                 fileops.quarantine(path, "Сканирование папки: перемещено пользователем")
+            except NeedAdmin as e:
+                errors.append(f"{os.path.basename(path)}: {e}")
             except PermissionError:
                 errors.append(f"{os.path.basename(path)}: файл занят (программа запущена)")
             except OSError as e:

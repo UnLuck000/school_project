@@ -21,6 +21,7 @@ from scanner.hashing import load_all_signatures
 from scanner.whitelist import trusted_hashes
 from ui.textutil import elide
 from ui.widgets import SortItem, make_tree
+from quarantine import NeedAdmin
 
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 COLUMNS = ["Риск", "Тип", "Имя", "Команда", "Подпись", "Место", "Замечания"]
@@ -523,6 +524,9 @@ class AutorunsWindow(QMainWindow):
         for e in entries:
             try:
                 message = actions.quarantine_target(e)
+            except NeedAdmin as exc:
+                errors.append(f"{e.exe}: {exc}")
+                continue
             except PermissionError:
                 errors.append(f"{e.exe}: файл занят (программа запущена, завершите процесс)")
                 continue

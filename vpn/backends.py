@@ -53,6 +53,34 @@ def tunnel_name(name: str) -> str:
     return clean or "sbit"
 
 
+def xray_env(options: dict) -> dict | None:
+    """Окружение Xray: у профиля маршрутизации свои файлы .dat — Xray ищет geo-файлы в
+    папке options["assets"] (XRAY_LOCATION_ASSET), иначе — рядом с собой."""
+    if not options.get("assets"):
+        return None
+    return {**os.environ, "XRAY_LOCATION_ASSET": options["assets"]}
+
+
+def describe_options(options: dict, apps: list[str] | None = None) -> str:
+    """«Маршрутизация: Default (российские сайты напрямую, ...)» — для журнала окна."""
+    parts = [title for key, title in (("route_ru", "российские сайты напрямую"),
+                                      ("block_ads", "реклама блокируется"),
+                                      ("mux", "Mux"), ("fragment", "фрагментация"))
+             if options.get(key)]
+    if options.get("adblock"):
+        parts.append(f"AdBlock: {len(options['adblock'])} доменов")
+    if options.get("warp"):
+        parts.append("WARP")
+    if options.get("advanced"):
+        parts.append(f"дополнительных правил: {len(options['advanced'])}")
+    if options.get("assets"):
+        parts.append("свои файлы .dat")
+    if apps:
+        parts.append(f"программ напрямую: {len(apps)}")
+    return f"Маршрутизация: {options.get('profile') or 'Default'}" + (
+        f" ({', '.join(parts)})" if parts else "")
+
+
 def add_local_proxy(config: dict, log, strict: bool = False) -> dict[str, int]:
     """Локальные прокси для программ (SOCKS5 и/или HTTP), если включены и порты свободны.
     Занятый порт — запись в журнал, VPN подключается без него; strict (режим «Только
@@ -273,6 +301,7 @@ class XrayBackend(Backend):
         self.old_proxy: dict | None = None
         self.server = ""
         self.config_path: Path | None = None
+        self.env: dict | None = None
 
     def connect(self, profile) -> None:
         self._set(CONNECTING)
@@ -298,7 +327,11 @@ class XrayBackend(Backend):
             else:
                 config = x.build_config(v, self.mode, interface)
                 self.local_ports = add_local_proxy(config, self.log)
-            x.apply_options(config, v, x.options_from_settings(), self.log)
+            opts = x.options_from_settings(self.mode, self.log, self.exe)
+            opts["interface"] = interface
+            x.apply_options(config, v, opts, self.log)
+            self.log(describe_options(opts))
+            self.env = xray_env(opts)
             self.config_path = x.write_config(config, TUNNEL_DIR)
         except (OSError, ValueError) as e:
             self._set(ERROR, f"Xray: {e}")
@@ -310,7 +343,8 @@ class XrayBackend(Backend):
         self.proc = subprocess.Popen([self.exe, "run", "-c", str(self.config_path)],
                                      cwd=str(Path(self.exe).parent), stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                                     errors="replace", creationflags=CREATE_NO_WINDOW)
+                                     errors="replace", creationflags=CREATE_NO_WINDOW,
+                                     env=self.env)
         procguard.bind(self.proc, self.log)
         threading.Thread(target=self._read, daemon=True).start()
         if self.mode == "tun":
@@ -452,8 +486,8 @@ class SingBoxBackend(Backend):
         from ui import settings as cfg
         ip_mode = str(cfg.get("vpn/ip_mode") or "ipv4")
         kill = bool(cfg.get("vpn/killswitch"))
-        opts = x.options_from_settings()
         try:
+            opts = x.options_from_settings("singbox", self.log, self.xray_exe)
             v = x.parse_vless(profile.config)
             x.ensure_free(x.SOCKS_PORT)
             # адрес сервера — заранее, пока туннеля нет: потом системный DNS идёт через
@@ -480,8 +514,9 @@ class SingBoxBackend(Backend):
                 self.log(windns.describe(win_dns))
             spath = self._write(self.sb.build_config(
                 x.SOCKS_PORT, self.xray_exe, ip_mode, apps, opts["block_quic"], opts["block_udp"],
-                str(cfg.get("vpn/dns_server") or "1.1.1.1"), win_dns), "sing-box.json")
-            self._log_options(apps)
+                str(cfg.get("vpn/dns_server") or "1.1.1.1"), win_dns,
+                strict_route=cfg.get("vpn/strict_route") is not False), "sing-box.json")
+            self.log(describe_options(opts, apps))
         except (OSError, ValueError) as e:
             self._fail(f"VLESS: {e}")
             return
@@ -491,7 +526,7 @@ class SingBoxBackend(Backend):
         self.xray_proc = subprocess.Popen(
             [self.xray_exe, "run", "-c", str(xpath)], cwd=str(Path(self.xray_exe).parent),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-            errors="replace", creationflags=CREATE_NO_WINDOW)
+            errors="replace", creationflags=CREATE_NO_WINDOW, env=xray_env(opts))
         procguard.bind(self.xray_proc, self.log)
         threading.Thread(target=self._read, args=(self.xray_proc, "Xray"), daemon=True).start()
         if not x.wait_port(x.SOCKS_PORT):
@@ -556,17 +591,6 @@ class SingBoxBackend(Backend):
         self._set(CONNECTED)
         self.log(f"Подключено: весь трафик через {self.sb.TUN_NAME} → Xray → сервер"
                  + ", " + x.IP_MODES.get(ip_mode, ip_mode))
-
-    def _log_options(self, apps: list[str]) -> None:
-        o = self.x.options_from_settings()
-        parts = [title for key, title in (("route_ru", "российские сайты напрямую"),
-                                          ("block_ads", "реклама блокируется"),
-                                          ("mux", "Mux"), ("fragment", "фрагментация"))
-                 if o.get(key)]
-        if apps:
-            parts.append(f"программ напрямую: {len(apps)}")
-        if parts:
-            self.log("Настройки: " + ", ".join(parts))
 
     def _wait_adapter(self, timeout: float = 10.0) -> bool:
         """Адаптер TUN появился и sing-box после этого жив. Адаптер создаётся раньше, чем ему

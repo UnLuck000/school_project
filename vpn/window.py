@@ -1,7 +1,9 @@
 """Окно VPN: профили, подключение, маршрутизация, проверки, настройки клиента, журнал.
 
 Профиль — в выпадающем списке сверху, большая круглая кнопка подключения, плитки состояния,
-разделы (строятся _page_*) — кнопками слева.
+разделы (строятся _page_*) — кнопками слева. Профили маршрутизации — vpn/routingwindow.py
+(карточка в «Настройках клиента»). Внешний IP проверяется сам: после подключения и раз в
+IP_INTERVAL, на плитке — только начало и конец адреса (mask_ip).
 """
 import os
 import threading
@@ -32,6 +34,8 @@ SECURITY = {"reality": "REALITY", "tls": "TLS", "none": "без шифрован
 NETWORK = {"tcp": "TCP", "raw": "TCP", "ws": "WebSocket", "grpc": "gRPC", "xhttp": "XHTTP",
            "httpupgrade": "HTTPUpgrade", "splithttp": "XHTTP"}
 CERT_INTERVAL = 600  # проверка сертификатов во время подключения, с
+IP_INTERVAL = 3 * 3600  # внешний IP во время подключения, с
+ROUTING_UPDATE = 600    # проверка ссылок профилей маршрутизации и списков AdBlock, с
 
 STYLE = """
 QFrame[card="true"] { background: palette(base); border: 1px solid palette(mid);
@@ -63,6 +67,14 @@ def _card() -> tuple[QFrame, QVBoxLayout]:
     layout.setContentsMargins(16, 14, 16, 14)
     layout.setSpacing(8)
     return card, layout
+
+
+def mask_ip(ip: str) -> str:
+    """Адрес на экране: первые 3 и последние 2 символа, остальное — «*»."""
+    ip = ip.strip()
+    if len(ip) <= 5:
+        return "*" * len(ip)
+    return ip[:3] + "*" * (len(ip) - 5) + ip[-2:]
 
 
 def _lines(key: str) -> list[str]:
@@ -106,6 +118,7 @@ class _Bridge(QObject):
     apps = Signal(object)            # список apps.App
     apps_progress = Signal(str)
     netdiag = Signal(object)         # список netdiag.Finding
+    routing = Signal(object)         # сообщения об обновлении профилей маршрутизации
 
 
 # ================================ диалоги ================================
@@ -285,62 +298,10 @@ class DirectAppsDialog(QDialog):
 
 
 def builtin_rules() -> dict[str, list[str]]:
-    """Включённые встроенные правила в виде строк своих правил (что уже есть — дописывать не
-    нужно). Строки с # — то, что записать строкой правила нельзя."""
-    from vpn import xray
-    result = {"rules_direct": [], "rules_proxy": [], "rules_block": []}
-    if cfg.get("vpn/route_ru"):
-        result["rules_direct"] += ["# российские сайты (встроенное правило)", *xray.RU_DOMAINS,
-                                   "geoip:ru"]
-    result["rules_direct"].append("geoip:private  # локальная сеть (всегда)")
-    if cfg.get("vpn/block_ads"):
-        result["rules_block"] += ["# реклама и трекеры (встроенное правило)", *xray.ADS]
-    if cfg.get("vpn/block_udp"):
-        result["rules_block"].append("# весь UDP (встроенное правило)")
-    elif cfg.get("vpn/block_quic"):
-        result["rules_block"].append("# QUIC — UDP 443 (встроенное правило)")
-    result["rules_proxy"].append("# всё, что не попало в правила, — через VPN")
-    return result
-
-
-class RulesEditor(QWidget):
-    """Свои правила: напрямую, через VPN, блокировать — по строке на правило. Над каждой
-    колонкой — включённые встроенные правила (только просмотр)."""
-
-    KINDS = (("rules_direct", "Напрямую, мимо VPN"), ("rules_proxy", "Только через VPN"),
-             ("rules_block", "Блокировать"))
-
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(_label(
-            "По одному на строку. Домен: example.com (вместе с поддоменами), full:example.com "
-            "(точно), keyword:слово, regexp:выражение, geosite:категория (например "
-            "geosite:youtube). Адрес: 1.2.3.4, 10.0.0.0/8, geoip:страна (например geoip:ru). "
-            "Строки с # — комментарии. Действуют со следующего подключения; «Блокировать» "
-            "главнее остальных, свои правила главнее встроенных.", "hint"))
-        grid = QHBoxLayout()
-        self.edits = {}
-        builtin = builtin_rules()
-        for key, title in self.KINDS:
-            box = QVBoxLayout()
-            box.addWidget(_label(title, "title"))
-            box.addWidget(_label("Встроенные (включаются в «Настройках клиента»):", "hint"))
-            fixed = QPlainTextEdit("\n".join(builtin[key]))
-            fixed.setReadOnly(True)
-            fixed.setMaximumHeight(150)
-            fixed.setToolTip("Встроенные правила: менять — галочками в «Настройках клиента»")
-            fixed.setStyleSheet("QPlainTextEdit { background: palette(alternate-base); }")
-            box.addWidget(fixed)
-            box.addWidget(_label("Свои:", "hint"))
-            edit = QPlainTextEdit(str(cfg.get(f"vpn/{key}") or ""))
-            edit.setPlaceholderText("example.com\ngeosite:youtube\n1.2.3.0/24")
-            edit.textChanged.connect(lambda k=key, e=edit: cfg.set_(f"vpn/{k}", e.toPlainText()))
-            box.addWidget(edit, 1)
-            grid.addLayout(box, 1)
-            self.edits[key] = edit
-        layout.addLayout(grid, 1)
+    """Встроенные правила выбранного профиля маршрутизации строками (см. routingwindow)."""
+    from vpn import routing
+    from vpn.routingwindow import builtin_lines
+    return builtin_lines(routing.active())
 
 
 # ================================ окно ================================
@@ -369,7 +330,12 @@ class VpnWindow(QDialog):
         self.bridge.netdiag.connect(self._on_netdiag)
         self.bridge.probes.connect(self._on_probes)
         self.bridge.cert_alarm.connect(self._on_cert_alarm)
+        self.bridge.routing.connect(self._on_routing_update)
         self._ip_text = ""
+        self._ip_backend = None   # подключение, для которого считается срок проверки IP
+        self._ip_next = 0.0
+        self._ip_busy = False
+        self._routing_next = time.monotonic() + 30  # первая проверка ссылок — через 30 с
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(0, 0, 0, 0)
         self._build()
@@ -525,6 +491,8 @@ class VpnWindow(QDialog):
                                   "включено «VPN при запуске» в настройках клиента)")
         self.chk_auto.toggled.connect(self._on_auto)
         cl.addWidget(self.chk_auto)
+        self.engine_label = _label("", "hint")
+        cl.addWidget(self.engine_label)
         layout.addWidget(card)
         # режим: галочки TUN и системного прокси; обе сняты — только локальный прокси
         card, cl = _card()
@@ -585,19 +553,6 @@ class VpnWindow(QDialog):
         self.probe_table.setMinimumHeight(240)
         cl.addWidget(self.probe_table)
         layout.addWidget(card)
-        # внешний IP
-        card, cl = _card()
-        cl.addWidget(_label("Внешний IP", "title"))
-        row = QHBoxLayout()
-        self.ip_btn = QPushButton("Проверить внешний IP")
-        self.ip_btn.clicked.connect(self._check_ip)
-        self.ip_label = QLabel("")
-        row.addWidget(self.ip_btn)
-        row.addWidget(self.ip_label, 1)
-        cl.addLayout(row)
-        self.engine_label = _label("", "hint")
-        cl.addWidget(self.engine_label)
-        layout.addWidget(card)
         layout.addStretch()
         return page
 
@@ -633,40 +588,20 @@ class VpnWindow(QDialog):
         from vpn import xray
         page = QWidget()
         layout = QVBoxLayout(page)
-        # маршрутизация (бывший раздел): встроенные правила и что в них уже есть
+        # маршрутизация: профили (vpn/routingwindow.py)
+        from vpn.routingwindow import RoutingCard
         card, cl = _card()
-        cl.addWidget(_label("Маршрутизация: встроенные правила", "title"))
-        grid = QGridLayout()
-        self.route_boxes = {}
-        for i, (key, text, tip) in enumerate((
-                ("route_ru", "Российские сайты напрямую",
-                 "Зоны .ru, .рф, .su, список российских сайтов и российские адреса — без "
-                 "сервера VPN: Госуслуги, банки, маркетплейсы."),
-                ("block_ads", "Блокировать рекламу и трекеры",
-                 "Список рекламных и следящих доменов (geosite:category-ads-all)."),
-                ("block_quic", "Блокировать QUIC (UDP 443)",
-                 "Браузеры переходят на обычный TCP. QUIC через VPN часто тормозит и его "
-                 "проще распознать."),
-                ("block_udp", "Блокировать весь UDP",
-                 "По UDP внутри VLESS VPN чаще распознают и режут. Игры, звонки и Discord "
-                 "голосом могут перестать работать. DNS через сервер пойдёт по TCP."))):
-            box = QCheckBox(text)
-            box.setToolTip(tip)
-            box.setChecked(cfg.get(f"vpn/{key}"))
-            box.toggled.connect(lambda on, k=key: self._set_option(k, on))
-            grid.addWidget(box, i // 2, i % 2)
-            self.route_boxes[key] = box
-        cl.addLayout(grid)
-        cl.addWidget(_label("Что входит во встроенные правила, видно в окне «Свои правила». "
-                            "Действуют во всех режимах: и для TUN, и для прокси.", "hint"))
+        cl.addWidget(_label("Маршрутизация", "title"))
+        cl.addWidget(_label("Профиль маршрутизации решает, что идёт через туннель, что "
+                            "напрямую и что блокируется (QUIC, UDP, российские сайты, реклама, "
+                            "AdBlock, WARP, свои правила и файлы .dat). Действует во всех "
+                            "режимах VLESS со следующего подключения.", "hint"))
+        self.routing_card = RoutingCard(self.bridge.log.emit, self._busy)
+        cl.addWidget(self.routing_card)
         row = QHBoxLayout()
         self.apps_btn = QPushButton()
         self.apps_btn.clicked.connect(self._edit_apps)
-        self.rules_btn = QPushButton("Свои правила...")
-        self.rules_btn.setToolTip("Домены, геометки и адреса: напрямую, через VPN, блокировать")
-        self.rules_btn.clicked.connect(self._edit_rules)
         row.addWidget(self.apps_btn)
-        row.addWidget(self.rules_btn)
         row.addStretch()
         cl.addLayout(row)
         self._apps_text()
@@ -696,16 +631,33 @@ class VpnWindow(QDialog):
             "IPv6 — сайт с IPv6 открывается по IPv6, остальные по IPv4. IPv6 — так же, и "
             "соединение с самим сервером VPN тоже по IPv6, если он у сервера и у вас есть.")
         f.addRow("IP:", self.cmb_ip)
+        from vpn import singbox
         self.cmb_dns = QComboBox()
         self.cmb_dns.setEditable(True)
-        self.cmb_dns.addItems(["1.1.1.1", "8.8.8.8", "9.9.9.9", "1.0.0.1", "8.8.4.4"])
+        self.cmb_dns.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.cmb_dns.addItems(singbox.DNS_PRESETS)
         self.cmb_dns.setCurrentText(str(cfg.get("vpn/dns_server") or "1.1.1.1"))
-        self.cmb_dns.currentTextChanged.connect(lambda t: cfg.set_("vpn/dns_server", t.strip()))
-        self.cmb_dns.setToolTip("DNS-сервер, к которому запросы идут через сервер VPN (TUN)")
+        self.cmb_dns.currentTextChanged.connect(self._on_dns)
+        self.cmb_dns.setToolTip(
+            "DNS-сервер, к которому запросы идут через сервер VPN (TUN). Из списка или свой: "
+            "IP (обычный DNS), tls://адрес (DNS over TLS), https://адрес/dns-query (DNS over "
+            "HTTPS), tcp://, quic://, h3://")
         f.addRow("DNS через VPN:", self.cmb_dns)
         cl.addLayout(f)
+        self.dns_error = _label("", "")
+        self.dns_error.setStyleSheet(f"color: {RED};")
+        self.dns_error.hide()
+        cl.addWidget(self.dns_error)
         self.dns_hint = _label("", "hint")
         cl.addWidget(self.dns_hint)
+        self.chk_strict = QCheckBox("Строгая маршрутизация (strict route)")
+        self.chk_strict.setToolTip(
+            "Режим TUN. Включена — фильтры Windows (WFP) не дают программам обойти туннель и "
+            "отправить DNS-запросы мимо него. Выключите, если с VPN перестали работать "
+            "виртуальные машины, локальные серверы или другие сетевые программы.")
+        self.chk_strict.setChecked(cfg.get("vpn/strict_route") is not False)
+        self.chk_strict.toggled.connect(lambda on: cfg.set_("vpn/strict_route", on))
+        cl.addWidget(self.chk_strict)
         grid = QGridLayout()
         self.opt_boxes = {}
         for i, (key, text, tip) in enumerate((
@@ -738,8 +690,17 @@ class VpnWindow(QDialog):
         self._show_builtin()
         return page
 
-    def _set_option(self, key: str, on: bool) -> None:
-        cfg.set_(f"vpn/{key}", on)
+    def _on_dns(self, text: str) -> None:
+        """DNS через VPN: сохраняется только правильно записанный адрес."""
+        from vpn import singbox
+        try:
+            singbox.parse_dns(text)
+        except ValueError as e:
+            self.dns_error.setText(f"{e}. Сохранён прежний: {cfg.get('vpn/dns_server')}")
+            self.dns_error.show()
+            return
+        self.dns_error.hide()
+        cfg.set_("vpn/dns_server", text.strip())
         self._show_builtin()
 
     def _show_builtin(self) -> None:
@@ -757,24 +718,17 @@ class VpnWindow(QDialog):
         ipv4_only = str(cfg.get("vpn/ip_mode") or "ipv4") == "ipv4"
         covered = bool(found["v4"]) and (ipv4_only or bool(found["v6"]))
         self.cmb_dns.setEnabled(tun and not busy and not covered)
-        text = windns.describe(found) if tun else "DNS через VPN — только в режиме TUN."
+        self.chk_strict.setEnabled(tun and not busy)
+        text = windns.describe(found) if tun else "DNS через VPN и строгая маршрутизация — " \
+                                                  "только в режиме TUN."
         if covered and tun:
             text += " «DNS через VPN» не используется."
+        elif tun and str(cfg.get("vpn/dns_server") or "").lower().startswith(("https", "tls",
+                                                                               "h3", "quic")):
+            text += (" DNS over HTTPS/TLS держит долгое соединение через туннель — если сайты "
+                     "иногда не открываются по имени, выберите обычный 1.1.1.1.")
         self.dns_hint.setText(text)
         self.dns_hint.setVisible(bool(text))
-
-    def _edit_rules(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Свои правила маршрутизации")
-        dialog.resize(1100, 640)
-        box = QVBoxLayout(dialog)
-        editor = RulesEditor()
-        box.addWidget(editor, 1)
-        close = QPushButton("Готово")
-        close.clicked.connect(dialog.accept)
-        box.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
-        dialog.exec()
-        self._show_builtin()
 
     def _page_log(self) -> QWidget:
         page = QWidget()
@@ -884,6 +838,7 @@ class VpnWindow(QDialog):
             QMessageBox.warning(self, "VPN", f"Профили не сохранены: {e}")
 
     def _add(self, profile: profiles.Profile) -> None:
+        profile.name = profiles.unique_name(profile.name, [p.name for p in self.profiles])
         self.profiles.append(profile)
         self._save()
         self._fill_profiles(len(self.profiles) - 1)
@@ -916,8 +871,8 @@ class VpnWindow(QDialog):
         if p is None:
             return
         name, ok = QInputDialog.getText(self, "Переименовать", "Название:", text=p.name)
-        if ok and name.strip():
-            p.name = name.strip()
+        if ok and name.strip() and name.strip() != p.name:
+            p.name = profiles.unique_name(name, [o.name for o in self.profiles if o is not p])
             self._save()
             self._fill_profiles(self._row())
 
@@ -997,6 +952,7 @@ class VpnWindow(QDialog):
         self.backend, self.active = backend, p
         self._last = (0, 0, time.monotonic())
         self._ip_text = ""
+        self._ip_backend = None
         self._cert_last = time.monotonic()  # первая проверка — через минуту после подключения
         self._cert_last -= CERT_INTERVAL - 60
         cfg.set_("vpn/last_profile", f"{p.name}|{p.server}")
@@ -1054,9 +1010,10 @@ class VpnWindow(QDialog):
         from vpn import killswitch
         self.unblock_btn.setVisible(not busy and (blocked or killswitch.active()))
         for w in (self.chk_tun, self.chk_proxy, self.chk_kill, self.cmb_ip, self.cmb_dns,
-                  self.apps_btn, self.rules_btn, self.cmb_profile,
-                  *self.route_boxes.values(), *self.opt_boxes.values(), *self.port_widgets):
+                  self.chk_strict, self.apps_btn, self.cmb_profile,
+                  *self.opt_boxes.values(), *self.port_widgets):
             w.setEnabled(not busy and not stopping)  # действуют со следующего подключения
+        self.routing_card.set_busy(busy or stopping)
         if not busy and not stopping:
             p = self._current()
             for box in (self.chk_tun, self.chk_proxy):
@@ -1074,7 +1031,10 @@ class VpnWindow(QDialog):
                 "встроенная имитация" if p and p.kind == "demo"
                 else f"не найден: {engine.missing}")))
         self.tiles["server"].setText(p.server if p else "—")
-        self.tiles["ip"].setText(self._ip_text or "—")
+        self._maybe_check_ip(backend if state == backends.CONNECTED else None)
+        self.tiles["ip"].setText(mask_ip(self._ip_text) if self._ip_text else
+                                 ("проверяю..." if self._ip_busy else "—"))
+        self._maybe_update_routing()
         if state == backends.CONNECTED:
             seconds = int(time.time() - backend.since)
             self.tiles["time"].setText(f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:"
@@ -1158,16 +1118,41 @@ class VpnWindow(QDialog):
         self.log_view.clear()
 
     # ---------------- проверки ----------------
+    def _maybe_check_ip(self, backend) -> None:
+        """Внешний IP: через 3 с после подключения, потом раз в IP_INTERVAL; кнопки нет."""
+        if backend is None:
+            self._ip_backend, self._ip_text = None, ""
+            return
+        now = time.monotonic()
+        if backend is not self._ip_backend:
+            self._ip_backend, self._ip_next, self._ip_text = backend, now + 3, ""
+        if now >= self._ip_next and not self._ip_busy:
+            self._ip_next = now + IP_INTERVAL
+            self._check_ip()
+
     def _on_ip(self, text: str) -> None:
-        self.ip_label.setText(text)
-        self._ip_text = text.removeprefix("Внешний IP: ") if text.startswith("Внешний") else ""
-        if self._ip_text:
+        self._ip_busy = False
+        if not text.startswith("Внешний IP: "):
+            self.bridge.log.emit(f"Внешний IP не определён: {text}")
+            self._ip_next = time.monotonic() + 60  # повторить через минуту
+            return
+        import ipaddress
+        ip = (text.removeprefix("Внешний IP: ").split() or [""])[0]
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            self.bridge.log.emit("Внешний IP не определён: сервис ответил не адресом")
+            self._ip_next = time.monotonic() + 60
+            return
+        if ip:
             from diag import anon
-            anon.register_own_ip(self._ip_text.split()[0])  # внешний адрес — не в журналы
+            anon.register_own_ip(ip)  # внешний адрес — не в журналы
+            self._ip_text = ip
+            self.bridge.log.emit(f"Внешний IP: {mask_ip(ip)}")
         self._tick()
 
     def _check_ip(self) -> None:
-        self.ip_label.setText("Проверяю...")
+        self._ip_busy = True
         from vpn import checks
         route = checks.route_for(self.backend)
 
@@ -1188,6 +1173,32 @@ class VpnWindow(QDialog):
                 self.bridge.ip.emit(f"Не удалось: {e}")
 
         threading.Thread(target=job, daemon=True).start()
+
+    def _maybe_update_routing(self) -> None:
+        """Ссылки профилей маршрутизации и списки AdBlock — в фоне, раз в ROUTING_UPDATE."""
+        if time.monotonic() < self._routing_next:
+            return
+        self._routing_next = time.monotonic() + ROUTING_UPDATE
+
+        def job():
+            from vpn import routing
+            try:
+                notes = routing.update_due()
+            except Exception as e:  # noqa: BLE001 — сообщить в журнал окна
+                notes = [f"Профили маршрутизации не обновлены: {e}"]
+            if notes:
+                self.bridge.routing.emit(notes)
+
+        threading.Thread(target=job, daemon=True, name="vpn-routing-update").start()
+
+    def _on_routing_update(self, notes) -> None:
+        for note in notes:
+            self.bridge.log.emit(note)
+            activity.record("vpn", note)
+        if self._busy():
+            self.bridge.log.emit("Обновлённые профили маршрутизации подействуют со следующего "
+                                 "подключения")
+        self.routing_card.reload()
 
     def _run_probes(self) -> None:
         from vpn import checks

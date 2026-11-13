@@ -24,6 +24,19 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 SIG_DIR = BASE_DIR / "signatures"
+
+
+def can_update() -> bool:
+    """Можно ли писать в папку баз. У установленной программы она закрыта от записи
+    (installer.iss): без прав администратора базы не обновляются."""
+    try:
+        SIG_DIR.mkdir(parents=True, exist_ok=True)
+        probe = SIG_DIR / f".probe-{os.getpid()}"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 FEEDS_DIR = SIG_DIR / "feeds"
 NETFEEDS_DIR = SIG_DIR / "netfeeds"
 DOMAINS_DIR = NETFEEDS_DIR / "domains"   # вредоносные домены: по одному на строку

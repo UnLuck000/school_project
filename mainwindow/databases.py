@@ -85,8 +85,15 @@ class DatabasesMixin:
         QTimer.singleShot(5000, self.auto_update_check)  # окно успевает открыться
 
     def auto_update_check(self):
-        if not self._updating and updater.update_due(cfg.get("db/last_update")):
-            self.update_databases(silent=True)
+        if self._updating or not updater.update_due(cfg.get("db/last_update")):
+            return
+        if not updater.can_update():
+            if not getattr(self, "_update_denied", False):  # сообщить один раз за запуск
+                self._update_denied = True
+                self.add_event("Базы не обновлены: программа запущена без прав "
+                               "администратора (папка баз закрыта от записи)", "warning")
+            return
+        self.update_databases(silent=True)
 
     def update_databases(self, silent: bool = True):
         """Обновление баз. Вручную его не запускают: только автообновление (silent),
