@@ -18,7 +18,14 @@ r"""Защита списков доверия от подмены.
 запись в cache/verdicts.sqlite нельзя подделать, не зная его. Без прав ключ пустой: записи,
 сделанные без прав и с правами, друг другу не доверяют (файл просто проверяется заново).
 
-Папку можно подменить переменной STRETCHBIT_SEAL_DIR (тесты); STRETCHBIT_SEAL=off выключает.
+Папку можно подменить переменной STRETCHBIT_SEAL_DIR (тесты); STRETCHBIT_SEAL=off выключает —
+только при запуске из исходников: в собранной программе переменную окружения пользователя
+вредонос ставит без прав, и она выключала бы всю защиту.
+
+Корень папки любой пользователь может создать заранее (ProgramData открыта на создание) и
+положить туда свои «защищённые» копии, ключ кэша и правила YARA. Поэтому корень, который не
+закрыт (владелец не администраторы или система, наследование не снято), не читается вовсе
+(root_trusted), а программа с правами, закрывая его, сначала удаляет всё содержимое.
 """
 import ctypes
 import sys
@@ -41,13 +48,22 @@ _key: bytes | None = None
 _admin: bool | None = None
 
 
+def _dev() -> bool:
+    """Запуск из исходников (тесты, разработка), а не собранная программа."""
+    return not getattr(sys, "frozen", False)
+
+
+def _env_dir() -> str:
+    return os.environ.get(ENV_DIR, "") if _dev() else ""
+
+
 def enabled() -> bool:
-    return os.environ.get(ENV_OFF, "").lower() != "off"
+    return not (_dev() and os.environ.get(ENV_OFF, "").lower() == "off")
 
 
 def protected_dir() -> Path:
-    if os.environ.get(ENV_DIR):
-        return Path(os.environ[ENV_DIR])
+    if _env_dir():
+        return Path(_env_dir())
     from diag import edition
     root = Path(os.environ.get("ProgramData") or r"C:\ProgramData")
     return root / ("StretchBIT-test" if edition.is_test() else "StretchBIT")
@@ -65,7 +81,7 @@ def is_admin() -> bool:
 
 def can_write() -> bool:
     """Можно ли менять защищённые копии: права администратора (или папка тестов)."""
-    return bool(os.environ.get(ENV_DIR)) or is_admin()
+    return bool(_env_dir()) or is_admin()
 
 
 def _icacls(*args: str) -> None:
@@ -100,22 +116,59 @@ def _root_secured(root: Path) -> bool:
         ctypes.windll.kernel32.LocalFree(sd)
 
 
+_root_ok: dict[str, bool] = {}
+
+
+def root_trusted() -> bool:
+    """Корню можно верить: закрыт (владелец и права) или это папка тестов. Незакрытый корень
+    мог создать и наполнить кто угодно — его копии, ключ и правила не читаются."""
+    if _env_dir():
+        return True
+    root = protected_dir()
+    key = str(root)
+    if not _root_ok.get(key):
+        _root_ok[key] = root.is_dir() and _root_secured(root)
+    return _root_ok[key]
+
+
+def _remove_foreign(root: Path) -> None:
+    """Всё внутри незакрытого корня — чужое или неизвестное: удалить. Занятое (библиотека
+    AMSI, загруженная в процесс) — переименовать и удалить при перезагрузке."""
+    import shutil
+    for item in list(root.iterdir()):
+        try:
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+        except OSError:
+            for leftover in ([item] if not item.is_dir() else list(item.rglob("*")) + [item]):
+                try:
+                    ctypes.windll.kernel32.MoveFileExW(str(leftover), None, 4)
+                except (AttributeError, OSError):
+                    pass
+
+
 def ensure_root() -> Path:
     """Корень защищённой папки — создать и закрыть: владелец — администраторы, запись —
     администраторам и системе, пользователям только чтение. Папку в ProgramData любой
     пользователь может создать заранее и остаться её владельцем (а владелец вернёт себе
-    запись) — поэтому проверяется не наличие папки, а её владелец и права."""
+    запись) — поэтому проверяется не наличие папки, а её владелец и права, а содержимое
+    незакрытой папки удаляется: доверять ему нельзя."""
     root = protected_dir()
     root.mkdir(parents=True, exist_ok=True)
-    if os.environ.get(ENV_DIR) or not is_admin() or _root_secured(root):
+    if _env_dir() or not is_admin() or _root_secured(root):
         return root
     _icacls(str(root), "/setowner", "*S-1-5-32-544", "/T", "/C", "/Q")
+    _icacls(str(root), "/reset", "/T", "/C", "/Q")  # чужие запреты — вон, иначе не удалить
+    _remove_foreign(root)
     _icacls(str(root), "/inheritance:r", "/grant:r",
             "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX")
-    _icacls(str(root / "*"), "/reset", "/T", "/C", "/Q")  # чужие права внутри — вон
-    key = root / "cache.key"
-    if key.exists():  # ключ кэша вердиктов: читать — только администраторам
-        _icacls(str(key), "/inheritance:r", "/grant:r", "*S-1-5-32-544:F", "*S-1-5-18:F")
+    _root_ok.pop(str(root), None)
+    with _lock:  # прежние копии и ключ удалены — забыть то, что прочитано из них
+        _cache.clear()
+        global _key
+        _key = None
     return root
 
 
@@ -202,6 +255,11 @@ def read(path) -> bytes:
             return hit[1]
         data = _read(path)
         result = data
+        if not root_trusted():
+            # корень не закрыт (нет прав его закрыть): копиям в нём верить нельзя — файл как
+            # есть, как без защиты; закроет и наполнит корень запуск с правами
+            _cache[key] = (stamps, data)
+            return data
         if not _trusted_dir().is_dir():
             # первое включение: копий нет ни у одного файла — принимаем как есть
             if data:
@@ -289,7 +347,9 @@ def mac_key() -> bytes:
         if _key is not None:
             return _key
         key = b""
-        if enabled():
+        if enabled() and (can_write() or root_trusted()):
+            if can_write():
+                ensure_root()  # чужой корень — вычищен до чтения ключа
             path = protected_dir() / "cache.key"
             try:
                 key = path.read_bytes()
@@ -299,7 +359,7 @@ def mac_key() -> bytes:
                         _trusted_dir(create=True)
                         key = secrets.token_bytes(32)
                         path.write_bytes(key)
-                        if not os.environ.get(ENV_DIR):
+                        if not _env_dir():
                             _icacls(str(path), "/inheritance:r", "/grant:r",
                                     "*S-1-5-32-544:F", "*S-1-5-18:F")
                     except OSError:
@@ -315,5 +375,6 @@ def reset_state() -> None:
         _self_saved.clear()
         _pending.clear()
         _cache.clear()
+        _root_ok.clear()
         _key = None
         _admin = None

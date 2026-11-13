@@ -8,10 +8,10 @@ import json
 import platform
 import subprocess
 import time
-from pathlib import Path
 import syscmd
+import datadirs
 
-CACHE = Path("logs") / "specs.json"
+CACHE = datadirs.LOGS / "specs.json"
 MAX_AGE = 86400
 CREATE_NO_WINDOW = 0x08000000
 

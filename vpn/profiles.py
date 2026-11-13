@@ -33,6 +33,7 @@ class Profile:
     created: float = field(default_factory=time.time)
     auto_connect: bool = False
     mode: str = "tun"         # VLESS: tun (sing-box) | proxy (Xray) | tun-xray
+    subscription: str = ""    # id подписки (vpn/subscriptions.py), если профиль из неё
 
     @property
     def title(self) -> str:

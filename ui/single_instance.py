@@ -1,7 +1,37 @@
+import os
+import sys
 import time
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+
+def server_process(socket: QLocalSocket) -> tuple[int, str]:
+    """(PID, путь программы) сервера канала, к которому подключён socket (Windows)."""
+    if sys.platform != "win32":
+        return 0, ""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.GetNamedPipeServerProcessId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)]
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                             ctypes.POINTER(wintypes.DWORD)]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    pid = wintypes.ULONG()
+    if not k.GetNamedPipeServerProcessId(wintypes.HANDLE(int(socket.socketDescriptor())),
+                                         ctypes.byref(pid)):
+        return 0, ""
+    proc = k.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not proc:
+        return pid.value, ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        ok = k.QueryFullProcessImageNameW(proc, 0, buf, ctypes.byref(size))
+        return pid.value, buf.value if ok else ""
+    finally:
+        k.CloseHandle(proc)
 
 
 class SingleInstance(QObject):
@@ -13,6 +43,9 @@ class SingleInstance(QObject):
         super().__init__()
         self.name = name
         self._server: QLocalServer | None = None
+        # имя канала заняла чужая программа: (PID, путь). Раньше программа считала, что уже
+        # запущена, и молча выходила — любой процесс без прав мог так не дать ей запуститься
+        self.squatted: tuple[int, str] | None = None
 
     def already_running(self, notify: bool = True, wait: float = 0.0,
                         message: bytes = b"show") -> bool:
@@ -25,6 +58,12 @@ class SingleInstance(QObject):
             socket.connectToServer(self.name)
             if not socket.waitForConnected(300):
                 return False
+            pid, exe = server_process(socket)
+            if sys.platform == "win32" and os.path.normcase(exe) != \
+                    os.path.normcase(os.path.abspath(sys.executable)):
+                socket.abort()
+                self.squatted = (pid, exe or "неизвестная программа")
+                return False  # это не мы: запускаемся без защиты от второго экземпляра
             if time.monotonic() >= deadline:
                 break
             socket.abort()

@@ -138,3 +138,84 @@ def test_unpack_dirs_trimmed(tmp_path, monkeypatch):
         files.append(f)
         unpack.workdir_for(f)
     assert len(list(unpack.UNPACK_DIR.iterdir())) == 2
+
+
+# ---------- чужой файл не роняет и не вешает разбор ----------
+def test_toc_reader_matches_marshal():
+    """Свой разбор оглавления PYZ даёт то же, что marshal, но без marshal.loads."""
+    toc = [("pkg", (1, 100, 20)), ("pkg.mod", (0, 120, 30)), ("pkg.mod2", (0, 150, 30)),
+           ("a" * 300, (3, 2 ** 31 - 1, 7))]
+    for version in (2, 3, 4):
+        raw = marshal.dumps(toc, version)
+        assert unpack.read_toc(raw) == sorted((n, t, o, ln) for n, (t, o, ln) in toc)
+    old = marshal.dumps({"mod": (False, 12, 34), b"pkg": (True, 50, 60)}, 2)  # старый вид
+    assert unpack.read_toc(old) == [("mod", 0, 12, 34), ("pkg", 1, 50, 60)]
+
+
+@pytest.mark.parametrize("raw", [
+    b"", b"[", b"[\xff\xff\xff\x7f", b"[\x01\x00\x00\x00c", b"r\x05\x00\x00\x00",
+    marshal.dumps([("m", ("x", 1, 2))]), marshal.dumps([("m", (0, -5, 2))]),
+    marshal.dumps([1, 2, 3]), marshal.dumps("строка"), b"[" * 64,
+    marshal.dumps([("m", (0, 1.5, 2))]),
+])
+def test_toc_reader_rejects_garbage(raw):
+    with pytest.raises(ValueError):
+        unpack.read_toc(raw)
+
+
+def test_zlib_bomb_is_limited(monkeypatch):
+    monkeypatch.setattr(unpack, "MAX_ONE", 1024 * 1024)
+    bomb = zlib.compress(b"\0" * (64 * 1024 * 1024), 9)
+    assert len(bomb) < 100_000
+    with pytest.raises(unpack.TooBig):
+        unpack._inflate(bomb, unpack.MAX_ONE)
+    assert unpack._inflate(zlib.compress(b"abc")) == b"abc"
+    with pytest.raises(zlib.error):
+        unpack._inflate(zlib.compress(b"abc" * 100)[:-4])
+
+
+def test_device_names_and_deep_folders(tmp_path):
+    assert unpack._safe("CON") == "_CON" and unpack._safe("com1.pyc") == "_com1.pyc"
+    assert unpack._safe("console.txt") == "console.txt"
+    archive = tmp_path / "deep.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("/".join(["d"] * 3000) + "/file.txt", "x")
+        z.writestr("NUL", "y")
+    root = unpack.unpack(archive)
+    files = root.files()                       # обход дерева не упирается в предел рекурсии
+    assert {Path(n.path).name for n in files} == {"file.txt", "_NUL"}
+    depth = max(len(Path(n.path).relative_to(unpack.UNPACK_DIR).parts) for n in files)
+    assert depth < 3000
+
+
+def test_pyinstaller_garbage_toc_does_not_hang():
+    """Оглавление из записей «длиной в байт» раньше обходилось по байту на шаг."""
+    toc = struct.pack("!IIIIBc", 1, 0, 0, 0, 0, b"x") * 4
+    blob = toc + unpack.PYI_COOKIE.pack(unpack.PYI_MAGIC, len(toc) + unpack.PYI_COOKIE.size,
+                                        0, len(toc), 312, b"python312.dll")
+    node = unpack.Node("x.exe", "pe")
+    unpack._explore_pyinstaller(node, blob, Path("."), unpack.Budget(), 0)
+    assert node.children[0].kind == "pyinstaller" and not node.children[0].children
+
+
+def test_rizin_path_with_space(tmp_path, monkeypatch):
+    """Установленная программа лежит в «C:/Program Files»: путь к описаниям процессоров
+    передаётся в кавычках, иначе rizin обрезал его по пробелу и код C не получался."""
+    from analyzer import rizin
+    assert rizin.quote("C:/Program Files/x") == "'C:/Program Files/x'"
+    assert rizin.quote("C:/O'Brien/x") == '"C:/O\'Brien/x"'
+    if not rizin.available():
+        pytest.skip("rizin не установлен (tools/bin/rizin)")
+    import _winapi
+    link = tmp_path / "with space" / "sleigh"
+    link.parent.mkdir()
+    _winapi.CreateJunction(str(rizin.SLEIGH), str(link))
+    monkeypatch.setattr(rizin, "SLEIGH", link)
+    import os
+    s = rizin.RizinSession(Path(os.environ["SystemRoot"]) / "System32" / "whoami.exe")
+    try:
+        s.cmd("af @ entry0")
+        code, _ = s.decompile(int(s.cmd("s entry0; s").strip(), 16))
+    finally:
+        s.close()
+    assert "{" in code and "}" in code

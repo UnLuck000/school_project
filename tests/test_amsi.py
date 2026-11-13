@@ -103,3 +103,83 @@ def test_second_server_on_same_pipe_refused():
         assert not second.start() and "канал" in second.error
     finally:
         first.stop()
+
+
+def test_bypass_split_by_concatenation_is_threat():
+    """Обход, разрезанный склейкой строк и обратными кавычками, — тоже угроза."""
+    name = amsi.BYPASS_PARTS[0]
+    pieces = "'" + name[:2] + "'+'" + name[2:6] + "'" + " + '" + name[6:8] + "`" + name[8:] + "'"
+    v = amsi.scan_content(("$x = " + pieces).encode("utf-16-le"))
+    assert v.level == "threat"
+    assert amsi.squash("'Get' + '-Date'") == "Get-Date"
+    assert amsi.scan_content("'Get' + '-ChildItem'".encode("utf-16-le")).level == "clean"
+
+
+def test_trimmed_flag_reported():
+    events = []
+    server = amsi.AmsiServer(events.append, skip_own=False)
+    server._bases = (None, None)
+    head = amsi.BYPASS_PARTS[0].encode()
+    msg = bytearray(_request(head))
+    msg[8:12] = (2).to_bytes(4, "little")  # отправлены только начало и конец
+    assert server._handle(bytes(msg), 4321) is True
+    assert events[-1]["trimmed"] and events[-1]["pid"] == 4321
+
+
+def test_sddl_without_admin_grants_own_account(monkeypatch):
+    monkeypatch.setattr(amsi, "_user_sid", lambda: "S-1-5-21-1-2-3-1001")
+    assert amsi.pipe_sddl(True) == amsi.PIPE_SDDL
+    assert amsi.pipe_sddl(False).endswith("(A;;GA;;;S-1-5-21-1-2-3-1001)")
+    if sys.platform == "win32":
+        monkeypatch.undo()
+        assert amsi._user_sid().startswith("S-1-5-")
+
+
+def test_planted_library_is_replaced(tmp_path):
+    src = tmp_path / "src.dll"
+    src.write_bytes(b"MZ genuine provider")
+    folder = tmp_path / "amsi"
+    folder.mkdir()
+    import hashlib
+    name = f"sbit_amsi64-{hashlib.sha256(src.read_bytes()).hexdigest()[:12]}.dll"
+    (folder / name).write_bytes(b"MZ planted")             # подложили заранее под тем же именем
+    placed = amsi.place(folder, {64: src})
+    assert (folder / name).read_bytes() == b"MZ genuine provider"
+    assert placed == {64: str(folder / name)}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows")
+def test_idle_clients_do_not_stall_server(monkeypatch):
+    """Подключения без данных закрываются через READ_TIMEOUT, лишние от одного процесса —
+    сразу: сервер продолжает отвечать (раньше четыре таких подключения его «усыпляли»)."""
+    import ctypes
+    import time
+    from ctypes import wintypes
+    monkeypatch.setattr(amsi, "READ_TIMEOUT", 0.5)
+    pipe = rf"\\.\pipe\sbit-amsi-test-{uuid.uuid4().hex[:8]}"
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateFileW.restype = wintypes.HANDLE
+    k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                              ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    access = 0x80000000 | 0x2 | 0x100      # как у провайдера: GENERIC_READ | запись данных
+    server = amsi.AmsiServer(pipe_name=pipe, skip_own=False)
+    server._bases = (None, None)
+    assert server.start(), server.error
+    held = []
+    try:
+        for _ in range(amsi.WORKERS + 2):
+            h = k.CreateFileW(pipe, access, 0, None, 3, 0, None)
+            if h and h != amsi.INVALID_HANDLE:
+                held.append(h)
+        assert held, f"провайдер не открыл канал: ошибка {ctypes.get_last_error()}"
+        time.sleep(1.5)
+        assert server.dropped >= len(held)  # лишние — сразу, молчащие — по таймауту
+        h = k.CreateFileW(pipe, access, 0, None, 3, 0, None)
+        assert h and h != amsi.INVALID_HANDLE, "сервер не освободил экземпляры канала"
+        k.CloseHandle(h)
+    finally:
+        for h in held:
+            k.CloseHandle(h)
+        server.stop()
+

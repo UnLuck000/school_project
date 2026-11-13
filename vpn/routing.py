@@ -34,14 +34,18 @@ from pathlib import Path
 
 import userdata
 from vpn import warp
+import datadirs
 
 FORMAT = "sbit-routing"
 ROUTING_DIR = userdata.CONFIG_DIR / "vpn_routing"
-ASSETS_DIR = Path("cache") / "vpn" / "assets"   # geo-файлы для Xray (XRAY_LOCATION_ASSET)
+ASSETS_DIR = datadirs.CACHE / "vpn" / "assets"   # geo-файлы для Xray (XRAY_LOCATION_ASSET)
 DEFAULT_ID = "default"
 DEFAULT_NAME = "Default"
 ADBLOCK_URL = "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"
 ADBLOCK_MAX_AGE = 24 * 3600
+# AdBlock для Xray — свой файл geosite в папке geo-файлов: 150 тыс. доменов строками в
+# конфигурации — +40 МБ памяти Xray и 0,4 с разбора, файлом .dat — +5 МБ и 0,2 с
+ADBLOCK_DAT = "sbit-adblock.dat"
 MAX_FILE = 128 * 1024 * 1024         # файл .dat или профиль по ссылке
 MAX_ADBLOCK = 32 * 1024 * 1024
 INTERVALS = {1: "Каждый час", 12: "Каждые 12 часов", 24: "Каждые 24 часа"}  # + своё (часы)
@@ -422,6 +426,33 @@ def dat_info(path) -> tuple[str, list[str]]:
     return result
 
 
+def _pb_varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _pb_bytes(field: int, payload: bytes) -> bytes:
+    return _pb_varint(field << 3 | 2) + _pb_varint(len(payload)) + payload
+
+
+def build_geosite(lists: dict[str, list[str]]) -> bytes:
+    """Файл geosite Xray (GeoSiteList): {метка: домены}; домен — вместе с поддоменами
+    (Domain.Type = 2). Нужен для больших списков (AdBlock): ext:файл.dat:метка вместо
+    десятков тысяч строк в конфигурации."""
+    out = bytearray()
+    for tag, domains in lists.items():
+        body = bytearray(_pb_bytes(1, tag.upper().encode("utf-8")))
+        for d in domains:
+            body += _pb_bytes(2, b"\x08\x02" + _pb_bytes(2, d.encode("utf-8")))
+        out += _pb_bytes(1, bytes(body))
+    return bytes(out)
+
+
 def _safe_file_name(name: str) -> str:
     name = os.path.basename(str(name).replace("\\", "/")).strip()
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
@@ -481,12 +512,13 @@ def file_kinds(p: RoutingProfile) -> dict[str, str]:
     return kinds
 
 
-def assets_dir(p: RoutingProfile, bin_dir) -> str:
-    """Папка geo-файлов для Xray (XRAY_LOCATION_ASSET), если у профиля есть свои файлы:
-    geoip.dat и geosite.dat рядом с xray.exe + файлы профиля (одноимённые — главнее).
-    Жёсткие ссылки, иначе копии; без файлов — "" (Xray берёт файлы из своей папки)."""
+def assets_dir(p: RoutingProfile, bin_dir, adblock: list[str] | None = None) -> str:
+    """Папка geo-файлов для Xray (XRAY_LOCATION_ASSET), если у профиля есть свои файлы или
+    включён AdBlock: geoip.dat и geosite.dat рядом с xray.exe + файлы профиля (одноимённые —
+    главнее) + ADBLOCK_DAT. Жёсткие ссылки, иначе копии; ничего своего — "" (Xray берёт
+    файлы из своей папки)."""
     files = p.files()
-    if not files:
+    if not files and not adblock:
         return ""
     target = ASSETS_DIR / p.id
     target.mkdir(parents=True, exist_ok=True)
@@ -494,8 +526,17 @@ def assets_dir(p: RoutingProfile, bin_dir) -> str:
               if (Path(bin_dir) / name).is_file()}
     wanted.update({f.name: f for f in files})
     for old in target.iterdir():
-        if old.name not in wanted:
+        if old.name not in wanted and old.name != ADBLOCK_DAT:
             old.unlink(missing_ok=True)
+    blocked = target / ADBLOCK_DAT
+    if adblock:
+        data = build_geosite({"adblock": adblock})
+        if not blocked.is_file() or blocked.read_bytes() != data:
+            tmp = blocked.with_name(ADBLOCK_DAT + ".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(blocked)
+    else:
+        blocked.unlink(missing_ok=True)
     for name, src in wanted.items():
         dst = target / name
         st = src.stat()
@@ -617,10 +658,11 @@ def raw_url(url: str) -> str:
 
 
 def fetch(url: str, limit: int = MAX_FILE, timeout: float = 30.0) -> bytes:
-    """Скачать по http(s) — без прокси из переменных окружения (они могут указывать на чужой
-    клиент); не больше limit байт."""
+    """Скачать по https — без прокси из переменных окружения (они могут указывать на чужой
+    клиент); не больше limit байт. http:// не принимается: по дороге список правил подменил
+    бы кто угодно (например, «весь трафик напрямую»)."""
     url = raw_url(url)
-    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+    if urllib.parse.urlsplit(url).scheme != "https":
         raise ValueError("Ссылка должна начинаться с https://")
     request = urllib.request.Request(url, headers={"User-Agent": "StretchBIT/1.0"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -680,6 +722,53 @@ def set_source(p: RoutingProfile, key: str, url: str, interval: int) -> None:
     save(p)
 
 
+FLAG_TITLES = {"block_quic": "Блокировать QUIC", "block_udp": "Блокировать UDP",
+               "route_ru": "Российские сайты напрямую", "block_ads": "Блокировать рекламу",
+               "adblock": "AdBlock"}
+RULE_TITLES = {"rules_proxy": "Туннель", "rules_direct": "Обход", "rules_block": "Блокировать"}
+CHANGES: dict[str, list[str]] = {}   # id профиля → что изменилось при обновлении по ссылке
+_changes_lock = threading.Lock()
+
+
+def _short(items: list[str]) -> str:
+    return ", ".join(items[:5]) + (f" и ещё {len(items) - 5}" if len(items) > 5 else "")
+
+
+def diff(old: RoutingProfile, new: RoutingProfile) -> list[str]:
+    """Что поменялось в профиле — строками для человека (профиль по ссылке может поменять
+    владелец ссылки: например, пустить сайты мимо VPN)."""
+    lines = []
+    for key, title in FLAG_TITLES.items():
+        if getattr(old, key) != getattr(new, key):
+            lines.append(f"{title}: {'вкл.' if getattr(new, key) else 'выкл.'}")
+    for key, title in RULE_TITLES.items():
+        before, after = clean_lines(getattr(old, key)), clean_lines(getattr(new, key))
+        added = [s for s in after if s not in before]
+        removed = [s for s in before if s not in after]
+        if added:
+            lines.append(f"{title}: добавлено {_short(added)}")
+        if removed:
+            lines.append(f"{title}: убрано {_short(removed)}")
+    if old.advanced != new.advanced:
+        lines.append(f"Дополнительно: правил было {len(old.advanced)}, стало "
+                     f"{len(new.advanced)}")
+    if old.adblock_url != new.adblock_url:
+        lines.append(f"Список AdBlock: {new.adblock_url}")
+    ow, nw = old.warp, new.warp
+    if (ow.get("enabled"), ow.get("chain"), ow.get("endpoint")) != \
+            (nw.get("enabled"), nw.get("chain"), nw.get("endpoint")):
+        lines.append("WARP: " + ("выкл." if not nw.get("enabled") else
+                                 f"{nw.get('chain')}, сервер {nw.get('endpoint')}"))
+    return lines
+
+
+def pop_changes() -> dict[str, list[str]]:
+    with _changes_lock:
+        result = dict(CHANGES)
+        CHANGES.clear()
+    return result
+
+
 def update_source(p: RoutingProfile, key: str, data: bytes | None = None) -> str:
     """Скачать заново: "" — сам профиль (настройки и правила заменяются, имя, ключ WARP и
     ссылки остаются), имя файла — файл .dat. Ошибка запоминается в источнике и
@@ -691,6 +780,7 @@ def update_source(p: RoutingProfile, key: str, data: bytes | None = None) -> str
         raw = fetch(src["url"]) if data is None else data
         if key == "":
             fields, files = read_blob(raw)
+            before = from_dict(to_dict(p), p.id)
             fresh = from_dict(dict(fields), p.id)
             keep_warp = dict(fresh.warp)
             if not keep_warp.get("private_key") and p.warp.get("private_key"):
@@ -704,7 +794,12 @@ def update_source(p: RoutingProfile, key: str, data: bytes | None = None) -> str
             for name, blob in files.items():
                 if name not in p.sources:  # свои ссылки на файлы главнее
                     _write_file(p, name, blob)
-            text = f"Профиль «{p.name}» обновлён по ссылке"
+            changes = diff(before, p)
+            if changes:
+                with _changes_lock:
+                    CHANGES.setdefault(p.id, []).extend(changes)
+            text = f"Профиль «{p.name}» обновлён по ссылке" + (
+                ": " + "; ".join(changes) if changes else " (без изменений)")
         else:
             _write_file(p, key, raw)
             text = f"Файл {key} профиля «{p.name}» обновлён"

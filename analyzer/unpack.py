@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import marshal
 import os
 import re
 import shutil
@@ -27,15 +26,18 @@ import zipfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
+import datadirs
 
 ROOT = Path(__file__).resolve().parent.parent
-UNPACK_DIR = ROOT / "cache" / "unpack"
+UNPACK_DIR = datadirs.CACHE / "unpack"
 TOOLS = ROOT / "tools" / "bin"
 KEEP_RUNS = 5
 MAX_DEPTH = 5
 MAX_FILES = 5000
 MAX_TOTAL = 1024 * 1024 * 1024        # всего извлечено, байт
 MAX_ONE = 256 * 1024 * 1024           # один извлекаемый файл
+MAX_NOTES = 200                       # пометок на один архив (тысячи записей — не тысячи строк)
+MAX_FOLDER_DEPTH = 32                 # вложенных папок в дереве: глубже — в последней папке
 TOOL_TIMEOUT = 120
 NO_WINDOW = 0x08000000
 
@@ -134,9 +136,148 @@ def run_tool(args: list[str], timeout: int = TOOL_TIMEOUT) -> subprocess.Complet
                           creationflags=NO_WINDOW if os.name == "nt" else 0)
 
 
+# имена устройств Windows: файл «CON» или «COM1.pyc» открылся бы как устройство
+DEVICE_NAMES = re.compile(r"^(con|prn|aux|nul|com\d|lpt\d|conin\$|conout\$)(\.|$)", re.I)
+
+
 def _safe(name: str) -> str:
     name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name).strip(" .") or "_"
+    if DEVICE_NAMES.match(name):
+        name = "_" + name
     return name[:120]
+
+
+class TooBig(ValueError):
+    """Сжатые данные разворачиваются больше предела."""
+
+
+def _inflate(data: bytes, limit: int = MAX_ONE) -> bytes:
+    """zlib с пределом размера: «бомба» в несколько килобайт не займёт гигабайты памяти
+    (zlib.decompress разворачивает всё сразу, предел разбора проверялся бы уже после)."""
+    stream = zlib.decompressobj()
+    out = stream.decompress(data, limit + 1)
+    if len(out) > limit:
+        raise TooBig(f"больше {limit // 2 ** 20} МБ после распаковки")
+    if not stream.eof:
+        raise zlib.error("сжатые данные обрываются")
+    return out
+
+
+class _TocReader:
+    """Оглавление PYZ (формат marshal) — своим кодом, только нужные типы.
+
+    marshal.loads для чужих данных не годится: модуль не защищён от испорченного или нарочно
+    составленного ввода (так и сказано в документации Python) — программа упала бы на файле,
+    который как раз и проверяют. Здесь любой сбой — ValueError."""
+    MAX_ITEMS = 2_000_000
+    MAX_DEPTH = 16
+    END = object()
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos = 0
+        self.refs: list = []
+        self.items = 0
+
+    def _take(self, n: int) -> bytes:
+        if n < 0 or self.pos + n > len(self.data):
+            raise ValueError("оглавление PYZ обрывается")
+        chunk = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return chunk
+
+    def _int(self) -> int:
+        return struct.unpack("<i", self._take(4))[0]
+
+    def _count(self, n: int) -> int:
+        if n < 0 or n > len(self.data) - self.pos:   # элемент — не меньше байта
+            raise ValueError("оглавление PYZ: неверное число элементов")
+        return n
+
+    def load(self, depth: int = 0):
+        self.items += 1
+        if depth > self.MAX_DEPTH or self.items > self.MAX_ITEMS:
+            raise ValueError("оглавление PYZ слишком большое или вложенное")
+        code = self._take(1)[0]
+        kind = chr(code & 0x7F)
+        slot = None
+        if code & 0x80:                   # объект запоминается: на него сошлются («r»)
+            slot = len(self.refs)
+            self.refs.append(None)
+        if kind == "0":
+            return self.END
+        if kind == "N":
+            obj = None
+        elif kind in "TF":
+            obj = kind == "T"
+        elif kind == "i":
+            obj = self._int()
+        elif kind == "l":
+            digits = self._int()
+            obj = 0
+            for i in range(self._count(abs(digits) * 2) // 2):
+                obj |= struct.unpack("<H", self._take(2))[0] << (15 * i)
+            obj = -obj if digits < 0 else obj
+        elif kind == "s":
+            obj = self._take(self._int())
+        elif kind in "tuaA":
+            obj = self._take(self._int()).decode("utf-8", "replace")
+        elif kind in "zZ":
+            obj = self._take(self._take(1)[0]).decode("latin-1")
+        elif kind in "()[":
+            n = self._take(1)[0] if kind == ")" else self._count(self._int())
+            obj = [self.load(depth + 1) for _ in range(n)]
+            if self.END in obj:
+                raise ValueError("оглавление PYZ: лишний конец словаря")
+            if kind != "[":
+                obj = tuple(obj)
+        elif kind == "{":
+            obj = {}
+            while True:
+                key = self.load(depth + 1)
+                if key is self.END:
+                    break
+                value = self.load(depth + 1)
+                if not isinstance(key, (str, bytes)) or value is self.END:
+                    raise ValueError("оглавление PYZ: неверный словарь")
+                obj[key] = value
+        elif kind == "r":
+            index = self._int()
+            if not 0 <= index < len(self.refs):
+                raise ValueError("оглавление PYZ: неверная ссылка")
+            return self.refs[index]
+        else:
+            raise ValueError(f"оглавление PYZ: неожиданный тип {kind!r}")
+        if slot is not None:
+            self.refs[slot] = obj
+        return obj
+
+
+def read_toc(data: bytes) -> list[tuple[str, int, int, int]]:
+    """Оглавление PYZ → [(имя модуля, тип, смещение, длина)]; мусор — ValueError."""
+    toc = _TocReader(data).load()
+    if isinstance(toc, dict):
+        toc = list(toc.items())
+    if not isinstance(toc, list):
+        raise ValueError("оглавление PYZ: не список")
+    result = []
+    for item in toc:
+        if not (isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], tuple)
+                and len(item[1]) >= 3):
+            raise ValueError("оглавление PYZ: неверная запись")
+        name, info = item
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", "replace")
+        typecode, off, length = info[0], info[1], info[2]
+        # тип — число или признак пакета (True/False в старых версиях PyInstaller)
+        if not isinstance(name, str) or not isinstance(typecode, int) or not all(
+                isinstance(v, int) and not isinstance(v, bool) for v in (off, length)):
+            raise ValueError("оглавление PYZ: неверная запись")
+        if off < 0 or length < 0:
+            raise ValueError("оглавление PYZ: неверное смещение")
+        result.append((name, int(typecode), off, length))
+    result.sort(key=lambda entry: entry[0])
+    return result
 
 
 def _write(base: Path, rel: str, data: bytes) -> Path:
@@ -360,7 +501,8 @@ def _explore_pyinstaller(node: Node, blob: bytes, work: Path, budget: Budget,
     i = 0
     while i + PYI_ENTRY.size <= len(toc):
         size, off, clen, ulen, compressed, code = PYI_ENTRY.unpack_from(toc, i)
-        if size <= 0:
+        # запись короче заголовка — мусор: с шагом в байт цикл шёл бы по всему оглавлению
+        if size <= PYI_ENTRY.size or len(entries) >= MAX_FILES * 4:
             break
         name = toc[i + PYI_ENTRY.size:i + size].rstrip(b"\x00").decode("utf-8", "replace")
         entries.append((name, off, clen, compressed, code.decode("latin-1")))
@@ -373,15 +515,18 @@ def _explore_pyinstaller(node: Node, blob: bytes, work: Path, budget: Budget,
             if data[:4] == b"PYZ\x00":
                 magic = data[4:8]
     pyz_nodes = []
+    notes = 0
     for name, off, clen, compressed, code in entries:
-        if budget.cancel is not None and budget.cancel.is_set():
-            return
+        if budget.exhausted():            # отмена или предел: дальше не распаковываем
+            break
         data = blob[start + off:start + off + clen]
         if compressed:
             try:
-                data = zlib.decompress(data)
-            except zlib.error:
-                pyi.add(Node(f"{name}: не распаковывается", "note"))
+                data = _inflate(data)
+            except (zlib.error, TooBig) as e:
+                if notes < MAX_NOTES:
+                    pyi.add(Node(f"{name}: не распаковывается ({e})", "note"))
+                notes += 1
                 continue
         what = PYI_TYPES.get(code, f"тип {code}")
         if code in "zZ":
@@ -415,19 +560,19 @@ def _explore_pyz(node: Node, data: bytes, work: Path, budget: Budget, depth: int
         number = struct.unpack("<H", magic[:2])[0]
         ver = next((v for v, m in PYC_MAGIC.items() if m == number), (3, 8))
     toc_off = struct.unpack("!i", data[8:12])[0]
-    toc = marshal.loads(data[toc_off:])
-    items = toc.items() if isinstance(toc, dict) else toc
+    if not 12 <= toc_off < len(data):
+        raise ValueError("повреждённый архив PYZ")
     packages: dict[str, Node] = {}
     encrypted = 0
-    for name, info in sorted(items, key=lambda kv: kv[0]):
-        if budget.cancel is not None and budget.cancel.is_set():
-            return
-        if isinstance(name, bytes):
-            name = name.decode("utf-8", "replace")
-        typecode, off, length = info[0], info[1], info[2]
+    for name, typecode, off, length in read_toc(data[toc_off:]):
+        if budget.exhausted():
+            break
         raw = data[off:off + length]
         try:
-            code = zlib.decompress(raw)
+            code = _inflate(raw)
+        except TooBig:
+            budget._limited()
+            continue
         except zlib.error:
             encrypted += 1
             continue
@@ -451,6 +596,10 @@ def _package_node(root: Node, packages: dict[str, Node], package: str) -> Node:
         return root
     if package in packages:
         return packages[package]
+    if package.count(".") >= MAX_FOLDER_DEPTH:   # «a.a.a...» из тысяч частей: дерево не строим
+        package = ".".join(package.split(".")[:MAX_FOLDER_DEPTH])
+        if package in packages:
+            return packages[package]
     parent = _package_node(root, packages, package.rsplit(".", 1)[0] if "." in package else "")
     node = parent.add(Node(package.rsplit(".", 1)[-1], "folder"))
     packages[package] = node
@@ -464,18 +613,28 @@ def _explore_zip(node: Node, path: Path, work: Path, budget: Budget, depth: int)
     base = f"zip/{path.stem}_{depth}"
     with zipfile.ZipFile(path) as z:
         folders: dict[str, Node] = {}
+        notes = 0
+
+        def note(text: str) -> None:
+            nonlocal notes
+            notes += 1
+            if notes <= MAX_NOTES:
+                node.add(Node(text if notes < MAX_NOTES else "... и другие записи", "note"))
+
         for info in z.infolist():
             if info.is_dir():
                 continue
             if info.flag_bits & 0x1:
-                node.add(Node(f"{info.filename}: зашифрован паролем", "note"))
+                note(f"{info.filename[:200]}: зашифрован паролем")
                 continue
             if budget.exhausted():
                 break
             if info.file_size > MAX_ONE:
-                node.add(Node(f"{info.filename}: больше {MAX_ONE // 2 ** 20} МБ, пропущен", "note"))
+                note(f"{info.filename[:200]}: больше {MAX_ONE // 2 ** 20} МБ, пропущен")
                 continue
-            parts = info.filename.replace("\\", "/").split("/")
+            parts = [p for p in info.filename.replace("\\", "/").split("/") if p] or ["_"]
+            if len(parts) > MAX_FOLDER_DEPTH:  # тысячи вложенных папок: дерево не строим
+                parts = parts[:MAX_FOLDER_DEPTH - 1] + [parts[-1]]
             parent = node
             for i, part in enumerate(parts[:-1]):
                 key = "/".join(parts[:i + 1])
@@ -483,7 +642,7 @@ def _explore_zip(node: Node, path: Path, work: Path, budget: Budget, depth: int)
                     folders[key] = parent.add(Node(part, "folder"))
                 parent = folders[key]
             _child_file(parent, parts[-1], "file", z.read(info), work,
-                        f"{base}/{info.filename}", budget, depth)
+                        f"{base}/{'/'.join(parts)}", budget, depth)
 
 
 # ---------- .NET

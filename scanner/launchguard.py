@@ -357,6 +357,9 @@ class LaunchGuard:
             exe, _ = ntsnap.identity(pid)
         if not exe:
             return  # процесс уже завершился или защищён
+        import ownproc
+        if ownproc.is_program(pid, exe) or ownproc.in_program_dir(exe):
+            return  # окно программы, её рабочие процессы и ядра из папки установки
         name = os.path.basename(exe)
         self._names[pid] = name
         parent = self._names.get(ppid, "")

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from diag.log import get
+import datadirs
 
 log = get("feature")
 
@@ -83,7 +84,7 @@ FEATURES: dict[str, Feature] = {f.id: f for f in [
 WINDOW_FEATURES = {f.area: f.id for f in FEATURES.values() if f.kind == "session"}
 
 BASELINE_FILE = Path(__file__).resolve().parent / "baseline.json"
-RUNS_FILE = Path("logs") / "feature_runs.json"
+RUNS_FILE = datadirs.LOGS / "feature_runs.json"
 SLOW_FACTOR = 5.0      # во столько раз дольше эталона — предупреждение
 SLOW_MIN_SEC = 30.0    # но не меньше, чем на столько секунд
 

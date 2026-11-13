@@ -23,8 +23,9 @@ from pathlib import Path
 
 import trustseal
 from scanner.media import EXECUTABLE_EXTS
+import datadirs
 
-CACHE_FILE = Path(__file__).resolve().parent.parent / "cache" / "verdicts.sqlite"
+CACHE_FILE = datadirs.CACHE / "verdicts.sqlite"
 FLUSH_EVERY = 200      # записей
 FLUSH_SECONDS = 3.0
 KEEP_DAYS = 90         # старые записи удаляются при открытии

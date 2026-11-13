@@ -16,9 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import psutil
+import datadirs
 
 SAMPLE_MS = 250
-REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
+REPORTS_DIR = datadirs.REPORTS
 SIG_DIR = Path(__file__).resolve().parent.parent / "signatures"
 RULES_DIR = SIG_DIR / "rules"
 WINDOWS = Path(os.environ.get("SystemRoot", r"C:\Windows"))

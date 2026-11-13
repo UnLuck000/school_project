@@ -80,11 +80,94 @@ class DatabasesMixin:
 
     def start_auto_update(self):
         """Автообновление баз: при запуске и затем каждые полчаса проверяется, прошли ли
-        сутки с последнего обновления (см. updater.update_due)."""
+        сутки с последнего обновления (см. updater.update_due). Там же раз в сутки —
+        новый выпуск программы (updatecheck.py), только сообщение."""
         self.auto_update_timer.start()
         QTimer.singleShot(5000, self.auto_update_check)  # окно успевает открыться
+        QTimer.singleShot(20000, self.check_release)
+        self._release_timer = QTimer(self)
+        self._release_timer.timeout.connect(self.check_release)
+        self._release_timer.start(6 * 3600 * 1000)
+
+    # ---------- обновление программы ----------
+    def check_release(self, manual: bool = False):
+        if not manual and time.time() - cfg.get("update/last_check") < 24 * 3600:
+            return
+        if manual:
+            self.about_page.update_btn.setEnabled(False)
+            self.about_page.update_btn.setText("Проверяю...")
+
+        def job():
+            import updatecheck
+            try:
+                release = updatecheck.latest()
+                cfg.set_("update/last_check", time.time())
+                self.release_found.emit(release, "", manual)
+            except Exception as e:  # noqa: BLE001 — нет сети, нет выпусков, лимит GitHub
+                self.release_found.emit(None, str(e), manual)
+
+        threading.Thread(target=job, daemon=True, name="release-check").start()
+
+    def _on_release_found(self, release, error: str, manual: bool):
+        import updatecheck
+        self.about_page.update_btn.setEnabled(True)
+        self.about_page.update_btn.setText("Проверить обновления")
+        if release is None:
+            if manual:
+                QMessageBox.warning(self, "Обновление", f"Не удалось проверить: {error}")
+            return
+        if not updatecheck.newer(release.version):
+            if manual:
+                QMessageBox.information(self, "Обновление",
+                                        f"Установлена последняя версия ({appinfo.VERSION}).")
+            return
+        if not manual:
+            if cfg.get("update/skipped") == release.version:
+                return
+            self.add_event(f"Доступна версия {release.version} — «О программе» → «Проверить "
+                           "обновления»", "info")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Обновление")
+        box.setText(f"Доступна версия {release.version} (сейчас {appinfo.VERSION}).")
+        box.setInformativeText((release.notes[:1500] + "\n\n" if release.notes else "") +
+                               "Установщик скачается, проверится по SHA256SUMS выпуска и "
+                               "подписи и запустится — он сам попросит закрыть программу.")
+        install = box.addButton("Скачать и установить", QMessageBox.ButtonRole.AcceptRole)
+        page = box.addButton("Открыть страницу выпуска", QMessageBox.ButtonRole.ActionRole)
+        skip = box.addButton("Пропустить эту версию", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is page:
+            QDesktopServices.openUrl(QUrl(release.page))
+        elif box.clickedButton() is skip:
+            cfg.set_("update/skipped", release.version)
+        elif box.clickedButton() is install:
+            self.about_page.update_btn.setEnabled(False)
+            self.about_page.update_btn.setText("Скачиваю...")
+
+            def job():
+                try:
+                    self.release_downloaded.emit(updatecheck.download(release), "")
+                except Exception as e:  # noqa: BLE001 — показать причину
+                    self.release_downloaded.emit(None, str(e))
+
+            threading.Thread(target=job, daemon=True, name="release-download").start()
+
+    def _on_release_downloaded(self, path, error: str):
+        import updatecheck
+        self.about_page.update_btn.setEnabled(True)
+        self.about_page.update_btn.setText("Проверить обновления")
+        if path is None:
+            activity.record("program", f"Обновление не установлено: {error}")
+            QMessageBox.warning(self, "Обновление", f"Установщик не запущен: {error}")
+            return
+        activity.record("program", f"Запущен установщик обновления: {path.name}")
+        updatecheck.run_installer(path)
 
     def auto_update_check(self):
+        if getattr(self, "service", None) is not None:
+            return  # базы обновляет служба (service/core.py): окно без прав — не может
         if self._updating or not updater.update_due(cfg.get("db/last_update")):
             return
         if not updater.can_update():

@@ -1,5 +1,14 @@
 {
   "files": {
+    "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%USERPROFILE%\\Desktop\\folderF\\PythonProjects\\NewEra\\myav\\test_samples\\eicar.exe"
+    },
     "4067aaf36a1d7fd45b94d40c2886f213f1520e9e4493fdd3e708156f9809c7a5": {
       "added_at": "2026-11-08T21:19:59",
       "layers": [
@@ -53,6 +62,15 @@
       "note": "",
       "path": "C:\\WINDOWS\\assembly\\NativeImages_v4.0.30319_64\\System.Web\\d8062fc067157b799111da0a85c6210e\\System.Web.ni.dll"
     },
+    "c3526bd0f27d364b787ab32e271570a972102c20723c014cd668541b019c11d7": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%USERPROFILE%\\.ssh\\id_ed25519"
+    },
     "cc2ec00c73700f25a93905dde9b0f18a9a84a4e60e9ad4559e3f71ff89686709": {
       "added_at": "2026-11-08T21:19:59",
       "layers": [
@@ -78,6 +96,15 @@
       ],
       "note": "",
       "path": "C:\\Windows\\system32\\drivers\\MsIo64.sys"
+    },
+    "dcb8daf9f7b51b4b6b1e63bb86347ec9bb8b08198e03c4c890b6e3ac7144f8ea": {
+      "added_at": "2026-11-08T21:19:59",
+      "layers": [
+        "hash",
+        "yara"
+      ],
+      "note": "",
+      "path": "%TEMP%\\pytest-of-%USERNAME%\\pytest-current\\test_double_extension0\\invoice.pdf.exe"
     },
     "e27ad7f632cee31b3f99f4185057421ff565b53256acd281a447e8696285cb36": {
       "added_at": "2026-11-08T21:19:59",

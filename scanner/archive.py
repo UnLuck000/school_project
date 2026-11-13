@@ -58,7 +58,7 @@ def members(path: Path, data: bytes | None = None):
     """(имя, содержимое) вложенных файлов, которые стоит проверять."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data) if data is not None else path)
-    except (zipfile.BadZipFile, OSError, ValueError):
+    except Exception:  # noqa: BLE001 — не архив или испорчен нарочно (см. ниже)
         return
     total = 0
     with zf:
@@ -80,8 +80,10 @@ def members(path: Path, data: bytes | None = None):
                     if total + info.file_size > TOTAL_LIMIT:
                         return
                     body = head + f.read(MEMBER_LIMIT)
-            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, ValueError,
-                    EOFError):
+            except Exception:  # noqa: BLE001 — причина ниже
+                # испорченная запись даёт что угодно: zlib.error, LZMAError, struct.error...
+                # Пропускаем её, а не весь архив: иначе одна битая запись перед вредоносом
+                # оставляла файл «не проверенным» — без сверки вложенных файлов с базами
                 continue
             total += len(body)
             yield info.filename, body
@@ -108,7 +110,12 @@ def pack(reason: str | None, path: Path, data: bytes | None, rules):
     чистого на вид архива есть вложенные файлы для сверки с базами хэшей."""
     if reason is not None:
         return reason
-    found, hashes = inspect(path, data, rules)
+    try:
+        found, hashes = inspect(path, data, rules)
+    except Exception:  # noqa: BLE001 — сбой разбора архива не отменяет проверку самого файла
+        from diag.log import swallowed
+        swallowed("archive: разбор вложенных файлов")
+        return None
     if found or not hashes:
         return found
     return MEMBERS, None, hashes

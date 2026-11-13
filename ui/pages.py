@@ -317,6 +317,8 @@ class SettingsPage(_UiPage):
         self.chk_launch = child(ui, QCheckBox, "chkLaunchGuard")
         self.chk_stealer = child(ui, QCheckBox, "chkStealerGuard")
         self.chk_amsi = child(ui, QCheckBox, "chkAmsi")
+        self.chk_pslog = child(ui, QCheckBox, "chkPsLog")
+        self.chk_pslog_all = child(ui, QCheckBox, "chkPsLogAll")
         from PySide6.QtWidgets import QTimeEdit
         from scanner import schedule
         self.chk_schedule = child(ui, QCheckBox, "chkSchedule")
@@ -382,6 +384,7 @@ class SettingsPage(_UiPage):
                      self.spn_workers, self.spn_interval,
                      self.chk_decoys, self.cmb_scan_mode, self.chk_ecores,
                      self.chk_revocation, self.chk_launch, self.chk_stealer, self.chk_amsi,
+                     self.chk_pslog, self.chk_pslog_all,
                      self.chk_schedule, self.cmb_schedule_kind, self.cmb_schedule_period,
                      self.time_schedule, *self.locks.values())
         self.load_values()
@@ -395,6 +398,8 @@ class SettingsPage(_UiPage):
         self.chk_launch.toggled.connect(lambda v: self._save("protect/launch", v))
         self.chk_stealer.toggled.connect(lambda v: self._save("protect/stealer", v))
         self.chk_amsi.toggled.connect(lambda v: self._save("protect/amsi", v))
+        self.chk_pslog.toggled.connect(lambda v: self._save("protect/pslog", v))
+        self.chk_pslog_all.toggled.connect(lambda v: self._save("protect/pslog_all", v))
         self.chk_schedule.toggled.connect(self._on_schedule_enabled)
         self.cmb_schedule_kind.currentIndexChanged.connect(
             lambda i: self._save("schedule/kind", self._kinds[i]))
@@ -488,6 +493,8 @@ class SettingsPage(_UiPage):
         self.chk_launch.setChecked(cfg.get("protect/launch"))
         self.chk_stealer.setChecked(cfg.get("protect/stealer"))
         self.chk_amsi.setChecked(cfg.get("protect/amsi"))
+        self.chk_pslog.setChecked(cfg.get("protect/pslog"))
+        self.chk_pslog_all.setChecked(cfg.get("protect/pslog_all"))
         from PySide6.QtCore import QTime
         from scanner import schedule
         self.chk_schedule.setChecked(cfg.get("schedule/enabled"))
@@ -616,8 +623,14 @@ class AboutPage(_UiPage):
 
         child(ui, QLabel, "lblComponents").setText(appinfo.COMPONENTS)
         child(ui, QLabel, "lblDisclaimer").setText(appinfo.DISCLAIMER)
-        child(ui, QPushButton, "btnRepo").clicked.connect(
+        repo = child(ui, QPushButton, "btnRepo")
+        repo.clicked.connect(
             lambda checked=False: QDesktopServices.openUrl(QUrl(appinfo.REPO_URL)))
+        # обновление программы (updatecheck.py): кнопка рядом со ссылкой на репозиторий
+        self.update_btn = QPushButton("Проверить обновления")
+        self.update_btn.setToolTip("Последний выпуск на GitHub: установщик проверяется по "
+                                   "SHA256SUMS и подписи, запускается только с вашего согласия")
+        repo.parentWidget().layout().addWidget(self.update_btn)
         self._admin_groups: list[QWidget] = []
 
     def add_admin_group(self, group: QWidget) -> None:

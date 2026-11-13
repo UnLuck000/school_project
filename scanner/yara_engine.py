@@ -6,9 +6,10 @@ from itertools import chain
 from pathlib import Path
 
 import yara
+import datadirs
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-LOG_FILE = BASE_DIR / "logs" / "yara_errors.log"
+LOG_FILE = datadirs.LOGS / "yara_errors.log"
 # Скомпилированные правила загружаются без проверки содержимого: подменённый файл (пустой
 # набор правил) молча выключил бы YARA. Поэтому они лежат в %ProgramData%\StretchBIT\yara
 # (trustseal.protected_subdir: запись — только администраторам, читать могут все); без прав
@@ -231,7 +232,10 @@ def _cache_dir(write: bool = False) -> Path | None:
     import trustseal
     if write:
         return trustseal.protected_subdir("yara")
-    return trustseal.protected_dir() / "yara" if trustseal.enabled() else None
+    # незакрытый корень мог наполнить кто угодно: его скомпилированные правила не грузим
+    if not trustseal.enabled() or not trustseal.root_trusted():
+        return None
+    return trustseal.protected_dir() / "yara"
 
 
 def _cache_paths(dirs: list[Path], skip: str, purpose: str = "file",

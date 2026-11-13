@@ -30,6 +30,13 @@ _sessions: dict[str, RizinSession] = {}
 _registry_lock = threading.Lock()
 
 
+def quote(value: str) -> str:
+    """Значение для команды rizin. Без кавычек путь с пробелом (C:/Program Files/...)
+    обрезался по пробелу: модуль Ghidra не находил описания процессоров, и вместо кода C
+    установленная программа показывала только дизассемблер."""
+    return f"'{value}'" if "'" not in value else f'"{value}"'
+
+
 def available() -> bool:
     return RIZIN.is_file() and SLEIGH.is_dir()
 
@@ -40,13 +47,15 @@ class RizinSession:
         self.lock = threading.Lock()
         self.analyzed = False
         self.proc = subprocess.Popen(
-            [str(RIZIN), "-q0", "-e", "scr.color=0", "-e", "scr.interactive=false",
+            # -N: без ~/.rizinrc и модулей из папки пользователя — туда пишет кто угодно, а
+            # команды из них выполнились бы в нашем процессе (с правами, если окно с правами)
+            [str(RIZIN), "-N", "-q0", "-e", "scr.color=0", "-e", "scr.interactive=false",
              "-e", "bin.relocs.apply=true", str(self.path)],
             cwd=str(RIZIN_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, creationflags=NO_WINDOW if os.name == "nt" else 0)
         self._read()                                   # rizin готов: первый \x00
         # переменная модуля появляется только после его загрузки — задаётся командой
-        self.cmd("e ghidra.sleighhome=" + str(SLEIGH).replace("\\", "/"))
+        self.cmd("e ghidra.sleighhome=" + quote(str(SLEIGH).replace("\\", "/")))
 
     def _read(self) -> str:
         out = bytearray()

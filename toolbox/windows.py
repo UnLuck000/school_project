@@ -394,6 +394,17 @@ def stealer_alarm(parent, info: dict, guard=None) -> None:
                                f"{info['path']}")
     box.exec()
     clicked = box.clickedButton()
+    if getattr(guard, "remote", False):
+        # тревога службы (service/guards.py): завершает, отпускает и разрешает она — у неё права
+        action = "kill" if clicked is kill else "allow" if clicked is allow else "once"
+        try:
+            message = guard.decide(info["alarm"], action)
+        except (OSError, ValueError) as e:
+            message = f"Служба не выполнила решение: {e}"
+        activity.record("stealer", message)
+        if action != "once":
+            QMessageBox.information(parent, "Защита от стилеров", message)
+        return
     if clicked is kill:
         import psutil
         try:

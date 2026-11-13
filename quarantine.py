@@ -47,18 +47,29 @@ _CHUNK = 1 << 20
 
 def _xor_copy(src: Path, dst: Path) -> None:
     """Копия src в dst через XOR (операция обратима: тем же вызовом обратно)."""
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        _xor_stream(fin, fout)
+
+
+def _xor_stream(fin, fout, digest=None, plain_in: bool = True) -> int:
+    """XOR из открытого файла в открытый файл; размер. digest — SHA-256 исходного
+    содержимого: plain_in — вход как есть (карантин), иначе выход (восстановление)."""
     table = [bytes(b ^ k for b in range(256)) for k in XOR_KEY]
     width = len(XOR_KEY)
     block = _CHUNK - _CHUNK % width  # кусок кратен ключу: его фаза не сбивается
-    with open(src, "rb") as fin, open(dst, "wb") as fout:
-        while True:
-            chunk = fin.read(block)
-            if not chunk:
-                break
-            out = bytearray(chunk)
-            for i in range(width):
-                out[i::width] = chunk[i::width].translate(table[i])
-            fout.write(out)
+    size = 0
+    while True:
+        chunk = fin.read(block)
+        if not chunk:
+            break
+        out = bytearray(chunk)
+        for i in range(width):
+            out[i::width] = chunk[i::width].translate(table[i])
+        if digest is not None:
+            digest.update(chunk if plain_in else out)
+        fout.write(out)
+        size += len(chunk)
+    return size
 
 
 def _stored_sha256(meta: dict) -> str:
@@ -129,9 +140,21 @@ def add_hash_to_signatures(sha256: str) -> bool:
     return True
 
 
+# Интерфейс со службой (service/remote.py): карантин ведёт служба, вызовы идут по каналу.
+# В самой службе и без неё — None, всё как раньше.
+_remote = None
+
+
+def set_remote(backend) -> None:
+    global _remote
+    _remote = backend
+
+
 def quarantine_file(path: Path, reason: str) -> str:
     """Перемещает файл в карантин и возвращает его идентификатор. NeedAdmin — нет прав на
     папку карантина; PermissionError — файл занят."""
+    if _remote is not None:
+        return _remote.quarantine_file(path, reason)
     _check_writable()
     path = Path(path).resolve()
 
@@ -165,9 +188,77 @@ def quarantine_file(path: Path, reason: str) -> str:
         raise
     return item_id
 
+
+def quarantine_stream(fin, original_path: str, reason: str, delete=None) -> str:
+    """Карантин из уже открытого файла (служба: дескриптор открыл интерфейс со своими
+    правами, путь от пользователя служба не открывает). delete() — удалить исходный файл
+    через тот же дескриптор; ошибка удаления отменяет карантин."""
+    import hashlib
+    _check_writable()
+    item_id = uuid.uuid4().hex
+    stored = _stored_path(item_id)
+    digest = hashlib.sha256()
+    try:
+        with open(stored, "wb") as fout:
+            size = _xor_stream(fin, fout, digest)
+        meta = {
+            "id": item_id,
+            "status": STATUS_QUARANTINED,
+            "original_path": str(original_path),
+            "sha256": digest.hexdigest(),
+            "size": size,
+            "reason": reason,
+            "signature": "",
+            "quarantined_at": _now(),
+            "encoding": ENCODING,
+        }
+        _write_meta(meta)
+        if delete is not None:
+            delete()
+    except BaseException:
+        stored.unlink(missing_ok=True)
+        _meta_path(item_id).unlink(missing_ok=True)
+        raise
+    return item_id
+
+
+def restore_stream(item_id: str, fout, dest: str = "", whitelist: bool = True) -> str:
+    """Восстановление в уже открытый файл (служба: файл создал интерфейс со своими правами).
+    Содержимое сверяется с хэшем до записи статуса. Возвращает путь назначения."""
+    import hashlib
+    meta = _read_meta(item_id)
+    if meta["status"] != STATUS_QUARANTINED:
+        raise ValueError("Этот элемент уже восстановлен или удалён")
+    if _stored_sha256(meta) != meta["sha256"]:
+        raise ValueError("Хэш изменился: файл в карантине повреждён")
+    stored = _stored_path(item_id)
+    digest = hashlib.sha256()
+    with open(stored, "rb") as fin:
+        if meta.get("encoding") == ENCODING:
+            _xor_stream(fin, fout, digest, plain_in=False)
+        else:
+            for chunk in iter(lambda: fin.read(_CHUNK), b""):
+                digest.update(chunk)
+                fout.write(chunk)
+    fout.flush()
+    if digest.hexdigest() != meta["sha256"]:
+        raise ValueError("Хэш изменился при восстановлении")
+    stored.unlink(missing_ok=True)
+    dest = dest or meta["original_path"]
+    meta["status"] = STATUS_RESTORED
+    meta["restored_at"] = _now()
+    meta["restored_to"] = dest
+    _write_meta(meta)
+    if whitelist:
+        add_to_whitelist(meta["sha256"], dest)
+    return dest
+
+
 def list_quarantine(include_history: bool = False) -> list[dict]:
     """По умолчанию возвращает только файлы, которые сейчас в карантине.
     С include_history=True добавляет восстановленные и удалённые записи."""
+    if _remote is not None:
+        return _remote.list_quarantine(include_history)
     if not QUARANTINE_DIR.exists():
         return []
     items = []
@@ -181,6 +272,8 @@ def list_quarantine(include_history: bool = False) -> list[dict]:
 def restore_file(item_id: str, overwrite: bool = False, whitelist: bool = True) -> Path:
     """Возвращает файл на исходное место. JSON остаётся со статусом «restored».
     По умолчанию хэш файла заносится в белый список."""
+    if _remote is not None:
+        return _remote.restore_file(item_id, overwrite, whitelist)
     meta = _read_meta(item_id)
     if meta["status"] != STATUS_QUARANTINED:
         raise ValueError("Этот элемент уже восстановлен или удалён")
@@ -218,6 +311,8 @@ def restore_file(item_id: str, overwrite: bool = False, whitelist: bool = True) 
 def delete_file(item_id: str) -> bool:
     """Удаляет файл, оставляет JSON со статусом «deleted» и заносит хэш в базу сигнатур.
     Возвращает True, если хэш был добавлен в hashes.txt (False, если уже был там)."""
+    if _remote is not None:
+        return _remote.delete_file(item_id)
     meta = _read_meta(item_id)
     if meta["status"] != STATUS_QUARANTINED:
         raise ValueError("Этот элемент уже восстановлен или удалён")

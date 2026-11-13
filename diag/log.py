@@ -12,9 +12,9 @@ import logging
 import logging.handlers
 import sys
 import time
-from pathlib import Path
+import datadirs
 
-LOG_DIR = Path("logs")
+LOG_DIR = datadirs.LOGS
 LOG_FILE = LOG_DIR / "app.log"
 MAX_BYTES = 5 * 2 ** 20
 BACKUPS = 5

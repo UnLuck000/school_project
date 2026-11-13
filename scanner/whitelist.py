@@ -27,6 +27,14 @@ def trusted_hashes() -> set[str]:
 
 TRUSTED_SECONDS = 2.0
 _trusted: tuple[float, frozenset] | None = None
+# интерфейс со службой (service/remote.py): белый список ведёт служба; в ней и без неё — None
+_remote = None
+
+
+def set_remote(backend) -> None:
+    global _remote
+    _remote = backend
+    forget_trusted()
 
 
 def forget_trusted() -> None:
@@ -36,6 +44,8 @@ def forget_trusted() -> None:
 
 def load_whitelist() -> dict[str, dict]:
     """Возвращает {sha256: {"path": ..., "added_at": ...}}."""
+    if _remote is not None:
+        return _remote.load_whitelist()
     try:
         # trustseal: файл, изменённый не программой, не действует, пока пользователь не решит
         data = json.loads(trustseal.read(WHITELIST_FILE).decode("utf-8"))
@@ -55,6 +65,9 @@ def _save(data: dict) -> None:
 
 def add_to_whitelist(sha256: str, path: str) -> bool:
     """Добавляет хэш. Возвращает False, если он уже был в списке."""
+    if _remote is not None:
+        forget_trusted()
+        return _remote.add_to_whitelist(sha256, path)
     sha256 = sha256.strip().lower()
     data = load_whitelist()
     if sha256 in data:
@@ -69,6 +82,9 @@ def add_to_whitelist(sha256: str, path: str) -> bool:
 
 def remove_from_whitelist(sha256: str) -> bool:
     """Убирает хэш. Возвращает False, если его там не было."""
+    if _remote is not None:
+        forget_trusted()
+        return _remote.remove_from_whitelist(sha256)
     data = load_whitelist()
     if data.pop(sha256.strip().lower(), None) is None:
         return False

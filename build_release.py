@@ -1,4 +1,4 @@
-"""Сборка: python build_release.py [--zip] [--installer]
+"""Сборка: python build_release.py [--zip] [--installer] [--sign] [--windivert]
 
 1. PyInstaller по StretchBIT.spec → dist/StretchBIT: StretchBIT.exe и папка app со всем остальным.
 2. Рядом кладутся ядра VPN (vpn/bin), инструменты декомпилятора (tools/bin) и из signatures —
@@ -17,9 +17,22 @@
    в ...\\StretchBIT-test (прежнее C:\\Utils\\SBIT переносится); LZMA2, при удалении — флажок
    «Удалить все настройки пользователя».
 
+6. --windivert — WinDivert (native/windivert: WinDivert.dll и WinDivert64.sys, официальный
+   выпуск) в app/native/windivert: TLS на вкладке «Сеть» работает без zapret, из папки,
+   закрытой от записи. По умолчанию НЕ кладётся: Microsoft Defender считает официальный
+   архив WinDivert угрозой (Misleading:Win32/Malgent) и у пользователя мог бы остановить
+   установщик целиком. Без него вкладка TLS предлагает указать папку WinDivert.
+7. release/SHA256SUMS — хэши архивов и установщиков (по ним проверяет обновление
+   updatecheck.py; файл выкладывается в выпуск GitHub вместе с ними).
+8. --sign — подпись Authenticode (signtool из Windows SDK) StretchBIT.exe, библиотек AMSI и
+   установщиков: сертификат — SBIT_SIGN_PFX (+ SBIT_SIGN_PASSWORD) или отпечаток в хранилище
+   SBIT_SIGN_THUMBPRINT; метка времени — SBIT_SIGN_TIMESTAMP (по умолчанию DigiCert).
+
 Журналы, карантин, кэш в сборку не попадают; настройки, журнал действий, профили VPN и пароль
 администратора — в %APPDATA%\\StretchBitConfiguration[-test] (userdata.py), не в папке программы.
 """
+import glob
+import hashlib
 import json
 import os
 import shutil
@@ -158,6 +171,75 @@ def copy_signatures(app: Path) -> None:
         raise SystemExit(f"В сборку попали локальные файлы: {leaked}")
 
 
+def copy_windivert(app: Path) -> None:
+    """WinDivert для вкладки «TLS» (native/windivert, вне Git; THIRD_PARTY.md — версия и
+    лицензия LGPL v3) — только с ключом --windivert."""
+    src = ROOT / "native" / "windivert"
+    files = ("WinDivert.dll", "WinDivert64.sys")
+    dst = app / "native" / "windivert"
+    if "--windivert" not in sys.argv:
+        shutil.rmtree(dst, ignore_errors=True)
+        print("WinDivert в сборку не кладётся (ключ --windivert): Defender считает его "
+              "угрозой; вкладка TLS предложит указать папку WinDivert")
+        return
+    if not all((src / name).is_file() for name in files):
+        print("! native/windivert без WinDivert.dll и WinDivert64.sys — TLS в сборке только "
+              "с WinDivert, указанным вручную")
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in (*files, "LICENSE", "THIRD_PARTY.md"):
+        if (src / name).is_file():
+            shutil.copy2(src / name, dst / name)
+
+
+def find_signtool() -> Path | None:
+    found = shutil.which("signtool")
+    if found:
+        return Path(found)
+    kits = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                        "Windows Kits", "10", "bin", "*", "x64", "signtool.exe")
+    candidates = sorted(glob.glob(kits))
+    return Path(candidates[-1]) if candidates else None
+
+
+def sign(files: list[Path]) -> None:
+    """Подпись Authenticode (--sign). Без сертификата — ошибка: подписать «как-нибудь»
+    нельзя, а молча пропустить — значит выпустить неподписанное."""
+    if "--sign" not in sys.argv or not files:
+        return
+    tool = find_signtool()
+    if tool is None:
+        raise SystemExit("Нет signtool.exe (Windows SDK) для --sign")
+    args = [str(tool), "sign", "/fd", "SHA256", "/td", "SHA256",
+            "/tr", os.environ.get("SBIT_SIGN_TIMESTAMP", "http://timestamp.digicert.com")]
+    if os.environ.get("SBIT_SIGN_PFX"):
+        args += ["/f", os.environ["SBIT_SIGN_PFX"]]
+        if os.environ.get("SBIT_SIGN_PASSWORD"):
+            args += ["/p", os.environ["SBIT_SIGN_PASSWORD"]]
+    elif os.environ.get("SBIT_SIGN_THUMBPRINT"):
+        args += ["/sha1", os.environ["SBIT_SIGN_THUMBPRINT"]]
+    else:
+        raise SystemExit("--sign: задайте SBIT_SIGN_PFX или SBIT_SIGN_THUMBPRINT")
+    subprocess.run(args + [str(f) for f in files], check=True)
+    print("Подписано:", ", ".join(f.name for f in files))
+
+
+def write_sums(files: list[Path]) -> Path:
+    """release/SHA256SUMS: «хэш  имя» (как sha256sum) — для проверки обновления."""
+    out = ROOT / "release" / "SHA256SUMS"
+    lines = {}
+    if out.is_file():  # прежние строки других файлов этой версии остаются
+        for line in out.read_text(encoding="utf-8").splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and (ROOT / "release" / parts[1].strip()).is_file():
+                lines[parts[1].strip()] = parts[0]
+    for f in files:
+        lines[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+    out.write_text("".join(f"{sha}  {name}\n" for name, sha in sorted(lines.items())),
+                   encoding="utf-8")
+    return out
+
+
 def make_editions() -> dict[str, Path]:
     """dist/StretchBIT → релизная; её копия dist/StretchBIT-test → тестовая."""
     folders = {}
@@ -211,13 +293,22 @@ def main() -> None:
     copy_vpn_cores(DIST / "app")
     copy_decompilers(DIST / "app")
     copy_signatures(DIST / "app")
+    copy_windivert(DIST / "app")
+    sign([DIST / f"{NAME}.exe", *sorted((DIST / "app" / "native" / "amsi" / "bin").glob("*.dll"))])
+    made = []
     for edition, folder in make_editions().items():
         size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()) / 2 ** 20
         print(f"Готово ({edition}): {folder} ({size:.0f} МБ)")
         if "--zip" in sys.argv:
-            print("Архив:", make_zip(folder))
+            made.append(make_zip(folder))
+            print("Архив:", made[-1])
         if "--installer" in sys.argv:
-            print("Установщик:", make_installer(folder, edition))
+            installer = make_installer(folder, edition)
+            sign([installer])
+            made.append(installer)
+            print("Установщик:", installer)
+    if made:
+        print("Хэши:", write_sums(made))
 
 
 if __name__ == "__main__":

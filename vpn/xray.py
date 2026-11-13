@@ -238,7 +238,10 @@ def options_from_settings(mode: str = "proxy", log=None, xray_exe: str = "") -> 
     options["mode"] = mode
     options["ip_mode"] = str(_cfg("vpn/ip_mode", "ipv4") or "ipv4")
     options["dns"] = str(_cfg("vpn/dns_server", "1.1.1.1") or "1.1.1.1")
-    options["assets"] = routing.assets_dir(profile, Path(xray_exe).parent) if xray_exe else ""
+    options["assets"] = routing.assets_dir(profile, Path(xray_exe).parent,
+                                           options.get("adblock")) if xray_exe else ""
+    if options["assets"] and options.get("adblock"):
+        options["adblock_ext"] = routing.ADBLOCK_DAT  # список — файлом, не строками
     return options
 
 
@@ -376,7 +379,10 @@ def apply_options(config: dict, v: dict, options: dict, log=None) -> dict:
     head += _rules_for(options.get("rules_direct", []), "direct", ip_files)
     if options.get("block_ads"):
         head.append({"type": "field", "domain": list(ADS), "outboundTag": "block"})
-    if options.get("adblock"):
+    if options.get("adblock_ext"):
+        head.append({"type": "field", "domain": [f"ext:{options['adblock_ext']}:adblock"],
+                     "outboundTag": "block"})
+    elif options.get("adblock"):
         head.append({"type": "field", "domain": ["domain:" + d for d in options["adblock"]],
                      "outboundTag": "block"})
     if options.get("block_udp"):

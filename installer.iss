@@ -9,6 +9,11 @@
 ; Удаление: StretchBIT.exe --uninstall --silent [--wipe] (uninstall.py: сеть после VPN,
 ; брандмауэр, ETW, ловушки, автозапуск, меню Проводника), затем Inno удаляет папку целиком.
 ; Флажок «Удалить все настройки пользователя» — ещё и папку конфигурации (userdata.py).
+; Служба Windows (service/, с 1.1): защита файлов, карантин и журнал защиты работают в службе
+; StretchBITService[-test] от имени системы, окно программы — без прав администратора. Перед
+; заменой файлов служба останавливается (net stop ждёт остановки: иначе StretchBIT.exe занят),
+; после — «StretchBIT.exe --service-install» создаёт или обновляет её и запускает. Удаление:
+; шаги uninstall.py останавливают и удаляют службу; на крайний случай — sc delete.
 
 #ifndef Edition
   #define Edition "release"
@@ -25,12 +30,14 @@
 
 #define ExeName "StretchBIT.exe"
 #if Edition == "test"
+  #define ServiceName "StretchBITService-test"
   #define AppKey "StretchBIT-test"
   #define DisplayName "StretchBIT (тест)"
   #define InstallDir "{autopf}\StretchBIT-test"
   #define OldDir "C:\Utils\SBIT-test"
   #define ConfigName "StretchBitConfiguration-test"
 #else
+  #define ServiceName "StretchBITService"
   #define AppKey "StretchBIT"
   #define DisplayName "StretchBIT"
   #define InstallDir "{autopf}\StretchBIT"
@@ -39,6 +46,10 @@
 #endif
 
 [Setup]
+; 64-битный режим: без него {autopf} — «Program Files (x86)», а записи реестра установщика —
+; в WOW6432Node (13.11.2026 тестовая так и встала: C:\Program Files (x86)\StretchBIT-test)
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 AppId={#AppKey}
 AppName={#DisplayName}
 AppVersion={#AppVersion}
@@ -54,10 +65,11 @@ DisableReadyPage=no
 ; с наивысшими правами), а папку, куда может писать любая программа пользователя, можно
 ; было подменить (положить свою DLL — и получить права администратора при следующем входе).
 ; После копирования файлов права папки закрываются ([Run], icacls): пользователям только
-; чтение, запись — лишь в журналы, отчёты и кэш ([Dirs]). Базы (signatures) и карантин
-; пишет только программа с правами администратора: иначе вредонос без прав мог бы дописать
-; себя в исключения или стереть базы. Скомпилированные правила YARA — в
-; %ProgramData%\StretchBIT\yara (scanner/yara_engine, trustseal), не в открытом кэше.
+; чтение, целиком, включая журналы, кэш и отчёты. Программа с правами пишет только сюда;
+; без прав (отказ в окне UAC) — в %LOCALAPPDATA%\StretchBIT (datadirs.py). Раньше logs,
+; cache и reports были открыты всем: процесс без прав подменял вложенную папку ссылкой
+; (junction) — и программа с правами писала и удаляла файлы уже в чужой папке. Базы, карантин
+; и всё остальное — только администраторам. Правила YARA — в %ProgramData%\StretchBIT\yara.
 PrivilegesRequired=admin
 OutputDir={#OutputDir}
 OutputBaseFilename={#AppKey}-{#AppVersion}-setup
@@ -80,8 +92,7 @@ Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "desktopicon"; Description: "Ярлык на рабочем столе"; GroupDescription: "Ярлыки:"
 
 [Dirs]
-; logs, cache, reports — сюда программа пишет и без прав администратора (отказ в окне UAC);
-; quarantine_data и signatures — только с правами (запись для пользователей не выдаётся)
+; папки данных — только для программы с правами (запись пользователям не выдаётся)
 Name: "{app}\app\logs"
 Name: "{app}\app\cache"
 Name: "{app}\app\reports"
@@ -106,12 +117,8 @@ Name: "{autoprograms}\Удалить {#DisplayName}"; Filename: "{uninstallexe}"
 Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /setowner *S-1-5-32-544 /T /C /Q"; Flags: runhidden; StatusMsg: "Закрываю папку программы от изменений..."
 Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /reset /T /C /Q"; Flags: runhidden
 Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /C /Q"; Flags: runhidden
-Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\logs"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
-Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\cache"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
-Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\reports"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
-#if Edition == "test"
-Filename: "{sys}\icacls.exe"; Parameters: """{app}\app\diag"" /grant *S-1-5-32-545:(OI)(CI)M /C /Q"; Flags: runhidden
-#endif
+; служба защиты: создать или обновить (путь, автозапуск, перезапуск при сбое) и запустить
+Filename: "{app}\{#ExeName}"; Parameters: "--service-install"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; StatusMsg: "Устанавливаю службу защиты..."
 Filename: "{app}\{#ExeName}"; Description: "Запустить {#DisplayName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -175,16 +182,72 @@ begin
   RemoveDir(ExtractFileDir(Old));  { C:\Utils — только если пустая }
 end;
 
+{ установка 32-битным установщиком (до 64-битного режима) — в «Program Files (x86)»: данные
+  переносятся, папка и запись «Приложения» в WOW6432Node удаляются. Деинсталлятор прежней копии
+  НЕ запускается: он снял бы общие для обеих версий правила брандмауэра «SBIT» и прочее, а
+  служба, ловушки и меню Проводника переходят к новой копии сами (--service-install и запуск) }
+procedure MoveX86Install();
+var
+  Old, App: String;
+begin
+  Old := ExpandConstant('{commonpf32}\{#AppKey}');
+  App := ExpandConstant('{app}');
+  if (not DirExists(Old + '\app')) or (CompareText(Old, App) = 0) then
+    exit;
+  ForceDirectories(Old + '\app\cache');
+  SaveStringToFile(Old + '\app\cache\no_restart', 'setup', False);
+  ForceDirectories(App + '\app');
+  CopyData(Old + '\app\quarantine_data', App + '\app\quarantine_data');
+  CopyData(Old + '\app\logs', App + '\app\logs');
+  CopyData(Old + '\app\reports', App + '\app\reports');
+  DelTree(Old, True, True, True);
+  RegDeleteKeyIncludingSubkeys(HKLM32,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppKey}_is1');
+end;
+
+{ служба держит StretchBIT.exe открытым: остановить до замены файлов. net stop ждёт, пока
+  служба остановится; службы нет или не работает — код ошибки, это не мешает }
+procedure StopService();
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\net.exe'), 'stop {#ServiceName}', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+end;
+
+{ окно программы на закрытие сворачивается в трей, у сторожа (--watchdog) окна нет: Restart
+  Manager их не закрывает, и обновление откатывалось («не удалось закрыть приложения»).
+  Закрываются процессы StretchBIT.exe только из папки этой установки (по пути, не по имени —
+  другая версия и чужие программы не трогаются); метка no_restart уже стоит }
+procedure CloseRunning();
+var
+  Code: Integer;
+  App: String;
+begin
+  App := ExpandConstant('{app}');
+  if not FileExists(App + '\{#ExeName}') then
+    exit;
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+       '-NoProfile -NonInteractive -Command "$d = ''' + App + '\''; ' +
+       'Get-Process -Name StretchBIT -ErrorAction SilentlyContinue | ' +
+       'Where-Object { $_.Path -and $_.Path.StartsWith($d, ''OrdinalIgnoreCase'') } | ' +
+       'Stop-Process -Force -ErrorAction SilentlyContinue"',
+       '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
 { перед заменой файлов программу закроют: её сторож (selfguard.py) не должен вернуть её }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  StopService();
   if DirExists(ExpandConstant('{app}\app')) then
   begin
     ForceDirectories(ExpandConstant('{app}\app\cache'));
     SaveStringToFile(ExpandConstant('{app}\app\cache\no_restart'), 'setup', False);
   end;
+  CloseRunning();
   MoveOldInstall();
+  MoveX86Install();
 end;
 
 { окно перед удалением: флажок «Удалить все настройки пользователя» }
@@ -267,7 +330,11 @@ begin
                      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
       Exec(ExpandConstant('{app}\{#ExeName}'), Params, ExpandConstant('{app}'), SW_HIDE,
            ewWaitUntilTerminated, Code);
-  { на случай, если программа не смогла (нет файла, ошибка) }
+  { на случай, если программа не смогла (нет файла, ошибка): служба не должна остаться
+    указывать на удалённую папку }
+  StopService();
+  Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#ServiceName}', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
   if WipeSettings then
     DelTree(ExpandConstant('{userappdata}\{#ConfigName}'), True, True, True);
 end;

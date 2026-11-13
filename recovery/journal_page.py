@@ -150,6 +150,34 @@ class JournalPage(QWidget):
                     item.setForeground(col, QBrush(QColor("gray")))
             self.tree.addTopLevelItem(item)
 
+    def _undo_elevated(self, ids: list[str]) -> None:
+        """Отмена, которой нужны права администратора (окно со службой работает без них):
+        отдельный процесс через окно UAC (service/elevate.py), затем журнал обновляется."""
+        from PySide6.QtCore import QTimer
+
+        from service import elevate
+        if QMessageBox.question(
+                self, "Отмена действия",
+                f"Для отмены ({len(ids)}) нужны права администратора. Отменить через окно "
+                "UAC?") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            handle = elevate.start(["--undo", *ids])
+        except OSError as e:
+            QMessageBox.warning(self, "Отмена действия", str(e))
+            return
+        if handle is None:
+            return
+        timer = QTimer(self)
+
+        def poll():
+            if elevate.exit_code(handle) is not None:
+                timer.stop()
+                timer.deleteLater()
+                self.refresh()
+        timer.timeout.connect(poll)
+        timer.start(500)
+
     def undo_selected(self) -> None:
         records = {r["id"]: r for r in journal.read_all()}
         # порядок списка: сверху новые, поэтому действия отменяются от последнего к первому
@@ -170,15 +198,31 @@ class JournalPage(QWidget):
             else f"Отменить действие?\n\n{items[0].text(1)}")
         if answer != QMessageBox.StandardButton.Yes:
             return
-        messages, errors = [], []
+        messages, errors, denied = [], [], []
+        from service import elevate
         for it in items:
             record_id = it.data(0, ID_ROLE)
             try:
-                messages.append(journal.undo(record_id))
+                try:
+                    messages.append(journal.undo(record_id))
+                except journal.UnsignedRecord as unsigned:
+                    if QMessageBox.question(
+                            self, "Запись без подписи",
+                            "Эта запись журнала не подписана: она сделана прежней версией или "
+                            "без прав администратора — или её дописала другая программа. "
+                            "Отменяйте, только если узнаёте это действие.\n\n"
+                            f"{unsigned}\n\nОтменить?") != QMessageBox.StandardButton.Yes:
+                        continue
+                    messages.append(journal.undo(record_id, unsigned_ok=True))
             except (ValueError, OSError) as exc:
+                if elevate.wanted("recovery") and elevate.needs_admin(exc):
+                    denied.append(record_id)  # окно без прав: отменить процессом с правами
+                    continue
                 errors.append(f"{it.text(1)}: {exc}")
                 continue
             self.undone.emit(records[record_id])
+        if denied:
+            self._undo_elevated(denied)
         self.refresh()
         if errors:
             QMessageBox.warning(

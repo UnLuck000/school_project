@@ -24,11 +24,33 @@ def _text(raw: bytes) -> str:
     return text
 
 
+java_refused = ""  # почему найденная Java не запускается (для сообщения)
+
+
 def find_java() -> str | None:
+    """java.exe из JAVA_HOME или PATH. Обе переменные пользователь без прав задаёт сам
+    (HKCU/Environment действует и на окно с правами администратора): с правами запускается
+    только java.exe, который меняют одни администраторы (winacl), иначе чужая программа
+    под именем java.exe получила бы наши права."""
+    global java_refused
+    java_refused = ""
     home = os.environ.get("JAVA_HOME")
-    if home and (Path(home) / "bin" / "java.exe").is_file():
-        return str(Path(home) / "bin" / "java.exe")
-    return shutil.which("java")
+    found = str(Path(home) / "bin" / "java.exe") if home and (
+        Path(home) / "bin" / "java.exe").is_file() else shutil.which("java")
+    if not found:
+        return None
+    try:
+        from processmanager.system import is_admin
+        elevated = is_admin()
+    except Exception:  # noqa: BLE001 — права не узнать: проверяем как с правами
+        elevated = True
+    if elevated:
+        import winacl
+        ok, reason = winacl.admin_only(found)
+        if not ok:
+            java_refused = f"{found}: {reason}"
+            return None
+    return found
 
 
 def decompile(node: Node) -> tuple[str, str, str]:
@@ -105,6 +127,10 @@ def _java(path: Path) -> tuple[str, str, str]:
     java = find_java()
     if cfr is None:
         return "Декомпилятор Java не найден (tools/bin/cfr).", "", ""
+    if java is None and java_refused:
+        return ("Java найдена, но не запущена: программа работает с правами администратора, "
+                "а этот файл может подменить любая программа без прав. " + java_refused,
+                "", "")
     if java is None:
         return ("Для декомпиляции .class нужна Java (не найдена: JAVA_HOME, PATH). Дерево "
                 "классов и проверка файлов работают и без неё.", "", "")

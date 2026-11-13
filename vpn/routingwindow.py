@@ -74,11 +74,13 @@ def run_job(owner: QObject, fn, done) -> None:
 
     def work():
         try:
-            result = fn()
+            result, error = fn(), None
         except Exception as e:  # noqa: BLE001 — ошибку покажет окно
-            job.finished.emit(None, e)
-            return
-        job.finished.emit(result, None)
+            result, error = None, e
+        try:
+            job.finished.emit(result, error)
+        except RuntimeError:  # noqa: S110 — окно закрыли, пока шла работа: показывать некому
+            pass
 
     threading.Thread(target=work, daemon=True, name="vpn-routing").start()
 
@@ -165,7 +167,9 @@ class RuleDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(_hint(
             "Правило срабатывает, когда выполнены ВСЕ заполненные условия; пустые поля не "
-            "проверяются. Правила «Дополнительно» проверяются раньше остальных, сверху вниз."))
+            "проверяются. Правила «Дополнительно» проверяются раньше остальных, сверху вниз. "
+            "Адрес и порт источника в режиме TUN не работают: весь трафик приходит в Xray от "
+            "sing-box с 127.0.0.1 — они для режимов прокси (программы в локальной сети)."))
         form = QFormLayout()
         self.name = QLineEdit(r["name"])
         self.name.setPlaceholderText("необязательно")
@@ -1083,11 +1087,14 @@ class RoutingCard(QWidget):
         return [p.name for p in self.profiles]
 
     def set_busy(self, busy: bool) -> None:
+        """Вызывается раз в секунду (такт окна VPN): только виджеты, без чтения с диска."""
+        if getattr(self, "_busy_state", None) == busy:
+            return
+        self._busy_state = busy
         self.combo.setEnabled(not busy)
         self.combo.setToolTip("Профиль меняется, когда VPN отключён" if busy else "")
         p = self.current()
-        self.buttons["delete"].setEnabled(bool(p and not p.is_default) and not (
-            busy and p.id == routing.active().id))
+        self.buttons["delete"].setEnabled(bool(p and not p.is_default) and not busy)
 
     def _on_select(self, _index: int) -> None:
         p = self.current()
@@ -1096,6 +1103,7 @@ class RoutingCard(QWidget):
         if not self.busy():
             routing.set_active(p.id)
         self.summary.setText(p.summary())
+        self._busy_state = None  # кнопки — заново для выбранного профиля
         self.set_busy(self.busy())
         self.changed.emit()
 

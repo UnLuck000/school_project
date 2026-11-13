@@ -195,6 +195,10 @@ private:
                 if (value & ordinal_flag) continue;  // импорт по номеру: имени нет
                 std::string name = c_string(static_cast<uint32_t>(value & 0x7FFFFFFF) + 2);
                 if (name.empty()) continue;
+                // имя не из ASCII — мусор (pefile такие тоже пропускает); байт вне UTF-8
+                // иначе ронял создание строки Python, и весь файл оставался без оценки
+                if (std::any_of(name.begin(), name.end(),
+                                [](unsigned char c) { return c >= 0x80; })) continue;
                 std::transform(name.begin(), name.end(), name.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 info_.imports.push_back(std::move(name));

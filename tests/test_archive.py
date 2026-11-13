@@ -65,3 +65,24 @@ def test_pool_checks_members_too(tmp_path):
     finally:
         scan.shutdown()
     assert got == {"pack.zip": "hash match (в архиве: evil.exe)", "clean.zip": None}
+
+
+def test_broken_member_does_not_hide_the_rest():
+    """Испорченная запись перед вредоносом: раньше ошибка распаковки (zlib, LZMA) обрывала
+    разбор, и файл оставался «не проверенным»."""
+    import io
+    import zipfile
+
+    from scanner import archive
+    for method in (zipfile.ZIP_DEFLATED, zipfile.ZIP_LZMA, zipfile.ZIP_BZIP2):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", method) as z:
+            z.writestr("first.exe", b"MZ" + bytes(range(256)) * 40)
+            z.writestr("second.exe", b"MZ" + b"payload " * 500)
+        data = bytearray(buf.getvalue())
+        start = data.index(b"first.exe") + len("first.exe")
+        for i in range(start + 8, start + 200):          # портим сжатые данные первой записи
+            data[i] ^= 0xFF
+        found, hashes = archive.inspect(Path("x.zip"), bytes(data), None)
+        assert found is None and [h[0] for h in hashes] == ["second.exe"]
+    assert archive.pack(None, Path("x.zip"), b"PK" + bytes([3, 4]) + bytes(64), None) is None

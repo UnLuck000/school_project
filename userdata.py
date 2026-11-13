@@ -35,7 +35,9 @@ OLD_REGISTRY = ("StudyAV", "myav")
 
 
 def _config_dir() -> Path:
-    if os.environ.get(ENV):
+    # подмена папки — только при запуске из исходников (тесты): в собранной программе
+    # переменную окружения пользователя может поставить кто угодно
+    if os.environ.get(ENV) and not getattr(sys, "frozen", False):
         return Path(os.environ[ENV])
     from diag import edition
     root = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
@@ -44,6 +46,7 @@ def _config_dir() -> Path:
 
 CONFIG_DIR = _config_dir()
 SETTINGS_FILE = CONFIG_DIR / "settings.ini"
+SECURE_SETTINGS_FILE = CONFIG_DIR / "secure_settings.json"  # защита, запреты, пути (trustseal)
 JOURNAL_DIR = CONFIG_DIR / "journal"
 WHITELIST_FILE = CONFIG_DIR / "whitelist.json"
 EXCLUSIONS_FILE = CONFIG_DIR / "exclusions.json"
@@ -51,6 +54,27 @@ OVERRIDES_FILE = CONFIG_DIR / "overrides.json"
 VPN_PROFILES_DIR = CONFIG_DIR / "vpn_profiles"
 ADMIN_DIR = CONFIG_DIR / "admin"
 PROCESS_INFO_FILE = CONFIG_DIR / "process_info.json"
+
+
+
+def set_root(folder: Path) -> None:
+    """Служба Windows (service/core.py): своя папка данных вместо %APPDATA% пользователя —
+    %ProgramData%\\StretchBIT[-test]\\service, запись только системе и администраторам.
+    Вызывать до импорта модулей, которые берут пути отсюда при импорте (журнал, белый
+    список, настройки)."""
+    global CONFIG_DIR, SETTINGS_FILE, SECURE_SETTINGS_FILE, JOURNAL_DIR, WHITELIST_FILE
+    global EXCLUSIONS_FILE, OVERRIDES_FILE, VPN_PROFILES_DIR, ADMIN_DIR, PROCESS_INFO_FILE
+    CONFIG_DIR = Path(folder)
+    SETTINGS_FILE = CONFIG_DIR / "settings.ini"
+    SECURE_SETTINGS_FILE = CONFIG_DIR / "secure_settings.json"
+    JOURNAL_DIR = CONFIG_DIR / "journal"
+    WHITELIST_FILE = CONFIG_DIR / "whitelist.json"
+    EXCLUSIONS_FILE = CONFIG_DIR / "exclusions.json"
+    OVERRIDES_FILE = CONFIG_DIR / "overrides.json"
+    VPN_PROFILES_DIR = CONFIG_DIR / "vpn_profiles"
+    ADMIN_DIR = CONFIG_DIR / "admin"
+    PROCESS_INFO_FILE = CONFIG_DIR / "process_info.json"
+
 
 # что переносится из папки программы при первом запуске новой версии: старое -> новое
 MOVES = (
@@ -124,3 +148,45 @@ def migrate(force: bool = False) -> list[str]:
     except Exception as e:  # noqa: BLE001 — без переноса программа всё равно запустится
         done.append(f"настройки из реестра не перенесены: {e}")
     return done
+
+
+# точки повторной обработки, которые ведут в другое место: ссылка-папка (junction) и
+# символическая ссылка; файлы OneDrive и прочие — тоже точки, но их не трогаем
+LINK_TAGS = {0xA0000003, 0xA000000C}
+
+
+def remove_links(root: Path | None = None) -> list[str]:
+    """Убрать ссылки-папки и символические ссылки в папке конфигурации. Программа с правами
+    администратора пишет и удаляет здесь файлы (копии, снимки, журнал), а папка открыта
+    любой программе пользователя: ссылка на C:\\Windows\\System32 вместо вложенной папки
+    увела бы эти записи туда. Сама ссылка удаляется, то, на что она указывает, — нет.
+    Возвращает убранные пути."""
+    root = Path(root or CONFIG_DIR)
+    removed: list[str] = []
+
+    def walk(folder: str) -> None:
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if getattr(st, "st_reparse_tag", 0) in LINK_TAGS:
+                try:
+                    if entry.is_dir(follow_symlinks=False) or st.st_file_attributes & 0x10:
+                        os.rmdir(entry.path)
+                    else:
+                        os.unlink(entry.path)
+                    removed.append(entry.path)
+                except OSError:
+                    continue
+            elif entry.is_dir(follow_symlinks=False):
+                walk(entry.path)
+
+    if root.is_dir():
+        walk(str(root))
+    return removed
+

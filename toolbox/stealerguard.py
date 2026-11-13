@@ -81,11 +81,16 @@ NOT_TRUSTED_SIGNED = {
 ALWAYS_TRUSTED = {"system", "registry", "memcompression", "searchindexer.exe",
                   "searchprotocolhost.exe", "searchfilterhost.exe", "msmpeng.exe",
                   "mssense.exe", "explorer.exe"}
+# временные папки: там одноразовые профили (тесты, Selenium, Playwright), не секреты
+# пользователя. Копию базы во временную папку стилер делает, открыв настоящую, — это видно.
+TEMP_PARTS = ("\\appdata\\local\\temp\\", "\\windows\\temp\\")
 
 
 def secret_kind(path: str) -> str | None:
     """Что лежит в файле (пароли, cookies...) или None, если это не секрет."""
     low = path.lower()
+    if any(part in low for part in TEMP_PARTS):
+        return None
     for end, kind in SECRET_FILES.items():
         if low.endswith(end):
             return kind
@@ -271,8 +276,11 @@ class StealerGuard:
     # ----- решение -----
     def allowed(self, pid: int, exe: str, path: str) -> bool:
         name = os.path.basename(exe).lower() if exe else ""
-        if pid in (0, 4) or pid == os.getpid() or name in ALWAYS_TRUSTED:
+        if pid in (0, 4) or name in ALWAYS_TRUSTED:
             return True
+        import ownproc
+        if ownproc.is_program(pid, exe or None):
+            return True  # сама программа: окно («Расширения»), служба, проверка дисков
         if not exe:
             return True  # защищённый системный процесс: путь не узнать
         if os.path.normcase(exe) in self._trusted:

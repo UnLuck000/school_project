@@ -17,13 +17,13 @@ import sys
 import threading
 import time
 import traceback
-from pathlib import Path
 
 from diag.log import get
+import datadirs
 
 log = get("crash")
-SESSION = Path("logs") / "session.json"
-CRASH_LOG = Path("logs") / "crash.log"
+SESSION = datadirs.LOGS / "session.json"
+CRASH_LOG = datadirs.LOGS / "crash.log"
 FREEZE_SEC = 0.5
 _crash_file = None
 
@@ -88,6 +88,10 @@ def _check_previous_session() -> None:
     if pid and pid != os.getpid() and _pid_alive(pid):
         return  # другой экземпляр ещё работает (перезапуск с правами)
     started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(old.get("started", 0)))
+    if _closed_by_setup(float(old.get("started", 0) or 0)):
+        log.info("Прошлый запуск (с %s, PID %s) закрыт установщиком или удалением программы",
+                 started, pid)
+        return
     tail = ""
     try:
         lines = CRASH_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -98,6 +102,16 @@ def _check_previous_session() -> None:
     log.error("Прошлый запуск (с %s, PID %s) завершился аварийно: не было обычного выхода "
               "(снятие задачи, сбой, выключение питания).%s", started, pid,
               f"\nПоследнее из crash.log:\n{tail}" if "Fatal" in tail or "Error" in tail else "")
+
+
+def _closed_by_setup(started: float) -> bool:
+    """Установщик и удаление закрывают программу принудительно и перед этим ставят метку
+    cache/no_restart (selfguard): метка новее начала сеанса — это не сбой."""
+    try:
+        import selfguard
+        return selfguard.NO_RESTART.stat().st_mtime >= started > 0
+    except (OSError, ImportError):
+        return False
 
 
 def _write_session() -> None:

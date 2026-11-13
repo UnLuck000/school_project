@@ -34,6 +34,18 @@ def _trusted_signature(p: Path, sig, revocation: bool):
     return sig
 
 
+def _partner(p: Path):
+    """signed_partner для движка. Сбой разбора (нарочно испорченный файл или его сосед) —
+    «связи нет»: срабатывание остаётся. Без этого ошибка здесь превращала уже найденное
+    совпадение правила в «файл не проверен»."""
+    try:
+        return signed_partner(p)
+    except Exception:  # noqa: BLE001 — причина выше
+        from diag.log import swallowed
+        swallowed("engine: связь с подписанной программой")
+        return None
+
+
 def cache_version(signatures, rules, heuristics: bool = True) -> str | None:
     """Версия проверки для кэша вердиктов. None: базы неизвестного происхождения
     (например, обычное множество хэшей в тестах), кэш не используется."""
@@ -159,7 +171,7 @@ def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = Non
             # совпадение правила считается ложным, как и у эвристики ниже
             if sig.status != VALID:
                 if all(weak_match(m) for m in matches):
-                    partner = signed_partner(p)
+                    partner = _partner(p)
                 if not partner:
                     return "YARA: " + ", ".join(m.rule for m in matches)
     if heuristics:
@@ -169,7 +181,7 @@ def analyze(p: Path, rules, heuristics: bool = True, threshold: int | None = Non
             if sig.status == VALID:
                 return None  # подписан доверенным издателем: эвристику не применяем
             if partner is False:
-                partner = signed_partner(p)
+                partner = _partner(p)
             if partner:
                 return None  # библиотека подписанной программы из той же папки
             note = {UNSIGNED: " [нет подписи]", INVALID: " [подпись недействительна]",

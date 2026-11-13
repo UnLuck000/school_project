@@ -53,3 +53,8 @@ release/
 user_reports/
 # провайдер AMSI собирается native/amsi/build.py
 native/amsi/bin/
+
+# WinDivert (официальный выпуск) — кладётся в сборку build_release.copy_windivert
+native/windivert/*.dll
+native/windivert/*.sys
+native/windivert/*.lib

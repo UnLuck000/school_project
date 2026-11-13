@@ -137,7 +137,13 @@ def pe_info(path: Path, data: bytes | None = None) -> dict | None:
     data — уже прочитанное содержимое файла (тогда диск не трогается)."""
     if _native is not None and hasattr(_native, "pe_info") and (
             data is None or hasattr(_native, "pe_info_bytes")):
-        return _native_info(path, data)
+        try:
+            return _native_info(path, data)
+        except Exception:  # noqa: S110 — причина ниже
+            # нативный разбор споткнулся на нарочно испорченном файле (было: байт не из
+            # UTF-8 в имени функции — и файл считался «не программой», эвристика молчала):
+            # такой файл как раз и нужно оценить, разбираем его pefile
+            pass
     return _pefile_info(path, data)
 
 

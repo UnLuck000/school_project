@@ -24,9 +24,10 @@ from pathlib import Path
 import appinfo
 from diag import edition, features
 from diag.anon import scrub
+import datadirs
 
-LOGS = Path("logs")
-FEEDBACK = Path("reports") / "feedback"
+LOGS = datadirs.LOGS
+FEEDBACK = datadirs.REPORTS / "feedback"
 TEXT_EXTS = {".log", ".txt", ".json", ".jsonl", ".csv"}
 MAX_FILE = 64 * 2 ** 20   # больше — обрезается до последних MAX_FILE байт (журнал разросся)
 

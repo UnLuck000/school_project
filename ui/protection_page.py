@@ -122,6 +122,8 @@ class ProtectionPage(QWidget):
         layout.addWidget(stealer_row)
         amsi_row, self.amsi_label, _ = self._item("📜", "Скрипты и макросы (AMSI)", "")
         layout.addWidget(amsi_row)
+        pslog_row, self.pslog_label, _ = self._item("🧾", "Журнал скриптов PowerShell", "")
+        layout.addWidget(pslog_row)
         layout.addStretch()
         self.also_card = card
         grid.addWidget(card, 0, 1)
@@ -272,4 +274,5 @@ class ProtectionPage(QWidget):
             self.launch_label.setText("Не проверяется: защита выключена.")
             self.stealer_label.setText("Не охраняются: защита выключена.")
             self.amsi_label.setText("Не проверяются: защита выключена.")
+            self.pslog_label.setText("Не проверяется: защита выключена.")
         self.refit()

@@ -138,7 +138,11 @@ class ProtectionMixin:
         self.journal_page.refresh()
 
     def start_protection_on_launch(self):
-        """Защита файлов и мониторинг сети включаются сразу при старте программы."""
+        """Защита файлов и мониторинг сети включаются сразу при старте программы. Со службой
+        защита обычно уже работает (включена при загрузке Windows) — окно только узнаёт
+        состояние и папки; выключена — включает её."""
+        if getattr(self, "service", None) is not None and self.monitor is None:
+            self._sync_service_state(adopt_folders=True)
         if self.monitor is None:
             self.toggle_protection()
         if self.net_monitor is None:
@@ -178,7 +182,12 @@ class ProtectionMixin:
 
     # ---------- контроль запуска и защита от стилеров ----------
     def apply_guards(self):
-        """Работают вместе с защитой файлов, каждый — если включён в настройках."""
+        """Работают вместе с защитой файлов, каждый — если включён в настройках. Со службой
+        они работают в ней (service/guards.py): окно передаёт настройки и показывает
+        состояние."""
+        if getattr(self, "service", None) is not None:
+            self._apply_service_guards()
+            return
         on = self.monitor is not None
         page = self.protection_page
         want_launch = on and cfg.get("protect/launch")
@@ -205,6 +214,7 @@ class ProtectionMixin:
         if not want_stealer and on:
             page.stealer_label.setText("Выключена в дополнительных настройках.")
         self._apply_amsi(on)
+        self._apply_pslog(on)
         page.refit()
 
     # ---------- AMSI: скрипты перед выполнением ----------
@@ -223,29 +233,38 @@ class ProtectionMixin:
             return
         if server is not None:
             return
-        if not amsi.registered():
+        # библиотека на месте, в защищённой папке и той же версии — иначе зарегистрировать
+        # заново (подменённая или устаревшая копия не должна грузиться в PowerShell)
+        note = ""
+        if not amsi.registration_ok():
             if is_admin() and amsi.dll_sources():
                 try:
                     amsi.install()
                 except OSError as e:
                     label.setText(f"Не удалось зарегистрировать провайдер: {e}")
                     return
-            else:
+            elif not amsi.registered():
                 label.setText("Провайдер не зарегистрирован: нужны права администратора"
                               if amsi.dll_sources() else
                               "Нет библиотеки провайдера (native/amsi/bin)")
                 return
+            else:
+                note = (" Провайдер нужно обновить — перезапустите программу с правами "
+                        "администратора; пока работает прежняя регистрация.")
         server = amsi.AmsiServer(lambda info: self.amsi_event.emit(info))
         if not server.start():
             label.setText(f"Не запущена: {server.error}")
             return
         self.amsi_server = server
         label.setText("PowerShell, VBScript/JScript и макросы Office проверяются перед "
-                      "выполнением; вредоносное блокируется.")
+                      "выполнением; вредоносное блокируется." + note)
 
     def set_amsi(self, on: bool) -> None:
         """Галочка в настройках: регистрация провайдера или её снятие."""
         from scanner import amsi
+        if getattr(self, "service", None) is not None:
+            self._set_service_amsi(on)
+            return
         if on:
             if not is_admin():
                 QMessageBox.warning(self, "AMSI", "Чтобы зарегистрировать провайдер AMSI, "
@@ -291,17 +310,95 @@ class ProtectionMixin:
                f"{info['reason']}"
         level = "threat" if info["level"] == "threat" else "suspicious"
         activity.record("amsi", line, sha256=info["sha256"], blocked=info["blocked"])
-        story, pid = self._story(info)
-        story = (story + "\n\n" if story else "") + "Начало проверенного содержимого:\n" + \
-            info["excerpt"]
-        threatlog.add(info["name"] or f"{info['app']} (PID {info['pid']})", level, text,
-                      "AMSI (скрипты)", story, pid)
+        if not info.get("logged"):  # служба записала находку сама
+            story, pid = self._story(info)
+            story = (story + "\n\n" if story else "") + "Начало проверенного содержимого:\n" + \
+                info["excerpt"]
+            threatlog.add(info["name"] or f"{info['app']} (PID {info['pid']})", level, text,
+                          "AMSI (скрипты)", story, pid)
         self.protect_journal.refresh()
         self._protect_line(line, "", "red" if level == "threat" else "darkorange")
         if info["blocked"]:
             self.add_event(f"Заблокирован вредоносный скрипт: {name}", "threat")
             if self.tray is not None:
                 self.tray.showMessage("Заблокирован скрипт", line[:240],
+                                      QSystemTrayIcon.MessageIcon.Critical, 10000)
+
+    # ---------- журнал блоков скриптов PowerShell (4104) ----------
+    def _apply_pslog(self, on: bool) -> None:
+        from scanner import pslog
+        label = self.protection_page.pslog_label
+        watch = self.pslog_watch
+        if not (on and cfg.get("protect/pslog")):
+            if watch is not None:
+                self.pslog_watch = None
+                threading.Thread(target=watch.stop, daemon=True).start()
+            if on:
+                label.setText("Выключен в дополнительных настройках.")
+            return
+        if watch is not None:
+            return
+        watch = pslog.ScriptBlockWatch(lambda info: self.pslog_event.emit(info))
+        error = watch.start()
+        if error:
+            label.setText(f"Не запущен: {error}.")
+            return
+        self.pslog_watch = watch
+        everything = pslog.policy_enabled()
+        label.setText("Блоки скриптов PowerShell проверяются по журналу событий — "
+                      + ("все" if everything else "подозрительные (все — галочкой в "
+                                                  "дополнительных настройках)") + ".")
+
+    def set_pslog_policy(self, on: bool) -> None:
+        from scanner import pslog
+        if getattr(self, "service", None) is not None:
+            try:
+                self.service.call("pslog.policy", timeout=60.0, on=on)
+            except OSError as e:
+                QMessageBox.warning(self, "PowerShell", f"Служба не изменила политику: {e}")
+                cfg.set_("protect/pslog_all", not on)
+                self.settings_page.load_values()
+                return
+            self.recovery_journal_changed()
+            self._apply_service_guards()
+            return
+        if not is_admin():
+            QMessageBox.warning(self, "PowerShell", "Политику журнала скриптов меняют с правами "
+                                                    "администратора — перезапустите программу.")
+            cfg.set_("protect/pslog_all", not on)
+            self.settings_page.load_values()
+            return
+        try:
+            pslog.set_policy(on)
+        except OSError as e:
+            QMessageBox.warning(self, "PowerShell", f"Политика не изменена: {e}")
+            cfg.set_("protect/pslog_all", not on)
+            self.settings_page.load_values()
+            return
+        self.recovery_journal_changed()
+        self._apply_pslog(False)
+        self._apply_pslog(self.monitor is not None)
+        self.protection_page.refit()
+
+    def _on_pslog_event(self, info):
+        name = os.path.basename(info["path"]) if info["path"] else "блок скрипта"
+        what = "процесс завершён" if info["killed"] else "уже выполняется"
+        line = f"[PowerShell] PID {info['pid']}: {name} — {info['reason']} ({what})"
+        level = "threat" if info["level"] == "threat" else "suspicious"
+        activity.record("amsi", line, sha256=info["sha256"], killed=info["killed"])
+        if not info.get("logged"):  # служба записала находку сама
+            story, pid = self._story(info)
+            story = (story + "\n\n" if story else "") + "Блок скрипта (журнал 4104):\n" + \
+                info["excerpt"]
+            threatlog.add(info["path"] or f"PowerShell (PID {info['pid']})", level,
+                          f"Журнал PowerShell: {info['reason']}", "PowerShell (журнал 4104)",
+                          story, pid)
+        self.protect_journal.refresh()
+        self._protect_line(line, info["path"], "red" if level == "threat" else "darkorange")
+        if level == "threat":
+            self.add_event(f"Опасный скрипт PowerShell: {name} ({what})", "threat")
+            if self.tray is not None:
+                self.tray.showMessage("Опасный скрипт PowerShell", line[:240],
                                       QSystemTrayIcon.MessageIcon.Critical, 10000)
 
     def _on_guard_status(self, which: str, text: str):
@@ -351,7 +448,8 @@ class ProtectionMixin:
             activity.record("launch", f"{exe}: {text}", killed=info.get("killed"),
                             parent=info.get("parent", ""))
             self.add_event(f"Угроза при запуске: {name}", "threat")
-            threatlog.add(exe, "threat", text, "Контроль запуска", *self._story(info))
+            if not info.get("logged"):
+                threatlog.add(exe, "threat", text, "Контроль запуска", *self._story(info))
             self.protect_journal.refresh()
             self._protect_line(line, exe, "red")
             if self.tray is not None:
@@ -363,7 +461,7 @@ class ProtectionMixin:
         level = "red" if kind == "threat" else "darkorange"
         activity.record("launch", f"{exe}: {text}")
         self._protect_line(f"[Запуск] {name}: {text}", exe, level)
-        if exe:
+        if exe and not info.get("logged"):
             threatlog.add(exe, "threat" if kind == "threat" else "suspicious", text,
                           "Контроль запуска", *self._story(info))
         if kind == "threat":
@@ -385,11 +483,21 @@ class ProtectionMixin:
 
     def _on_stealer_event(self, info):
         from toolbox.windows import stealer_alarm
+        alarm = info.get("alarm")
+        if alarm:  # тревога службы: одно окно на тревогу (событие и состояние при запуске)
+            seen = self.__dict__.setdefault("_stealer_alarms", set())
+            if alarm in seen:
+                return
+            seen.add(alarm)
         self.add_event(f"Доступ к паролям браузеров: {info['name']}", "threat")
         self._protect_line(f"[Стилер?] {info['name']} открыл {info['kind']} ({info['owner']})",
                            info.get("exe", ""), "red")
         self.show_main()
-        stealer_alarm(self, info, self.stealer_guard)
+        guard = self.stealer_guard
+        if getattr(self, "service", None) is not None:
+            from service.remote import RemoteStealer
+            guard = RemoteStealer(self.service)
+        stealer_alarm(self, info, guard)
 
     def _threat_paths(self) -> list[str]:
         paths = []
@@ -465,6 +573,212 @@ class ProtectionMixin:
             self.watch_list.takeItem(row)
             self._save_watch_folders()
 
+    # ---------- служба Windows (service/): защита файлов, карантин, журнал защиты ----------
+    def attach_service(self, client) -> None:
+        """Окно работает со службой: события защиты — длинным опросом в фоне (EventPump),
+        в главный поток — сигналом service_event. Карантин, журнал защиты и белый список уже
+        подменены (service.remote.install в gui.py — до создания окна)."""
+        from service.client import EventPump, ServiceClient
+        self.service = client
+        self.service_event.connect(self._on_service_event)
+        from service import remote
+
+        def on_event(ev):
+            if remote.REMOTE is None or not remote.REMOTE.dispatch(ev):
+                self.service_event.emit(ev)
+        self._service_pump = EventPump(
+            ServiceClient(client.name, client.verify_server), on_event,
+            lambda up: self.service_event.emit({"kind": "link", "text": "up" if up else "down"}))
+        self._service_pump.start()
+        self.protection_page.protect_status.setToolTip(
+            "Защита файлов и карантин работают в службе Windows (с правами системы); окно — "
+            "без прав администратора.")
+
+    def set_service_lock(self, on: bool) -> None:
+        """Запрет выключения защиты действует и в службе (lock_protection): там ослабляющие
+        операции — только окну с правами администратора. Менять запрет службы может тоже
+        только окно с правами."""
+        from service.client import ServiceError
+        try:
+            self.service.call("config.set", lock_protection=on)
+        except PermissionError:
+            self.statusBar().showMessage(
+                "Запрет записан в настройках окна; в службе его меняют только с правами "
+                "администратора (перезапустите программу от имени администратора)", 12000)
+        except ServiceError as e:
+            self.statusBar().showMessage(f"Служба не приняла запрет: {e}", 12000)
+
+    def _service_status(self) -> dict | None:
+        from service.client import ServiceError
+        try:
+            return self.service.call("status")
+        except ServiceError as e:
+            self._protect_line(f"[Служба] нет связи со службой защиты: {e}", "", "darkorange")
+            return None
+
+    def _sync_service_state(self, adopt_folders: bool = False) -> bool | None:
+        """Состояние защиты окна — по службе (её могли включить при загрузке Windows или
+        выключить из другого сеанса). True/False — работает ли; None — нет связи."""
+        from service.client import RemoteMonitor
+        status = self._service_status()
+        if status is None:
+            return None
+        if adopt_folders and status["folders"]:
+            self.watch_list.clear()
+            for folder in status["folders"]:
+                self._add_watch_item(folder)
+        self._service_db_last_update = status["db_last_update"]
+        remote = getattr(self.monitor, "remote", False)
+        if status["running"]:
+            if self.monitor is None:
+                self.monitor = RemoteMonitor(self.service, run=status["run"])
+                self._set_protection_ui(True)
+                self.apply_decoys()
+                self.apply_guards()
+            elif remote:
+                self.monitor.run = status["run"]
+            self.protect_status.setText(status["text"].removeprefix("Защита включена. "))
+            self.refresh_dashboard()
+        elif remote:
+            self._protection_stopped()
+        return status["running"]
+
+    def _on_service_db_update(self, ok: bool) -> None:
+        """Служба обновила базы (service/core.py: автообновление раз в сутки — окно без прав
+        администратора само это сделать не может). Кэши этого процесса — тоже свои
+        (scanner.pool, правила для памяти, карточка папки) и их нужно сбросить отдельно."""
+        if not ok:
+            return
+        from analyzer.folderview import reset_bases
+        from processmanager.memscan import reset_cache
+        from scanner import pool as scan_pool
+        self._service_db_last_update = time.time()
+        reset_cache()
+        reset_bases()
+        scan_pool.reset()
+        if self.net_monitor is not None:
+            self.net_monitor.reload_bases()
+        self.refresh_dashboard()
+        self.add_event("Базы сигнатур обновлены (служба)")
+
+    def _on_service_event(self, ev: dict) -> None:
+        kind, text = ev.get("kind", ""), ev.get("text", "")
+        if kind == "link":
+            if text == "down":
+                self._protect_line("[Служба] нет связи со службой защиты", "", "darkorange")
+            else:
+                self._sync_service_state()
+            return
+        if ev.get("replay"):  # прежние строки — только в журнал на странице
+            if kind in ("scanned", "threat", "error"):
+                color = {"threat": "red", "error": "darkorange"}.get(kind, "gray")
+                shown = text.replace("\t", " — ") if kind == "threat" else text
+                item = QListWidgetItem(f"{ev.get('time', '')}  {shown}")
+                item.setForeground(QBrush(QColor(color)))
+                self.add_protect_item(item)
+            return
+        if kind == "state":
+            self._sync_service_state()
+            return
+        if kind == "db":
+            self._on_service_db_update(ok=text == "ok")
+            return
+        if kind == "guard":
+            self._on_service_guard(ev.get("data") or {})
+            return
+        monitor = self.monitor
+        current = getattr(monitor, "remote", False) and ev.get("run") == monitor.run
+        if kind in ("status", "stopped") and not current:
+            return  # прежний запуск защиты в службе
+        self.on_monitor_event(kind, text)
+
+    # ---------- защиты с правами в службе (service/guards.py) ----------
+    SERVICE_GUARDS = {"launch": "protect/launch", "stealer": "protect/stealer",
+                      "amsi": "protect/amsi", "pslog": "protect/pslog"}
+
+    def _service_labels(self) -> dict:
+        page = self.protection_page
+        return {"launch": page.launch_label, "stealer": page.stealer_label,
+                "amsi": page.amsi_label, "pslog": page.pslog_label}
+
+    def _apply_service_guards(self) -> None:
+        """Настройки защит — службе; подписи на «Защите» — по её состоянию."""
+        from service.client import ServiceError
+        wanted = {name: bool(cfg.get(key)) for name, key in self.SERVICE_GUARDS.items()}
+        try:
+            state = self.service.call("guards.set", **wanted)
+        except PermissionError as e:
+            self._protect_line(f"[Служба] {e}", "", "darkorange")
+            try:
+                state = self.service.call("guards.state")
+            except ServiceError:
+                return
+        except ServiceError as e:
+            self._protect_line(f"[Служба] защиты не переданы: {e}", "", "darkorange")
+            return
+        self._show_service_guards(state)
+
+    def _show_service_guards(self, state: dict) -> None:
+        on = self.monitor is not None
+        running = set(state.get("running") or [])
+        for name, label in self._service_labels().items():
+            text = (state.get("status") or {}).get(name, "")
+            if not on:
+                continue
+            if not state.get("wanted", {}).get(name, True):
+                text = "Выключена в дополнительных настройках."
+            elif not text:
+                text = "Работает в службе защиты." if name in running else "Не запущена."
+            label.setText(text)
+        self.protection_page.refit()
+        for alarm in state.get("alarms") or []:  # тревоги, пока окна не было
+            self._on_stealer_event(alarm)
+
+    def _set_service_amsi(self, on: bool) -> None:
+        if on:
+            answer = QMessageBox.question(
+                self, "AMSI",
+                "В Windows будет зарегистрирован провайдер AMSI программы (это сделает служба "
+                "защиты): PowerShell, Windows Script Host и Office начнут передавать ей скрипты "
+                "перед выполнением.\n\nMicrosoft Defender и другие антивирусы могут "
+                "предупредить о регистрации неподписанного провайдера AMSI — это ожидаемо.\n\n"
+                "Продолжить?")
+            if answer != QMessageBox.StandardButton.Yes:
+                cfg.set_("protect/amsi", False)
+                self.settings_page.load_values()
+                return
+        try:
+            self.service.call("amsi.register", timeout=60.0, on=on)
+        except OSError as e:
+            QMessageBox.warning(self, "AMSI", f"Служба не изменила регистрацию:\n{e}")
+            cfg.set_("protect/amsi", not on)
+            self.settings_page.load_values()
+            return
+        self.recovery_journal_changed()
+        self._apply_service_guards()
+
+    def _on_service_guard(self, data: dict) -> None:
+        guard, kind, info = data.get("guard"), data.get("kind"), data.get("info")
+        if kind == "status":
+            label = self._service_labels().get(guard)
+            if label is not None and isinstance(info, str):
+                text = info.split(": ", 1)[-1]
+                label.setText(text[:1].upper() + text[1:])
+                self.protection_page.refit()
+            return
+        if guard == "launch":
+            self._on_launch_event(kind, info)
+        elif guard == "stealer" and kind == "alarm":
+            self._on_stealer_event(info)
+        elif guard == "stealer" and kind == "expired":
+            self._protect_line(f"[Стилер?] {info.get('name')}: окно не ответило, процесс "
+                               "отпущен (запись в журнале защиты)", info.get("exe", ""),
+                               "darkorange")
+        elif guard == "amsi":
+            self._on_amsi_event(info)
+        elif guard == "pslog":
+            self._on_pslog_event(info)
+
     def toggle_protection(self, force: bool = False):
         """force: выключить и при запрете (возврат состояния после замера ресурсов)."""
         if self.monitor is not None:
@@ -472,12 +786,32 @@ class ProtectionMixin:
                 self._off_blocked("защиту файлов")
                 return
             self.protect_btn.setEnabled(False)
-            self.monitor.stop()
+            try:
+                self.monitor.stop()
+            except OSError as e:  # служба: запрещено (Refused) или нет связи
+                self.protect_btn.setEnabled(True)
+                QMessageBox.warning(self, "Защита файлов", f"Служба не выключила защиту: {e}")
+                return
             self._protection_stopped()
             return
 
         # список может быть пустым: системные папки наблюдаются всегда
         folders = [self.watch_list.item(i).text() for i in range(self.watch_list.count())]
+
+        if getattr(self, "service", None) is not None:
+            from service.client import RemoteMonitor
+            monitor = RemoteMonitor(self.service, folders)
+            try:
+                status = monitor.start()
+            except OSError as e:
+                QMessageBox.warning(self, "Защита файлов", f"Служба не включила защиту: {e}")
+                return
+            self.monitor = monitor
+            self._set_protection_ui(True)
+            self.protect_status.setText(status["text"].removeprefix("Защита включена. "))
+            self.apply_decoys()
+            self.apply_guards()
+            return
 
         self.monitor = RealtimeMonitor(
             folders,
@@ -523,7 +857,9 @@ class ProtectionMixin:
         if kind == "threat":
             path, reason, action = (text.split("\t") + ["", ""])[:3]
             activity.record("threat", f"{path}: {reason}", action=action)
-            threatlog.add(path, "threat", reason, "Защита файлов")
+            if not getattr(self.monitor, "remote", False):  # служба записала находку сама
+                threatlog.add(path, "threat", reason, "Защита файлов")
+            self.protect_journal.refresh()
             text = f"[!] {path} ({reason}): {action}"
             self.refresh_quarantine()
             self.statusBar().showMessage(text)

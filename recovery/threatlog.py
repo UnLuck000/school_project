@@ -26,6 +26,13 @@ STATUS_TEXT = {FOUND: "Найдено", QUARANTINED: "В карантине", DE
 OPEN = (FOUND, QUARANTINED)  # требуют решения или ещё в карантине
 
 _lock = threading.Lock()
+# интерфейс со службой (service/remote.py): журнал защиты ведёт служба; в ней и без неё — None
+_remote = None
+
+
+def set_remote(backend) -> None:
+    global _remote
+    _remote = backend
 
 
 def _now() -> str:
@@ -56,6 +63,8 @@ def add(path: str, level: str, text: str, source: str = "", story: str = "",
     """Находка (level: threat | suspicious). Возвращает id записи. story — сводка по
     процессу на момент находки (processmanager.story): процесс к просмотру журнала
     обычно уже завершён."""
+    if _remote is not None:
+        return _remote.add(path, level, text, source, story, pid)
     key = os.path.normcase(path) if path else text
     with _lock:
         records = _read()
@@ -77,6 +86,8 @@ def add(path: str, level: str, text: str, source: str = "", story: str = "",
 
 
 def set_status(record_id: str, status: str, qid: str = "") -> None:
+    if _remote is not None:
+        return _remote.set_status(record_id, status, qid)
     with _lock:
         records = _read()
         for r in records:
@@ -90,6 +101,8 @@ def set_status(record_id: str, status: str, qid: str = "") -> None:
 def merged(include_done: bool = False) -> list[dict]:
     """Записи журнала и файлы карантина, которых в нём нет; состояние карантина — по его
     метаданным (файл могли восстановить или удалить из другого окна)."""
+    if _remote is not None:
+        return _remote.merged(include_done)
     from quarantine import STATUS_DELETED, STATUS_QUARANTINED, STATUS_RESTORED, list_quarantine
     q_status = {STATUS_QUARANTINED: QUARANTINED, STATUS_RESTORED: RESTORED,
                 STATUS_DELETED: DELETED}
@@ -117,11 +130,15 @@ def merged(include_done: bool = False) -> list[dict]:
 
 
 def get(record_id: str) -> dict | None:
+    if _remote is not None:
+        return _remote.get(record_id)
     return next((r for r in merged(True) if r["id"] == record_id), None)
 
 
 def mark_path(path: str, status: str, qid: str = "") -> None:
     """Файл из найденного обработан в другом месте (карантин с вкладки «Защита»)."""
+    if _remote is not None:
+        return _remote.mark_path(path, status, qid)
     key = os.path.normcase(path)
     with _lock:
         records = _read()
@@ -134,6 +151,8 @@ def mark_path(path: str, status: str, qid: str = "") -> None:
 
 
 def dismiss(record_id: str) -> None:
+    if _remote is not None:
+        return _remote.dismiss(record_id)
     if record_id.startswith("q:"):
         return  # файл в карантине: решение — восстановить или удалить
     set_status(record_id, DISMISSED)

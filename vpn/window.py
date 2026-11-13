@@ -118,6 +118,9 @@ class _Bridge(QObject):
     apps = Signal(object)            # список apps.App
     apps_progress = Signal(str)
     netdiag = Signal(object)         # список netdiag.Finding
+    pings = Signal(object)           # [мс | None] по профилям (vpn/leaks.ping_all)
+    leaks = Signal(object)           # список leaks.Finding
+    subscription = Signal(object, object, object)  # подписка, (ссылки, ...) | None, ошибка
     routing = Signal(object)         # сообщения об обновлении профилей маршрутизации
 
 
@@ -331,6 +334,11 @@ class VpnWindow(QDialog):
         self.bridge.probes.connect(self._on_probes)
         self.bridge.cert_alarm.connect(self._on_cert_alarm)
         self.bridge.routing.connect(self._on_routing_update)
+        self.bridge.pings.connect(self._on_pings)
+        self.bridge.leaks.connect(self._on_leaks)
+        self.bridge.subscription.connect(
+            lambda sub, result, error: self.apply_subscription(sub, result, error))
+        self._pings: dict[str, float | None] = {}  # «имя|сервер» → мс
         self._ip_text = ""
         self._ip_backend = None   # подключение, для которого считается срок проверки IP
         self._ip_next = 0.0
@@ -342,6 +350,7 @@ class VpnWindow(QDialog):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(1000)
+        self._adopt_service_vpn()
         self._tick()
 
     # ---------------- построение ----------------
@@ -491,6 +500,22 @@ class VpnWindow(QDialog):
                                   "включено «VPN при запуске» в настройках клиента)")
         self.chk_auto.toggled.connect(self._on_auto)
         cl.addWidget(self.chk_auto)
+        row = QHBoxLayout()
+        self.subs_btn = QPushButton("Подписки...")
+        self.subs_btn.setToolTip("Ссылка от провайдера VPN со списком серверов, обновляется "
+                                 "сама")
+        self.subs_btn.clicked.connect(self._subscriptions)
+        self.ping_btn = QPushButton("Проверить серверы")
+        self.ping_btn.setToolTip("Время TCP-соединения с каждым сервером VLESS (при "
+                                 "подключённом TUN — через туннель)")
+        self.ping_btn.clicked.connect(self._ping_servers)
+        self.fastest_btn = QPushButton("Выбрать самый быстрый")
+        self.fastest_btn.setToolTip("Профиль с наименьшим временем после «Проверить серверы»")
+        self.fastest_btn.clicked.connect(self._pick_fastest)
+        for button in (self.subs_btn, self.ping_btn, self.fastest_btn):
+            row.addWidget(button)
+        row.addStretch()
+        cl.addLayout(row)
         self.engine_label = _label("", "hint")
         cl.addWidget(self.engine_label)
         layout.addWidget(card)
@@ -539,7 +564,13 @@ class VpnWindow(QDialog):
         self.probe_btn.clicked.connect(self._run_probes)
         self.probe_host = QLineEdit()
         self.probe_host.setPlaceholderText("свой сайт, например example.com (необязательно)")
+        self.leak_btn = QPushButton("Проверить утечки DNS и IPv6")
+        self.leak_btn.setToolTip(
+            "Режим TUN, VPN подключён. DNS — через сервис bash.ws (ему уходят только случайные "
+            "имена для проверки), IPv6 — запросом к api6.ipify.org.")
+        self.leak_btn.clicked.connect(self._run_leaks)
         row.addWidget(self.probe_btn)
+        row.addWidget(self.leak_btn)
         row.addWidget(self.probe_host, 1)
         cl.addLayout(row)
         self.probe_table = QTableWidget(0, 5)
@@ -768,7 +799,9 @@ class VpnWindow(QDialog):
         self.cmb_profile.blockSignals(True)
         self.cmb_profile.clear()
         for i, p in enumerate(self.profiles):
-            self.cmb_profile.addItem(p.title)
+            ms = self._pings.get(f"{p.name}|{p.server}", "")
+            suffix = "" if ms == "" else (" — нет ответа" if ms is None else f" — {ms:.0f} мс")
+            self.cmb_profile.addItem(p.title + suffix)
             self.cmb_profile.setItemData(i, p.server, Qt.ItemDataRole.ToolTipRole)
         self.cmb_profile.blockSignals(False)
         if self.profiles:
@@ -1175,23 +1208,30 @@ class VpnWindow(QDialog):
         threading.Thread(target=job, daemon=True).start()
 
     def _maybe_update_routing(self) -> None:
-        """Ссылки профилей маршрутизации и списки AdBlock — в фоне, раз в ROUTING_UPDATE."""
+        """Ссылки профилей маршрутизации, списки AdBlock и подписки — в фоне, раз в
+        ROUTING_UPDATE."""
         if time.monotonic() < self._routing_next:
             return
         self._routing_next = time.monotonic() + ROUTING_UPDATE
 
         def job():
-            from vpn import routing
+            from vpn import routing, subscriptions
             try:
                 notes = routing.update_due()
             except Exception as e:  # noqa: BLE001 — сообщить в журнал окна
                 notes = [f"Профили маршрутизации не обновлены: {e}"]
             if notes:
                 self.bridge.routing.emit(notes)
+            for sub in subscriptions.due(subscriptions.load()):
+                try:
+                    self.bridge.subscription.emit(sub, subscriptions.fetch(sub), None)
+                except Exception as e:  # noqa: BLE001 — ошибку запомнит подписка
+                    self.bridge.subscription.emit(sub, None, e)
 
         threading.Thread(target=job, daemon=True, name="vpn-routing-update").start()
 
     def _on_routing_update(self, notes) -> None:
+        from vpn import routing
         for note in notes:
             self.bridge.log.emit(note)
             activity.record("vpn", note)
@@ -1199,6 +1239,135 @@ class VpnWindow(QDialog):
             self.bridge.log.emit("Обновлённые профили маршрутизации подействуют со следующего "
                                  "подключения")
         self.routing_card.reload()
+        active = routing.active()
+        changes = routing.pop_changes().get(active.id)
+        if changes:  # выбранный профиль поменял владелец ссылки — показать, что именно
+            from toolbox.windows import info_dialog
+            info_dialog(self, "Профиль маршрутизации изменён по ссылке",
+                        f"Профиль «{active.name}» обновился по ссылке "
+                        f"{active.sources.get('', {}).get('url', '')}. Изменилось:\n\n" +
+                        "\n".join("• " + c for c in changes) +
+                        "\n\nЕсли вы этого не ждали — удалите ссылку в окне профиля или "
+                        "выберите другой профиль.", 720)
+
+    # ---------------- подписки, серверы, утечки ----------------
+    def _subscriptions(self) -> None:
+        from vpn.subwindow import SubscriptionsDialog
+        SubscriptionsDialog(self).exec()
+
+    def apply_subscription(self, sub, result, error) -> str:
+        """Ответ подписки (в потоке окна): профили подписки заменяются, подписка
+        запоминает время, число серверов или ошибку. Возвращает строку для окна."""
+        from vpn import subscriptions
+        subs = subscriptions.load()
+        stored = next((s for s in subs if s.id == sub.id), None)
+        if stored is None:  # подписку удалили, пока шло скачивание
+            return "Подписка удалена"
+        stored.updated = time.time()
+        if error is not None:
+            stored.error = str(error)[:300]
+            subscriptions.save(subs)
+            text = f"Подписка «{stored.name}» не обновлена: {error}"
+            self.bridge.log.emit(text)
+            return text
+        links, skipped, info = result
+        selected = self._current()
+        self.profiles, count = subscriptions.merge(self.profiles, stored, links)
+        stored.error, stored.count, stored.skipped, stored.info = "", count, skipped, info
+        subscriptions.save(subs)
+        self._save()
+        index = next((i for i, p in enumerate(self.profiles) if selected is not None and
+                      p.name == selected.name and p.server == selected.server), None)
+        self._fill_profiles(index)
+        text = f"Подписка «{stored.name}»: серверов {count}" + (
+            f", других протоколов пропущено {skipped}" if skipped else "")
+        self.bridge.log.emit(text)
+        activity.record("vpn", text)
+        return text
+
+    def remove_subscription(self, sub) -> None:
+        from vpn import subscriptions
+        if self.active is not None and self.active.subscription == sub.id and self._busy():
+            QMessageBox.information(self, "VPN", "Сначала отключите сервер этой подписки.")
+            return
+        self.profiles = [p for p in self.profiles if p.subscription != sub.id] or \
+            [profiles.demo_profile()]
+        subscriptions.save([s for s in subscriptions.load() if s.id != sub.id])
+        self._save()
+        self._fill_profiles(0)
+        activity.record("vpn", f"Удалена подписка {sub.name}")
+
+    def _ping_servers(self) -> None:
+        from vpn import leaks
+        targets = [p for p in self.profiles if p.kind == "vless"]
+        if not targets:
+            return
+        self.ping_btn.setEnabled(False)
+        self.ping_btn.setText("Проверяю...")
+
+        def job():
+            results = leaks.ping_all([p.server for p in targets])
+            self.bridge.pings.emit([(f"{p.name}|{p.server}", ms)
+                                    for p, ms in zip(targets, results, strict=True)])
+
+        threading.Thread(target=job, daemon=True, name="vpn-ping").start()
+
+    def _on_pings(self, results) -> None:
+        self.ping_btn.setEnabled(True)
+        self.ping_btn.setText("Проверить серверы")
+        self._pings = dict(results)
+        alive = [ms for _, ms in results if ms is not None]
+        self.bridge.log.emit(f"Серверы: отвечают {len(alive)} из {len(results)}" + (
+            f", лучшее время {min(alive):.0f} мс" if alive else ""))
+        self._fill_profiles(self._row())
+
+    def _pick_fastest(self) -> None:
+        if not self._pings:
+            QMessageBox.information(self, "VPN", "Сначала нажмите «Проверить серверы».")
+            return
+        if self._busy():
+            QMessageBox.information(self, "VPN", "Профиль меняется, когда VPN отключён.")
+            return
+        timed = [(ms, i) for i, p in enumerate(self.profiles)
+                 if (ms := self._pings.get(f"{p.name}|{p.server}")) is not None]
+        if not timed:
+            QMessageBox.information(self, "VPN", "Ни один сервер не ответил.")
+            return
+        self._fill_profiles(min(timed)[1])
+
+    def _run_leaks(self) -> None:
+        backend = self.backend
+        tun = isinstance(backend, backends.SingBoxBackend) or (
+            getattr(backend, "remote", False) and getattr(backend, "kind", "") == "vless")
+        if backend is None or backend.state != backends.CONNECTED or not tun:
+            QMessageBox.information(self, "Утечки", "Проверка — для подключённого VPN в режиме "
+                                                    "TUN: в режимах прокси через VPN идут "
+                                                    "только программы с прокси.")
+            return
+        self.leak_btn.setEnabled(False)
+        self.leak_btn.setText("Проверяю...")
+        ip_mode = str(cfg.get("vpn/ip_mode") or "ipv4")
+
+        def job():
+            from vpn import leaks
+            try:
+                found = leaks.leak_test(ip_mode)
+            except Exception as e:  # noqa: BLE001 — показать, а не упасть
+                found = [leaks.Finding(leaks.WARN, "Проверка не удалась", str(e))]
+            self.bridge.leaks.emit(found)
+
+        threading.Thread(target=job, daemon=True, name="vpn-leaks").start()
+
+    def _on_leaks(self, found) -> None:
+        from toolbox.windows import info_dialog
+        from vpn import leaks
+        self.leak_btn.setEnabled(True)
+        self.leak_btn.setText("Проверить утечки DNS и IPv6")
+        bad = [f.title for f in found if f.level == leaks.BAD]
+        text = "Проверка утечек: " + ("; ".join(bad) if bad else "утечек не найдено")
+        self.bridge.log.emit(text)
+        activity.record("vpn", text)
+        info_dialog(self, "Утечки DNS и IPv6", leaks.report(found), 720)
 
     def _run_probes(self) -> None:
         from vpn import checks
@@ -1382,6 +1551,20 @@ class VpnWindow(QDialog):
         self._append_log(text)
         activity.record("vpn", text)
         self._tick()
+
+    def _adopt_service_vpn(self) -> None:
+        """Окно со службой: подключение с правами ведёт служба и переживает перезапуск
+        окна — показать его, а не «Не подключено»."""
+        if backends.REMOTE is None:
+            return
+        backend = backends.REMOTE.backend("vless", self.bridge.log.emit, "tun")
+        status = backend.adopt()
+        if status is None:
+            return
+        self.backend = backend
+        self.active = next((p for p in self.profiles if p.name == status.get("profile")),
+                           self.profiles[0] if self.profiles else None)
+        self.bridge.log.emit(f"Подключение ведёт служба защиты: {status.get('profile', '')}")
 
     def closeEvent(self, event):
         # окно скрывается, подключение остаётся (как у обычных VPN-клиентов)

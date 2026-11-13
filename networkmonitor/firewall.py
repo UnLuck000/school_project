@@ -15,6 +15,14 @@ from recovery.journal import active_check, undo_op
 from recovery.system import run_powershell
 
 GROUP = "SBIT"
+# окно без прав со службой (service/remote.py): правила создаёт и снимает служба
+_remote = None
+
+
+def set_remote(backend) -> None:
+    global _remote
+    _remote = backend
+
 LEGACY_GROUPS = ("myav",)        # правила прежних версий: видны и снимаются
 OWN_PREFIXES = ("sbit-", "myav-")
 
@@ -51,6 +59,8 @@ def _create(title: str, direction: str, env: dict, target_param: str) -> str:
 def block_ip(ip: str) -> list[str]:
     """Блокирует входящие и исходящие соединения с адресом. Возвращает имена правил."""
     ip = _check_ip(ip)
+    if _remote is not None:
+        return _remote.block_ip(ip)
     names: list[str] = []
     try:
         for d in ("Outbound", "Inbound"):
@@ -69,6 +79,8 @@ def block_program(exe: str) -> list[str]:
     """Запрещает программе исходящие соединения."""
     if not exe:
         raise ValueError("Путь программы неизвестен")
+    if _remote is not None:
+        return _remote.block_program(exe)
     names = [_create(f"SBIT: блокировка программы {exe}", "Outbound", {"SBIT_EXE": exe},
                      "-Program $env:SBIT_EXE")]
     journal.log_action(f"Брандмауэр: программе запрещён выход в сеть: {exe}", "firewall_remove",
@@ -123,6 +135,9 @@ def _undo_block(d: dict) -> str:
 
 def unblock(rule_names: list[str], target: str) -> None:
     """Снимает блокировку из списка (журнал: можно вернуть)."""
+    if _remote is not None:
+        _remote.unblock(rule_names, target)
+        return
     rules = {r.name: r for r in list_rules()}
     saved = [rules[n] for n in rule_names if n in rules]
     _remove(rule_names)

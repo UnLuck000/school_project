@@ -10,6 +10,7 @@ Python-код, и в потоках главного процесса он от�
 (номер, False, (errno, текст)).
 """
 import os
+import io
 import pickle
 import struct
 import sys
@@ -18,15 +19,35 @@ from pathlib import Path
 HEADER = struct.Struct("<I")
 
 
+MAX_FRAME = 64 * 1024 * 1024  # кадр — путь, настройки или вердикт с хэшами: десятки КБ
+
+
+class _PlainUnpickler(pickle.Unpickler):
+    """Кадры несут только простые значения (кортежи, строки, числа, словари). Рабочий
+    процесс разбирает чужие файлы (YARA, разбор PE на C++): если ошибка в них отдаст
+    процесс вредоносному файлу, обычный pickle позволил бы ему выполнить код в главном
+    процессе — в службе с правами системы. Любой объект класса — отказ."""
+
+    def find_class(self, module, name):
+        raise pickle.UnpicklingError(f"в кадре объект {module}.{name}")
+
+
 def read_frame(stream):
+    """Кадр или None: канал закрыт, кадр оборван, слишком велик или не из простых значений
+    (для главного процесса всё это — «рабочий процесс завершился»)."""
     head = stream.read(HEADER.size)
     if len(head) < HEADER.size:
         return None
     (size,) = HEADER.unpack(head)
+    if size > MAX_FRAME:
+        return None
     body = stream.read(size)
     if len(body) < size:
         return None
-    return pickle.loads(body)
+    try:
+        return _PlainUnpickler(io.BytesIO(body)).load()
+    except Exception:  # noqa: BLE001 — испорченный кадр: любая ошибка разбора
+        return None
 
 
 def write_frame(stream, obj) -> None:

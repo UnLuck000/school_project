@@ -17,10 +17,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from networkmonitor import domains as dom
+import datadirs
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 NETFEEDS_DIR = BASE_DIR / "signatures" / "netfeeds"
-DOWNLOAD_DIR = BASE_DIR / "cache" / "downloads"
+DOWNLOAD_DIR = datadirs.CACHE / "downloads"
 MAX_SIZE = 300 * 1024 * 1024
 CHUNK = 256 * 1024
 RISKY_EXTS = {".exe", ".scr", ".msi", ".bat", ".cmd", ".vbs", ".js", ".hta", ".ps1", ".lnk",

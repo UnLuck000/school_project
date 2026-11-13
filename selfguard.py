@@ -21,16 +21,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import datadirs
 
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
 SYNCHRONIZE = 0x00100000
 LIMIT, WINDOW_SEC = 3, 600
 MARK_SEC = 900                      # сколько действует метка «не перезапускать»
-SESSION = Path("logs") / "session.json"
-CRASH_LOG = Path("logs") / "crash.log"
-STATE = Path("cache") / "selfguard.json"
-NO_RESTART = Path("cache") / "no_restart"
+SESSION = datadirs.LOGS / "session.json"
+CRASH_LOG = datadirs.LOGS / "crash.log"
+STATE = datadirs.CACHE / "selfguard.json"
+NO_RESTART = datadirs.APP_CACHE / "no_restart"  # ставят установщик и удаление
 INSTALLER_HINTS = ("-setup", "unins0")
 
 _proc: subprocess.Popen | None = None

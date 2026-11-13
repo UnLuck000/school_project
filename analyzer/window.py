@@ -38,6 +38,7 @@ class Bridge(QObject):
     done = Signal(object)
     failed = Signal(str)
     progress = Signal(int, str)  # процент, этап
+    reputation = Signal(object, str)  # scanner.reputation.Reputation | None, ошибка
 
 
 
@@ -91,6 +92,7 @@ class FileView(QWidget):
         self.bridge.done.connect(self.on_done)
         self.bridge.failed.connect(self.on_failed)
         self.bridge.progress.connect(self._on_progress)
+        self.bridge.reputation.connect(self._on_reputation)
         self.report: FileReport | None = None
         self._last_percent = -1
         self._name = ""
@@ -140,16 +142,22 @@ class FileView(QWidget):
         self.btn_vt = QPushButton("Искать хэш на VirusTotal")
         self.btn_vt.setToolTip("Открывает страницу в браузере. Сам файл никуда не отправляется.")
         self.btn_vt.clicked.connect(self.open_virustotal)
+        self.btn_rep = QPushButton("Репутация (VirusTotal API)")
+        self.btn_rep.setToolTip("Что о файле думают другие антивирусы: уходит только SHA-256 "
+                                "(нужен свой бесплатный ключ VirusTotal)")
+        self.btn_rep.clicked.connect(lambda: self.check_reputation(ask_key=True))
         self.btn_folder = QPushButton("Папка файла")
         self.btn_folder.clicked.connect(self.open_folder)
-        for button in (self.btn_quarantine, self.btn_copy, self.btn_vt, self.btn_folder):
+        for button in (self.btn_quarantine, self.btn_copy, self.btn_vt, self.btn_rep,
+                       self.btn_folder):
             buttons.addWidget(button)
         buttons.addStretch()
         layout.addLayout(buttons)
         self._set_actions(False)
 
     def _set_actions(self, enabled: bool):
-        for button in (self.btn_quarantine, self.btn_copy, self.btn_vt, self.btn_folder):
+        for button in (self.btn_quarantine, self.btn_copy, self.btn_vt, self.btn_rep,
+                       self.btn_folder):
             button.setEnabled(enabled)
 
     # ---------- загрузка файла ----------
@@ -227,6 +235,9 @@ class FileView(QWidget):
         self.code_tab.set_view(report.code)
         self.code_tab.set_file(Path(report.path), report.pe is not None)
         self.decompile_tab.set_file(Path(report.path))
+        # ключ задан — неподписанный файл, о котором базы молчат, сверяется сам
+        if report.level == "clean" and report.signature.status != "valid":
+            self.check_reputation(ask_key=False)
         self.status.emit(f"Готово: {report.name}", 8000)
 
     # ---------- заполнение вкладок ----------
@@ -372,6 +383,58 @@ class FileView(QWidget):
         r = self.report
         if r is not None:
             QDesktopServices.openUrl(QUrl(f"https://www.virustotal.com/gui/file/{r.sha256}"))
+
+    def check_reputation(self, ask_key: bool = True) -> None:
+        from scanner import reputation
+        r = self.report
+        if r is None:
+            return
+        key = reputation.get_key()
+        if not key:
+            if not ask_key:
+                return
+            from PySide6.QtWidgets import QInputDialog, QLineEdit
+            key, ok = QInputDialog.getText(
+                self, "Ключ VirusTotal",
+                "Бесплатный ключ API из учётной записи virustotal.com (раздел «API key»).\n"
+                "На VirusTotal уходит только SHA-256 файла, сам файл — никогда. Ключ "
+                "хранится зашифрованным (DPAPI).\nС ключом неподписанные файлы, о которых "
+                "базы молчат, сверяются автоматически.", QLineEdit.EchoMode.Password)
+            if not ok or not key.strip():
+                return
+            reputation.set_key(key)
+        self.btn_rep.setEnabled(False)
+        sha = r.sha256
+
+        def job():
+            try:
+                self.bridge.reputation.emit(reputation.lookup(sha), "")
+            except (ValueError, OSError) as e:
+                self.bridge.reputation.emit(None, str(e))
+
+        threading.Thread(target=job, daemon=True, name="reputation").start()
+
+    def _on_reputation(self, rep, error: str) -> None:
+        self.btn_rep.setEnabled(self.report is not None)
+        if self.report is None or (rep is not None and rep.sha256 != self.report.sha256):
+            return
+        item = QTreeWidgetItem(["Репутация (VirusTotal)", "ошибка" if error else {
+            "threat": "вредоносный", "suspicious": "подозрительный", "clean": "чисто",
+            "unknown": "неизвестен"}[rep.level], error or rep.text()])
+        if rep is not None and rep.level in LEVEL_COLORS:
+            item.setBackground(1, QBrush(QColor(*LEVEL_COLORS[rep.level])))
+        self.checks_tree.addTopLevelItem(item)
+        if error:
+            self.status.emit(f"VirusTotal: {error}", 8000)
+            return
+        from recovery import activity
+        activity.record("scan_file", f"{self.report.path}: VirusTotal — {rep.text()}",
+                        level=rep.level)
+        if rep.level in ("threat", "suspicious"):
+            QMessageBox.warning(self, "Репутация файла",
+                                f"{Path(self.report.path).name}: по данным VirusTotal "
+                                f"{rep.text()}.\n\nСвои базы программы этот файл не знают — "
+                                "решите сами, отправлять ли его в карантин.")
 
     def open_folder(self):
         r = self.report

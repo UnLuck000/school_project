@@ -36,8 +36,28 @@ class ToolsMixin:
                 self.open_recovery(tab)
                 return
 
+    def _open_elevated(self, name: str, tab: int = 0) -> bool:
+        """Окно со службой без прав: инструмент — процессом с правами через UAC
+        (service/elevate.py). False — открыть здесь (служба не нужна или UAC отклонён)."""
+        from service import elevate
+        if not elevate.wanted(name):
+            return False
+        try:
+            if elevate.open_tool(name, tab):
+                self.statusBar().showMessage("Инструмент открыт отдельным окном с правами "
+                                             "администратора", 8000)
+                return True
+        except OSError as e:
+            self.statusBar().showMessage(str(e), 8000)
+        self.statusBar().showMessage("Без прав администратора: инструмент только показывает, "
+                                     "изменения недоступны", 10000)
+        return False
+
     def open_recovery(self, tab: int = 0, action: str | None = None):
         if tab in self.TAB_TOOLS and self.tool_blocked(self.TAB_TOOLS[tab]):
+            return
+        if self.recovery_window is None and action is None and \
+                self._open_elevated("recovery", tab):
             return
         if self.recovery_window is None:
             self.recovery_window = RecoveryWindow()
@@ -121,6 +141,8 @@ class ToolsMixin:
             return
         from toolbox import windows
         window = self.tool_windows.get(name)
+        if window is None and name == "drivers" and self._open_elevated("drivers"):
+            return
         if window is None:
             # окна без владельца: не держатся поверх главного окна, его можно вывести вперёд
             if name == "link":
@@ -158,6 +180,8 @@ class ToolsMixin:
                 self.show_log()
             return
         if self.tool_blocked("btnAutoruns"):
+            return
+        if self.autoruns_window is None and self._open_elevated("autoruns"):
             return
         if self.autoruns_window is None:
             self.autoruns_window = AutorunsWindow()

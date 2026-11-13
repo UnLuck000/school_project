@@ -10,7 +10,6 @@
 """
 import json
 import time
-from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
@@ -21,9 +20,10 @@ from PySide6.QtWidgets import (
 
 from diag import features
 from diag.log import get, tail
+import datadirs
 
 log = get("test")
-FEEDBACK_DIR = Path("reports") / "feedback"
+FEEDBACK_DIR = datadirs.REPORTS / "feedback"
 COMMENTS_FILE = FEEDBACK_DIR / "comments.jsonl"
 KINDS = ["Не работает", "Работает не так, как надо", "Дополнить / пожелание", "Другое"]
 

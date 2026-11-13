@@ -3,8 +3,8 @@ r"""Удаление программы: StretchBIT.exe --uninstall.
 Запускается из «Параметры → Приложения» (запись в реестре делает установщик), из ярлыка
 «Удалить StretchBIT» в меню «Пуск» или вручную. Нужны права администратора (gui.py
 перезапускает с UAC). Порядок:
-1. закрыть работающую программу из этой папки (её ядра VPN закроются вместе с ней —
-   vpn/procguard);
+1. остановить службу защиты (service/) и закрыть работающую программу из этой папки (её
+   ядра VPN закроются вместе с ней — vpn/procguard); затем — удалить службу;
 2. вернуть то, что программа меняла в системе: прокси, kill switch, DNS (vpn/*.recover),
    правила брандмауэра групп «SBIT» и «SBIT-killswitch» (и прежних «myav»), сеансы ETW, ловушки для
    шифровальщиков;
@@ -72,10 +72,27 @@ def _other_installed(test: bool) -> bool:
     return False
 
 
+def stop_service() -> None:
+    """Служба — тоже StretchBIT.exe из этой папки: убитый процесс службы диспетчер служб
+    перезапустил бы (перезапуск при сбое), поэтому сначала штатная остановка."""
+    from service import protocol, scm
+    try:
+        scm.stop(protocol.service_name())
+    except OSError:
+        from diag.log import swallowed
+        swallowed("удаление: остановка службы")
+
+
+def remove_service() -> None:
+    from service import protocol, scm
+    scm.remove(protocol.service_name())
+
+
 def close_running(folder: Path) -> int:
-    """Закрыть другие экземпляры StretchBIT.exe из этой папки."""
+    """Закрыть другие экземпляры StretchBIT.exe из этой папки (службу — остановкой)."""
     import selfguard
     selfguard.forbid_restart()  # иначе сторож вернул бы закрытую программу
+    stop_service()
     import psutil
     me, count = os.getpid(), 0
     target = os.path.normcase(str(folder))
@@ -161,6 +178,7 @@ def steps(folder: Path, test: bool, wipe: bool = True,
                     pass
 
     return [("Закрыть запущенную программу", lambda: close_running(folder)),
+            ("Удалить службу защиты", remove_service),
             ("Вернуть настройки сети после VPN", vpn_restore),
             ("Удалить правила брандмауэра программы", firewall),
             ("Остановить сеансы ETW", etw),

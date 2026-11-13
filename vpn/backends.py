@@ -25,8 +25,9 @@ from pathlib import Path
 
 from recovery import journal
 from vpn import procguard
+import datadirs
 
-TUNNEL_DIR = Path("cache") / "vpn"
+TUNNEL_DIR = datadirs.CACHE / "vpn"
 CREATE_NO_WINDOW = 0x08000000
 
 DISCONNECTED, CONNECTING, CONNECTED, ERROR = "disconnected", "connecting", "connected", "error"
@@ -67,12 +68,18 @@ def describe_options(options: dict, apps: list[str] | None = None) -> str:
                                       ("block_ads", "реклама блокируется"),
                                       ("mux", "Mux"), ("fragment", "фрагментация"))
              if options.get(key)]
-    if options.get("adblock"):
-        parts.append(f"AdBlock: {len(options['adblock'])} доменов")
+    if options.get("adblock") or options.get("adblock_count"):
+        count = options.get("adblock_count") or len(options["adblock"])
+        parts.append(f"AdBlock: {count} доменов")
     if options.get("warp"):
         parts.append("WARP")
     if options.get("advanced"):
         parts.append(f"дополнительных правил: {len(options['advanced'])}")
+        if options.get("mode") == "singbox":
+            blind = sum(1 for r in options["advanced"] if r.get("source") or r.get("source_port"))
+            if blind:
+                parts.append(f"у {blind} условие «источник» не сработает: в TUN источник "
+                             "всегда 127.0.0.1")
     if options.get("assets"):
         parts.append("свои файлы .dat")
     if apps:
@@ -472,6 +479,17 @@ class SingBoxBackend(Backend):
         self.killswitch = False   # блокировка брандмауэра включена этим подключением
         self.dns_changed = False  # DNS адаптеров подменён (vpn/dnsguard.py)
         self.blocked = False      # VPN оборвался, интернет перекрыт до решения пользователя
+        # в службе (service/vpnhost.py): настройки клиента и параметры маршрутизации присылает
+        # окно — у службы свои настройки пустые; None — брать из настроек этого процесса
+        self.settings: dict | None = None
+        self.options: dict | None = None
+
+    def _get(self, key: str):
+        if self.settings is not None:
+            from ui.settings import DEFAULTS
+            return self.settings.get(key, DEFAULTS.get(key))
+        from ui import settings as cfg
+        return cfg.get(key)
 
     def _write(self, config: dict, name: str) -> Path:
         TUNNEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -483,11 +501,11 @@ class SingBoxBackend(Backend):
     def connect(self, profile) -> None:
         self._set(CONNECTING)
         x = self.x
-        from ui import settings as cfg
-        ip_mode = str(cfg.get("vpn/ip_mode") or "ipv4")
-        kill = bool(cfg.get("vpn/killswitch"))
+        ip_mode = str(self._get("vpn/ip_mode") or "ipv4")
+        kill = bool(self._get("vpn/killswitch"))
         try:
-            opts = x.options_from_settings("singbox", self.log, self.xray_exe)
+            opts = self.options if self.options is not None else \
+                x.options_from_settings("singbox", self.log, self.xray_exe)
             v = x.parse_vless(profile.config)
             x.ensure_free(x.SOCKS_PORT)
             # адрес сервера — заранее, пока туннеля нет: потом системный DNS идёт через
@@ -507,15 +525,16 @@ class SingBoxBackend(Backend):
             self.local_ports = add_local_proxy(xconfig, self.log)
             x.apply_options(xconfig, v, opts, self.log)
             xpath = self._write(xconfig, "xray-tun.json")
-            apps = [a for a in str(cfg.get("vpn/direct_apps")).splitlines() if a.strip()]
+            apps = [a for a in str(self._get("vpn/direct_apps") or "").splitlines()
+                    if a.strip()]
             from vpn import windns
             win_dns = windns.manual_dns()  # до dnsguard.protect: он трогает только роутер
             if win_dns["v4"] or win_dns["v6"]:
                 self.log(windns.describe(win_dns))
             spath = self._write(self.sb.build_config(
                 x.SOCKS_PORT, self.xray_exe, ip_mode, apps, opts["block_quic"], opts["block_udp"],
-                str(cfg.get("vpn/dns_server") or "1.1.1.1"), win_dns,
-                strict_route=cfg.get("vpn/strict_route") is not False), "sing-box.json")
+                str(self._get("vpn/dns_server") or "1.1.1.1"), win_dns,
+                strict_route=self._get("vpn/strict_route") is not False), "sing-box.json")
             self.log(describe_options(opts, apps))
         except (OSError, ValueError) as e:
             self._fail(f"VLESS: {e}")
@@ -686,7 +705,17 @@ class SingBoxBackend(Backend):
         self.log("Отключено")
 
 
+# окно без прав со службой (service/remote.py): TUN, WireGuard и OpenVPN подключает служба
+REMOTE = None
+
+
+def needs_service(kind: str, mode: str = "") -> bool:
+    return kind in ("wireguard", "openvpn") or (kind == "vless" and mode in ("tun", ""))
+
+
 def backend_for(kind: str, log, mode: str = "") -> Backend:
+    if REMOTE is not None and needs_service(kind, mode):
+        return REMOTE.backend(kind, log, mode)
     if kind == "vless":  # tun — sing-box + Xray; proxy, tun-xray, local — один Xray
         return SingBoxBackend(log) if mode in ("tun", "") else XrayBackend(log)
     return {"wireguard": WireGuardBackend, "openvpn": OpenVPNBackend}.get(kind, DemoBackend)(log)

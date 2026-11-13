@@ -1,3 +1,15 @@
+"""Журнал действий: что программа изменила в системе и как это отменить.
+
+Записи лежат в папке конфигурации пользователя (actions.jsonl) — писать туда может любая
+программа этого пользователя. Отмена выполняется с правами администратора и делает то, что
+написано в записи (значение реестра HKLM, файл hosts, служба...), поэтому каждая запись
+подписана (mac: HMAC-SHA256 ключом trustseal.mac_key, его читают только администраторы).
+При отмене: подпись верна — как раньше; подпись не сходится — запись подделана, отмена
+запрещена; подписи нет (записи прежних версий или сделанные без прав администратора) —
+UnsignedRecord: окно журнала показывает, что будет сделано, и спрашивает.
+"""
+import hashlib
+import hmac
 import json
 import os
 import threading
@@ -35,6 +47,41 @@ def active_check(name: str):
     return decorator
 
 
+class UnsignedRecord(ValueError):
+    """Запись без подписи: отменять — только после подтверждения пользователя."""
+
+
+SIGNED_FIELDS = ("id", "time", "title", "op", "data")
+
+
+def signature(record: dict) -> str:
+    """Подпись записи; пустая — ключа нет (программа без прав администратора)."""
+    import trustseal
+    key = trustseal.mac_key()
+    if not key:
+        return ""
+    body = json.dumps({k: record.get(k) for k in SIGNED_FIELDS}, sort_keys=True,
+                      ensure_ascii=False)
+    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def check(record: dict) -> str:
+    """ok — подпись верна; unsigned — подписи нет; forged — подпись не сходится (или не
+    проверить: ключа нет, а запись подписана)."""
+    mac = record.get("mac") or ""
+    if not mac:
+        return "unsigned"
+    expected = signature(record)
+    return "ok" if expected and hmac.compare_digest(mac, expected) else "forged"
+
+
+def _signed(record: dict) -> dict:
+    mac = signature(record)
+    if mac:
+        record["mac"] = mac
+    return record
+
+
 def _read() -> list[dict]:
     if not JOURNAL_FILE.exists():
         return []
@@ -55,10 +102,28 @@ def _write(records: list[dict]) -> None:
     os.replace(tmp, JOURNAL_FILE)  # запись через временный файл
 
 
+# окно со службой (service/remote.py): у службы свой журнал (её действия: брандмауэр, AMSI,
+# журнал PowerShell, VPN с правами); в окне он виден вместе со своим, запись службы —
+# с пометкой where="service", отмена — у службы (journal.undo, ослабляющая операция)
+_remote = None
+
+
+def set_remote(backend) -> None:
+    global _remote
+    _remote = backend
+
+
+def _service_records() -> list[dict]:
+    if _remote is None:
+        return []
+    return [dict(r, where="service") for r in _remote.journal_list()]
+
+
 def log_action(title: str, op: str, data: dict) -> str:
     """Записывает выполненное действие. op и data нужны для его отмены."""
-    record = {"id": uuid.uuid4().hex, "time": datetime.now().isoformat(timespec="seconds"),
-              "title": title, "op": op, "data": data, "undone": False, "undone_at": ""}
+    record = _signed({"id": uuid.uuid4().hex,
+                      "time": datetime.now().isoformat(timespec="seconds"),
+                      "title": title, "op": op, "data": data, "undone": False, "undone_at": ""})
     try:
         from diag.log import get
         get("journal").info("Действие: %s (%s)", title, op)
@@ -86,7 +151,11 @@ def log_notice(title: str, op: str, data: dict) -> str:
 
 def read_all() -> list[dict]:
     with _lock:
-        return _read()
+        local = _read()
+    service = _service_records()
+    if not service:
+        return local
+    return sorted(local + service, key=lambda r: r.get("time", ""))
 
 
 def forget(op: str, match: Callable[[dict], bool] | None = None) -> int:
@@ -133,6 +202,8 @@ def cleanup() -> int:
         if key in seen or not _still_active(r):
             drop.add(r["id"])
         seen.add(key)
+    if _remote is not None:
+        _remote.journal_cleanup()
     if not drop:
         return 0
     with _lock:
@@ -147,10 +218,21 @@ def cleanup() -> int:
     return len(drop)
 
 
-def undo(record_id: str) -> str:
-    """Отменяет действие. При неудаче бросает ValueError или OSError, запись остаётся."""
+def describe(record: dict) -> str:
+    """Что сделает отмена: операция и её данные (для вопроса о записи без подписи)."""
+    data = json.dumps(record.get("data"), ensure_ascii=False, indent=1)
+    return f"{record.get('title', '')}\nОперация: {record.get('op')}\nДанные:\n{data[:1500]}"
+
+
+def undo(record_id: str, unsigned_ok: bool = False) -> str:
+    """Отменяет действие. При неудаче бросает ValueError или OSError, запись остаётся.
+    Запись без подписи — UnsignedRecord, пока не передано unsigned_ok (пользователь видел,
+    что будет сделано, и согласился)."""
     with _lock:
         record = next((r for r in _read() if r["id"] == record_id), None)
+    if record is None and _remote is not None and \
+            any(r["id"] == record_id for r in _service_records()):
+        return _remote.journal_undo(record_id)
     if record is None:
         raise ValueError("Запись журнала не найдена")
     if record.get("notice"):
@@ -160,6 +242,12 @@ def undo(record_id: str) -> str:
     handler = UNDO_HANDLERS.get(record["op"])
     if handler is None:
         raise ValueError("Для этого действия откат не поддерживается")
+    state = check(record)
+    if state == "forged":
+        raise ValueError("Запись журнала изменена не программой (подпись не сходится) — "
+                         "отменять её нельзя")
+    if state == "unsigned" and not unsigned_ok:
+        raise UnsignedRecord(describe(record))
 
     from diag import features
     with features.track("journal.undo") as run:

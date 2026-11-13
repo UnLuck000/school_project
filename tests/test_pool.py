@@ -131,3 +131,24 @@ def test_single_files_use_one_worker(tmp_path):
         assert len(scan.pids()) >= 1
     finally:
         scan.shutdown()
+
+
+def test_frames_carry_only_plain_values():
+    """Захваченный рабочий процесс не выполнит код в главном через pickle."""
+    import io
+    import pickle
+    import struct
+
+    from scanner import worker
+    stream = io.BytesIO()
+    worker.write_frame(stream, (7, True, ("members", None, [("a.exe", "s" * 64, "m" * 32, 5)])))
+    stream.seek(0)
+    assert worker.read_frame(stream) == (7, True, ("members", None,
+                                                   [("a.exe", "s" * 64, "m" * 32, 5)]))
+
+    class Evil:
+        def __reduce__(self):
+            return (print, ("код из кадра",))
+    body = pickle.dumps((1, True, Evil()))
+    assert worker.read_frame(io.BytesIO(struct.pack("<I", len(body)) + body)) is None
+    assert worker.read_frame(io.BytesIO(struct.pack("<I", worker.MAX_FRAME + 1))) is None

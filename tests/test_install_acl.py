@@ -1,7 +1,6 @@
 """Папка программы и данные, от которых зависят проверки (с 1.0.0 после сборки релиза):
 базы и карантин пишет только программа с правами администратора, скомпилированные правила
 YARA — в защищённой папке, установка — в Program Files с переездом из C:\\Utils."""
-import re
 from pathlib import Path
 
 import pytest
@@ -78,8 +77,8 @@ def test_updates_need_writable_bases(tmp_path, monkeypatch):
 
 def test_installer_rights_and_location():
     text = (ROOT / "installer.iss").read_text(encoding="utf-8")
-    grants = re.findall(r'\\app\\(\w+)"" /grant \*S-1-5-32-545:\(OI\)\(CI\)M', text)
-    assert set(grants) == {"logs", "cache", "reports", "diag"}   # diag — только тестовая
-    assert "signatures" not in grants and "quarantine_data" not in grants
+    # пользователям запись не выдаётся никуда: без прав программа пишет в %LOCALAPPDATA%
+    assert "/grant *S-1-5-32-545:(OI)(CI)M" not in text
+    assert "*S-1-5-32-545:(OI)(CI)RX" in text
     assert '#define InstallDir "{autopf}\\StretchBIT"' in text
     assert "UsePreviousAppDir=no" in text and "MoveOldInstall();" in text

@@ -65,6 +65,11 @@ class TlsRecord:
     level: str
 
 
+# окно без прав со службой (service/remote.py RemoteSensors): DNS (ETW) и TLS (WinDivert)
+# нужны права — события приходят от службы, разбор и оповещения остаются здесь
+SENSORS = None
+
+
 class NetworkMonitor:
     """Опрашивает соединения и сообщает о подозрительных; дополнительно смотрит DNS-запросы
     (ETW), начала TLS-соединений (WinDivert) и ищет маячки.
@@ -106,8 +111,11 @@ class NetworkMonitor:
         self._dns_batch: list[DnsRecord] = []
         self._tls_batch: list[TlsRecord] = []
         self.beacons = BeaconDetector()
-        self._dns = DnsWatcher(self._on_dns, self._substatus) if watch_dns else None
-        self._tls = TlsWatcher(self._on_tls, self._substatus, windivert_dir) if watch_tls else None
+        sensors = SENSORS
+        dns_cls = sensors.dns if sensors is not None else DnsWatcher
+        tls_cls = sensors.tls if sensors is not None else TlsWatcher
+        self._dns = dns_cls(self._on_dns, self._substatus) if watch_dns else None
+        self._tls = tls_cls(self._on_tls, self._substatus, windivert_dir) if watch_tls else None
 
     def start(self):
         self._stop.clear()

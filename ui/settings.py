@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -74,6 +75,9 @@ DEFAULTS = {
     "protect/stealer": True,        # защита от стилеров (toolbox/stealerguard.py)
     "protect/amsi": False,          # проверка скриптов через AMSI (scanner/amsi.py); нужна
                                     # регистрация провайдера с правами администратора
+    "protect/pslog": True,          # журнал блоков скриптов PowerShell, событие 4104
+                                    # (scanner/pslog.py): вторая линия после AMSI
+    "protect/pslog_all": False,     # политика «записывать все блоки» (иначе — подозрительные)
     "schedule/enabled": False,      # плановая проверка (scanner/schedule.py)
     "schedule/kind": "full",        # full | quick
     "schedule/period": "1w",        # 1w | 2w | 1m | 3m
@@ -94,9 +98,74 @@ DEFAULTS = {
     "process/interval": 2,          # обновление диспетчера процессов, сек
     "stats/last_scan": "",
     "db/last_update": 0.0,          # время последнего обновления баз (секунды с 1970 года)
+    "update/last_check": 0.0,       # последняя проверка выпуска программы (updatecheck.py)
+    "update/skipped": "",           # версия, которую пользователь решил пропустить
     "report/first_run": 0.0,        # первый запуск: от него считаются периоды отчёта
     "report/last_end": 0.0,         # конец последнего периода, отчёт за который готов
 }
+
+
+# Настройки, которыми вредонос без прав ослабил бы защиту или запустил свой код с правами
+# администратора (путь к xray.exe, подключение VPN при запуске, выключенная защита, сняты
+# запреты): settings.ini пишет любая программа пользователя. Они хранятся отдельно —
+# secure_settings.json под trustseal (защищённая копия в %ProgramData%): файл, изменённый не
+# программой, не действует, пока пользователь не решит при запуске (check_trust_files).
+SECURE_PREFIXES = ("protect/", "lock/", "scan/")
+SECURE_KEYS = {"startup/autostart", "vpn/autostart", "vpn/xray_path", "vpn/singbox_path",
+               "vpn/killswitch", "vpn/direct_apps", "net/windivert_dir", "general/block_exit"}
+_secure_lock = threading.RLock()
+_secure_cache: tuple[bytes, dict] | None = None
+
+
+def secure(key: str) -> bool:
+    return key in SECURE_KEYS or key.startswith(SECURE_PREFIXES)
+
+
+def _typed(value, default):
+    if isinstance(default, bool):
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+    try:
+        return type(default)(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _secure_data() -> dict:
+    """Защищённые настройки (то, чему можно доверять). Файла ещё нет — перенос значений из
+    settings.ini (первый запуск этой версии)."""
+    global _secure_cache
+    import trustseal
+    path = userdata.SECURE_SETTINGS_FILE
+    with _secure_lock:
+        if not path.exists():
+            ini = store()
+            data = {k: _typed(ini.value(k), DEFAULTS[k]) for k in DEFAULTS
+                    if secure(k) and ini.contains(k)}
+            _write_secure(data)
+        raw = trustseal.read(path)
+        if _secure_cache is not None and _secure_cache[0] == raw:
+            return _secure_cache[1]
+        try:
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        _secure_cache = (raw, data)
+        return data
+
+
+def _write_secure(data: dict) -> None:
+    import trustseal
+    path = userdata.SECURE_SETTINGS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+    trustseal.saved(path)
 
 
 _stores = threading.local()
@@ -118,19 +187,34 @@ def store() -> QSettings:
 
 def get(key: str):
     default = DEFAULTS[key]
+    if secure(key):
+        data = _secure_data()
+        return _typed(data[key], default) if key in data else default
     return store().value(key, default, type=type(default))
 
 
 def set_(key: str, value) -> None:
+    if secure(key):
+        with _secure_lock:
+            data = dict(_secure_data())
+            data[key] = value
+            _write_secure(data)
+        store().remove(key)  # прежнее место — чтобы не путало
+        return
     store().setValue(key, value)
+
+
+KEEP_ON_RESET = ("stats/last_scan", "db/last_update", "report/first_run", "report/last_end",
+                 "schedule/last_run", "advanced/warned")
 
 
 def reset() -> None:
     settings = store()
     for key in DEFAULTS:
-        if key not in ("stats/last_scan", "db/last_update", "report/first_run",
-                       "report/last_end", "schedule/last_run", "advanced/warned"):
+        if key not in KEEP_ON_RESET:
             settings.remove(key)
+    with _secure_lock:
+        _write_secure({})
 
 
 # ---------- автозапуск вместе с Windows ----------

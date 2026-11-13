@@ -159,3 +159,29 @@ def test_last_profile_server_hidden_without_profile(monkeypatch):
     anon.register_vpn_profiles()
     text = anon.scrub("vpn/last_profile = Old-Profile|203.0.113.77:443")
     assert "203.0.113.77" not in text and "Old-Profile" not in text
+
+
+def test_closed_by_installer_is_not_a_crash(tmp_path, monkeypatch, caplog):
+    """Установщик закрывает программу принудительно: это не «завершился аварийно»."""
+    import json
+    import logging
+    import time
+
+    import selfguard
+    from diag import crash
+    monkeypatch.setattr(crash, "SESSION", tmp_path / "session.json")
+    monkeypatch.setattr(crash, "CRASH_LOG", tmp_path / "crash.log")
+    monkeypatch.setattr(selfguard, "NO_RESTART", tmp_path / "no_restart")
+    monkeypatch.setattr(crash, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(crash.log, "propagate", True)
+    monkeypatch.setattr(crash.log.parent, "propagate", True)
+    crash.SESSION.write_text(json.dumps({"pid": 4242, "started": time.time() - 60}),
+                             encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="sbit"):
+        crash._check_previous_session()            # метки нет — это сбой
+        assert any("аварийно" in r.getMessage() for r in caplog.records)
+        caplog.clear()
+        selfguard.NO_RESTART.write_text("setup", encoding="ascii")
+        crash._check_previous_session()            # метка новее сеанса — закрыл установщик
+        assert not any("аварийно" in r.getMessage() for r in caplog.records)
+        assert any("установщиком" in r.getMessage() for r in caplog.records)

@@ -13,9 +13,16 @@
 //   (GetNamedPipeServerProcessId) должен быть одной из программ из
 //   HKLM\SOFTWARE\StretchBIT\AMSI, значение Servers (REG_MULTI_SZ, пишет только администратор
 //   при регистрации) — чужая программа, создавшая канал с тем же именем, ничего не получит;
-// • программа не запущена или не отвечает → «не обнаружено» за ~0,2 с (канала нет — сразу),
-//   ответ ждём не дольше REPLY_TIMEOUT_MS: зависший антивирус не должен вешать PowerShell;
-// • больше MAX_CONTENT байт не отправляется (начало скрипта).
+// • канал открывается ровно с теми правами, что выдал сервер (CLIENT_ACCESS): GENERIC_WRITE
+//   включает право создавать экземпляры канала, которого у пользователей нет, — с ним
+//   обычный (не повышенный) PowerShell получал «отказано в доступе» и не проверялся;
+// • SECURITY_IDENTIFICATION: сервер канала не может действовать от имени клиента;
+// • программа не запущена или не отвечает → «не обнаружено» (канала нет — сразу, занят —
+//   ждём до CONNECT_WAIT_MS), ответ ждём не дольше REPLY_TIMEOUT_MS: зависший антивирус не
+//   должен вешать PowerShell;
+// • больше MAX_CONTENT байт не отправляется: у длинного скрипта — начало и конец по
+//   половине (флаг 2), чтобы вредоносная часть после «мусора» в начале тоже была видна;
+// • любое исключение внутри Scan() гасится: провайдер не роняет процесс.
 //
 // Сборка — build_amsi.py (cl.exe, x64 и x86: 32-битные Office и PowerShell грузят свою).
 // Регистрация в реестре — из Python (scanner/amsi.py install), не через regsvr32.
@@ -42,9 +49,14 @@ static const wchar_t PIPE_NAME[] = L"\\\\.\\pipe\\sbit-amsi";
 static const wchar_t SERVERS_KEY[] = L"SOFTWARE\\StretchBIT\\AMSI";
 static const DWORD MAGIC_REQUEST = 0x31414253;   // "SBA1"
 static const DWORD MAGIC_REPLY = 0x52414253;     // "SBAR"
-static const DWORD REPLY_TIMEOUT_MS = 3000;
-static const DWORD CONNECT_WAIT_MS = 200;
-static const ULONGLONG MAX_CONTENT = 2 * 1024 * 1024;
+static const DWORD REPLY_TIMEOUT_MS = 6000;
+static const DWORD CONNECT_WAIT_MS = 1000;
+static const ULONGLONG MAX_CONTENT = 8 * 1024 * 1024;   // начало и конец — по половине
+// права клиента: чтение, запись данных, смена режима канала (FILE_WRITE_ATTRIBUTES) — то,
+// что сервер выдаёт пользователям (0x12018b в PIPE_SDDL scanner/amsi.py)
+static const DWORD CLIENT_ACCESS = GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
+static const DWORD CLIENT_FLAGS = FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                                  SECURITY_IDENTIFICATION;
 
 static LONG g_objects = 0;
 static LONG g_locks = 0;
@@ -53,7 +65,7 @@ static LONG g_locks = 0;
 struct Request {
     DWORD magic;
     DWORD pid;
-    DWORD flags;         // 1 — процесс 32-битный
+    DWORD flags;         // 1 — процесс 32-битный, 2 — отправлены только начало и конец
     DWORD app_bytes;     // имя приложения (UTF-16LE), затем имя содержимого, затем содержимое
     DWORD name_bytes;
     DWORD content_bytes;
@@ -133,21 +145,29 @@ static std::wstring string_attribute(IAmsiStream *stream, AMSI_ATTRIBUTE attr) {
 }
 
 // Отправить содержимое программе; true — угроза.
+static HANDLE open_pipe() {
+    // занят — все экземпляры обслуживают другие запросы: ждём освобождения, но недолго
+    ULONGLONG deadline = GetTickCount64() + CONNECT_WAIT_MS;
+    for (;;) {
+        HANDLE pipe = CreateFileW(PIPE_NAME, CLIENT_ACCESS, 0, nullptr, OPEN_EXISTING,
+                                  CLIENT_FLAGS, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY) return pipe;
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) return INVALID_HANDLE_VALUE;
+        WaitNamedPipeW(PIPE_NAME, static_cast<DWORD>(deadline - now));
+    }
+}
+
 static bool ask_server(const std::wstring &app, const std::wstring &name, const BYTE *data,
-                       DWORD len, ULONGLONG full_size) {
-    HANDLE pipe = CreateFileW(PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                              OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY &&
-        WaitNamedPipeW(PIPE_NAME, CONNECT_WAIT_MS))
-        pipe = CreateFileW(PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                           FILE_FLAG_OVERLAPPED, nullptr);
+                       DWORD len, ULONGLONG full_size, bool trimmed) {
+    HANDLE pipe = open_pipe();
     if (pipe == INVALID_HANDLE_VALUE) return false;  // программа не запущена
     bool detected = false;
     DWORD mode = PIPE_READMODE_MESSAGE;
     if (SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr) && trusted_server(pipe)) {
         BOOL wow = FALSE;
         IsWow64Process(GetCurrentProcess(), &wow);
-        Request head = {MAGIC_REQUEST, GetCurrentProcessId(), wow ? 1u : 0u,
+        Request head = {MAGIC_REQUEST, GetCurrentProcessId(), (wow ? 1u : 0u) | (trimmed ? 2u : 0u),
                         static_cast<DWORD>(app.size() * sizeof(wchar_t)),
                         static_cast<DWORD>(name.size() * sizeof(wchar_t)), len, full_size};
         std::vector<BYTE> msg(sizeof(head) + head.app_bytes + head.name_bytes + len);
@@ -197,29 +217,45 @@ public:
     STDMETHODIMP Scan(IAmsiStream *stream, AMSI_RESULT *result) override {
         if (!stream || !result) return E_INVALIDARG;
         *result = AMSI_RESULT_NOT_DETECTED;
+        try {  // нехватка памяти и т. п.: не мешаем процессу работать
+            if (scan(stream)) *result = AMSI_RESULT_DETECTED;
+        } catch (...) {
+        }
+        return S_OK;
+    }
+
+    // Содержимое — целиком или, если длиннее MAX_CONTENT, начало и конец по половине.
+    static bool scan(IAmsiStream *stream) {
         ULONGLONG size = 0;
         ULONG got = 0;
         if (FAILED(stream->GetAttribute(AMSI_ATTRIBUTE_CONTENT_SIZE, sizeof(size),
                                         reinterpret_cast<BYTE *>(&size), &got)) || !size)
-            return S_OK;
-        DWORD len = static_cast<DWORD>(size < MAX_CONTENT ? size : MAX_CONTENT);
+            return false;
+        bool trimmed = size > MAX_CONTENT;
+        DWORD half = static_cast<DWORD>(MAX_CONTENT / 2);
+        DWORD len = static_cast<DWORD>(trimmed ? MAX_CONTENT : size);
         PBYTE address = nullptr;
         std::vector<BYTE> copy;
-        if (FAILED(stream->GetAttribute(AMSI_ATTRIBUTE_CONTENT_ADDRESS, sizeof(address),
-                                        reinterpret_cast<BYTE *>(&address), &got)) || !address) {
-            copy.resize(len);  // содержимого нет в памяти — читаем через Read
-            ULONG read = 0;
-            if (FAILED(stream->Read(0, len, copy.data(), &read))) return S_OK;
-            len = read;
-            address = copy.data();
-        }
+        bool in_memory = SUCCEEDED(stream->GetAttribute(
+            AMSI_ATTRIBUTE_CONTENT_ADDRESS, sizeof(address), reinterpret_cast<BYTE *>(&address),
+            &got)) && address;
         std::wstring app = string_attribute(stream, AMSI_ATTRIBUTE_APP_NAME);
         std::wstring name = string_attribute(stream, AMSI_ATTRIBUTE_CONTENT_NAME);
-        try {
-            if (ask_server(app, name, address, len, size)) *result = AMSI_RESULT_DETECTED;
-        } catch (...) {  // нехватка памяти и т. п.: не мешаем процессу работать
+        if (in_memory && !trimmed)  // обычный случай: без копии
+            return ask_server(app, name, address, len, size, false);
+        if (in_memory) {
+            copy.resize(len);
+            memcpy(copy.data(), address, half);
+            memcpy(copy.data() + half, address + (size - half), half);
+        } else {  // содержимого нет в памяти — читаем через Read
+            copy.resize(len);
+            ULONG read = 0, tail = 0;
+            if (FAILED(stream->Read(0, trimmed ? half : len, copy.data(), &read))) return false;
+            if (trimmed && FAILED(stream->Read(size - half, half, copy.data() + read, &tail)))
+                tail = 0;
+            copy.resize(read + tail);
         }
-        return S_OK;
+        return ask_server(app, name, copy.data(), static_cast<DWORD>(copy.size()), size, trimmed);
     }
     STDMETHODIMP_(void) CloseSession(ULONGLONG) override {}
     STDMETHODIMP DisplayName(LPWSTR *name) override {

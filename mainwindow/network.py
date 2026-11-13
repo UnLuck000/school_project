@@ -157,6 +157,34 @@ class NetworkMixin:
             self.journal_page.refresh()
 
     def _set_windivert_dir(self, folder: str):
+        """Папка, закрытая от записи, — как есть; иначе — защищённая копия (с вопросом)."""
+        import hashlib
+        from pathlib import Path
+
+        from networkmonitor import tls
+        dll = Path(folder) / "WinDivert.dll"
+        if not dll.is_file() or not (dll.parent / "WinDivert64.sys").is_file():
+            QMessageBox.warning(self, "WinDivert", "В папке нет WinDivert.dll и "
+                                                   "WinDivert64.sys.")
+            return
+        safe, reason = tls.windivert_safe(dll)
+        if not safe:
+            digest = hashlib.sha256(dll.read_bytes()).hexdigest()
+            if QMessageBox.question(
+                    self, "WinDivert",
+                    f"В эту папку может писать не только администратор ({reason}).\n\n"
+                    "Программа сделает копию WinDivert.dll и WinDivert64.sys в защищённую "
+                    "папку и будет загружать её. Убедитесь, что это настоящий WinDivert "
+                    f"(SHA-256 библиотеки: {digest}).\n\nСкопировать?") != \
+                    QMessageBox.StandardButton.Yes:
+                return
+            try:
+                folder = str(tls.trust_windivert(folder))
+            except OSError as e:
+                QMessageBox.warning(self, "WinDivert", f"Копия не сделана: {e}")
+                return
+            activity.record("network", f"WinDivert: защищённая копия из {dll.parent}",
+                            sha256=digest)
         cfg.set_("net/windivert_dir", folder)
         QMessageBox.information(self, "WinDivert", "Папка сохранена. Выключите и снова "
                                                    "включите мониторинг сети.")

@@ -22,9 +22,22 @@ if "--watchdog" in sys.argv:  # сторож: перезапуск после н
         pass
     sys.exit(0)
 
+if any(a.startswith("--service") for a in sys.argv[1:]):
+    # служба Windows и её установка (service/main.py): до Qt и папки конфигурации
+    # пользователя — у службы свои данные в ProgramData
+    if sys.stdout is None or sys.stderr is None:
+        import datadirs
+        datadirs.LOGS.mkdir(parents=True, exist_ok=True)
+        _log = open(datadirs.LOGS / "service-stdout.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or _log
+        sys.stderr = sys.stderr or _log
+    from service.main import entry as _service_entry
+    sys.exit(_service_entry(sys.argv[1:]))
+
 if sys.stdout is None or sys.stderr is None:  # pythonw или exe без консоли
-    Path("logs").mkdir(exist_ok=True)
-    _log = open(Path("logs") / "gui.log", "a", encoding="utf-8", buffering=1)
+    import datadirs
+    datadirs.LOGS.mkdir(parents=True, exist_ok=True)
+    _log = open(datadirs.LOGS / "gui.log", "a", encoding="utf-8", buffering=1)
     sys.stdout = sys.stdout or _log
     sys.stderr = sys.stderr or _log
 
@@ -103,14 +116,21 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
     stealer_event = Signal(object)          # защита от стилеров: сведения о доступе
     guard_status = Signal(str, str)         # launch | stealer, текст состояния
     amsi_event = Signal(object)             # AMSI: заблокированный или подозрительный скрипт
+    pslog_event = Signal(object)            # журнал PowerShell 4104: опасный блок скрипта
+    release_found = Signal(object, str, bool)  # updatecheck.Release | None, ошибка, вручную
+    release_downloaded = Signal(object, str)   # путь установщика | None, ошибка
     systool_failed = Signal(object)         # diag.systool.Failure: системная программа не сработала
+    service_event = Signal(object)          # событие службы Windows (service/client.EventPump)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{appinfo.APP_NAME} {appinfo.VERSION}")
         self.settings = cfg.store()  # settings.ini в папке конфигурации (userdata.py)
         self._fit_to_screen()
-        self.monitor: RealtimeMonitor | None = None
+        self.monitor: RealtimeMonitor | None = None  # или service.client.RemoteMonitor
+        self.service = None  # service.client.ServiceClient: защита и карантин — в службе
+        self._service_pump = None
+        self._service_db_last_update = 0.0  # db_last_update из последнего op_status службы
         self.bridge = MonitorBridge()
         self.bridge.event.connect(self.on_monitor_event)
         self.net_monitor: NetworkMonitor | None = None
@@ -139,8 +159,10 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         self.launch_guard = None   # scanner.launchguard.LaunchGuard, пока включена защита
         self.stealer_guard = None  # toolbox.stealerguard.StealerGuard
         self.amsi_server = None    # scanner.amsi.AmsiServer
+        self.pslog_watch = None    # scanner.pslog.ScriptBlockWatch
         self.launch_event.connect(self._on_launch_event)
         self.amsi_event.connect(self._on_amsi_event)
+        self.pslog_event.connect(self._on_pslog_event)
         self._systool_dialog = None
         self.systool_failed.connect(self._on_systool_failed)
         from diag import systool
@@ -171,6 +193,9 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         self.exclusions_page = ExclusionsPage(show_title=False)
         self.settings_page = SettingsPage()
         self.about_page = AboutPage()
+        self.about_page.update_btn.clicked.connect(lambda: self.check_release(manual=True))
+        self.release_found.connect(self._on_release_found)
+        self.release_downloaded.connect(self._on_release_downloaded)
 
         # «Журнал»: найденное (журнал защиты, с карантином), действия программы и исключения.
         # Белый список вкладкой не показывается: он пополняется восстановлением из карантина,
@@ -415,13 +440,16 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         protection_text = ""
         if self.monitor is not None:
             protection_text = self.protect_status.text()
+        # базы обновляет служба (service/core.py), если она есть: окно без прав — не может
+        db_updated = self._service_db_last_update if self.service is not None else \
+            cfg.get("db/last_update")
         self.dashboard.refresh({
             "protection": self.monitor is not None,
             "network": self.net_monitor is not None,
             "quarantine": len(list_quarantine()),
             "whitelist": len(load_whitelist()),
             "last_scan": cfg.get("stats/last_scan"),
-            "db_updated": cfg.get("db/last_update"),
+            "db_updated": db_updated,
             "db_updating": self._updating,
             "protection_text": protection_text,
             "events": self.recent_events,
@@ -429,7 +457,7 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         stats = self._database_stats() if self.debug_mode else None
         if stats is not None:  # подробные счётчики баз нужны только на вкладке отладки
             self.debug_page.refresh(stats["hashes"], stats["rules"], stats["rule_files"],
-                                    stats["c2"], cfg.get("db/last_update"), stats["md5"])
+                                    stats["c2"], db_updated, stats["md5"])
 
 
     def on_setting_changed(self, key: str, value):
@@ -441,6 +469,8 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         elif key == "scan/threshold":
             heuristics.set_threshold(int(value))
         elif key.startswith("lock/"):
+            if key == "lock/protection" and self.service is not None:
+                self.set_service_lock(bool(value))
             self.apply_access()
         elif key == "general/block_exit" and self.tray is not None:
             self.tray.set_exit_allowed(not value)
@@ -450,6 +480,10 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
             self.apply_guards()
         elif key == "protect/amsi":
             self.set_amsi(bool(value))
+        elif key == "protect/pslog":
+            self.apply_guards()
+        elif key == "protect/pslog_all":
+            self.set_pslog_policy(bool(value))
         elif key.startswith("schedule/"):
             self.check_schedule()
         elif key in ("scan/mode", "scan/ecores_only", "scan/revocation"):
@@ -521,10 +555,12 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
             self.proc_window.close()
         if self.net_monitor is not None:
             self.net_monitor.stop()
-        if self.monitor is not None:
-            self.monitor.stop()
+        if self.monitor is not None and not getattr(self.monitor, "remote", False):
+            self.monitor.stop()  # защита в службе работает и без окна
+        if self._service_pump is not None:
+            self._service_pump.stop()
         self.decoy_watcher.stop()
-        for guard in (self.launch_guard, self.stealer_guard, self.amsi_server):
+        for guard in (self.launch_guard, self.stealer_guard, self.amsi_server, self.pslog_watch):
             if guard is not None:
                 guard.stop()
         vpn_window = self.tool_windows.get("vpn")
@@ -636,6 +672,14 @@ if __name__ == "__main__":
     heuristics.set_threshold(cfg.get("scan/threshold"))
     scan_pool.apply_settings()  # режим проверки и «Только E-ядра»
 
+    # окно со службой работает без прав: инструменты, меняющие систему, и отмена с правами —
+    # отдельным процессом через окно UAC (service/elevate.py)
+    if "--tool" in sys.argv or "--undo" in sys.argv:
+        from service import elevate as _elevate
+        app.setWindowIcon(load_app_icon())
+        sys.exit(_elevate.run_tool(sys.argv) if "--tool" in sys.argv
+                 else _elevate.run_undo(sys.argv))
+
     icon = load_app_icon()
     app.setWindowIcon(icon)
     tray_ok = QSystemTrayIcon.isSystemTrayAvailable()
@@ -660,10 +704,20 @@ if __name__ == "__main__":
     if guard.already_running(notify=not autostart, wait=wait, message=message):
         sys.exit(0)
 
-    # запуск пользователем — сразу с запросом UAC; из автозапуска (задание планировщика уже
-    # с наивысшими правами) и из меню Проводника окно UAC не показываем
-    if not autostart and not analyze_path and elevate_on_start():
+    # служба Windows установлена и отвечает: защита файлов, карантин и журнал защиты — в
+    # ней, окну права администратора не нужны (service/DESIGN.md)
+    from service import client as _svc_client
+    service_client = _svc_client.connect()
+    # без службы (исходники, прежняя установка) — как раньше: запуск пользователем сразу с
+    # запросом UAC; из автозапуска (задание планировщика уже с наивысшими правами) и из меню
+    # Проводника окно UAC не показываем
+    if service_client is None and not autostart and not analyze_path and elevate_on_start():
         sys.exit(0)
+    if service_client is not None:
+        from service import remote as _svc_remote
+        _svc_remote.install(service_client)  # до окна: оно сразу читает карантин и журнал
+        _dlog.info("Служба защиты: подключено, окно без прав администратора: %s",
+                   not is_admin())
 
     def _ensure_registration():
         # schtasks — до секунды на вызов (а с проверкой прежнего задания их три): в фоне
@@ -673,9 +727,10 @@ if __name__ == "__main__":
 
     threading.Thread(target=_ensure_registration, name="startup-registration",
                      daemon=True).start()
-    if not guard.listen():  # другой экземпляр успел занять имя
+    if not guard.listen() and guard.squatted is None:  # другой экземпляр успел занять имя
         sys.exit(0)
     crash.start_session()  # метка сеанса: аварийный выход заметен при следующем запуске
+    links = userdata.remove_links() if is_admin() else []  # см. userdata.remove_links
     import selfguard
     if cfg.get("protect/selfguard"):
         selfguard.start()  # сторож вернёт программу, если её снимут или она упадёт
@@ -686,11 +741,24 @@ if __name__ == "__main__":
 
     window = MainWindow()
     window.guard = guard
+    if service_client is not None:
+        window.attach_service(service_client)
     guard.activated.connect(lambda: window.show_main())
     guard.file_received.connect(lambda path: window.open_analyzer(path))
     if tray_ok:
         window.setup_tray(icon)
     window.apply_on_top(cfg.get("general/on_top"))
+    if links:
+        text = ("В папке настроек были ссылки на другие папки — убраны (так программу с "
+                "правами можно заставить писать в чужие места): " + ", ".join(links[:5]))
+        activity.record("trust", text)
+        window.add_event(text, "warning")
+    if guard.squatted is not None:
+        pid, exe = guard.squatted
+        text = (f"Имя канала программы заняла другая программа: {exe} (PID {pid}). Так можно "
+                "помешать запуску защиты — проверьте эту программу.")
+        activity.record("program", text)
+        window.add_event(text, "warning")
     if "--restarted" in sys.argv:
         activity.record("program", "Программа была завершена не штатно и перезапущена сторожем")
         window.add_event("Программа была завершена не штатно — защита перезапущена", "warning")

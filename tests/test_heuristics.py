@@ -42,3 +42,29 @@ def test_real_executable_is_not_flagged():
     if not report.is_pe:
         pytest.skip("интерпретатор не PE-файл")
     assert report.score < HEURISTIC_THRESHOLD
+
+
+def test_garbage_import_name_does_not_blind_heuristics(monkeypatch):
+    """Байт не из UTF-8 в имени функции ронял нативный разбор, и файл считался «не
+    программой»: эвристика молчала. Теперь имя пропускается, а при любом сбое нативного
+    разбора файл разбирает pefile."""
+    import os
+    from pathlib import Path
+
+    from scanner import heuristics
+    data = bytearray((Path(os.environ["SystemRoot"]) / "System32" / "whoami.exe").read_bytes())
+    good = heuristics.pe_info(Path("x"), bytes(data))
+    name = good["imports"][0].encode()
+    pos = bytes(data).lower().find(name + bytes(1))
+    assert pos > 0
+    data[pos] = 0xFF
+    report = heuristics.analyze_pe(Path("x"), bytes(data))
+    assert report.is_pe
+    info = heuristics.pe_info(Path("x"), bytes(data))
+    assert info["total_imports"] >= good["total_imports"] - 1 and name.decode() not in \
+        info["imports"]
+
+    def broken(path, data=None):
+        raise UnicodeDecodeError("utf-8", bytes(1), 0, 1, "сбой нативного разбора")
+    monkeypatch.setattr(heuristics, "_native_info", broken)
+    assert heuristics.analyze_pe(Path("x"), bytes(data)).is_pe

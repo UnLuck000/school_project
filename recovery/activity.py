@@ -15,9 +15,10 @@ from datetime import datetime
 from pathlib import Path
 
 import appinfo
+import datadirs
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-ACTIVITY_DIR = BASE_DIR / "reports" / "activity"
+ACTIVITY_DIR = datadirs.REPORTS / "activity"
 EVENTS_FILE = ACTIVITY_DIR / "events.jsonl"
 REPORT_FILE = ACTIVITY_DIR / "report.txt"      # текущий отчёт (кнопка «Открыть отчёт»)
 OUTBOX_DIR = ACTIVITY_DIR / "outbox"           # отчёты, готовые к отправке
