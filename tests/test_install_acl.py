@@ -82,3 +82,16 @@ def test_installer_rights_and_location():
     assert "*S-1-5-32-545:(OI)(CI)RX" in text
     assert '#define InstallDir "{autopf}\\StretchBIT"' in text
     assert "UsePreviousAppDir=no" in text and "MoveOldInstall();" in text
+
+
+def test_installer_does_not_overwrite_loaded_windivert():
+    """Драйвер WinDivert держит свой .sys (zapret подключается к уже загруженному): та же
+    версия не заменяется, занятый новый — после перезагрузки (Windows 10, 14.11.2026)."""
+    text = (ROOT / "installer.iss").read_text(encoding="utf-8")
+    lines = [s for s in text.splitlines() if s.startswith("Source:")]
+    main = next(s for s in lines if '"{#SourceDir}\\*"' in s)
+    assert 'Excludes: "\\app\\native\\windivert"' in main
+    driver = next(s for s in lines if "windivert" in s and s is not main)
+    assert "ignoreversion" not in driver
+    assert all(f in driver for f in ("restartreplace", "uninsrestartdelete",
+                                     "skipifsourcedoesntexist"))
