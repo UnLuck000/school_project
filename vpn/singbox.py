@@ -19,18 +19,22 @@ from pathlib import Path
 TUN_NAME = "sbit-tun"
 TUN_ADDRESS = "172.19.0.1/30"
 TUN_ADDRESS6 = "fdfe:dcba:9876::1/126"
+TUN6_CANDIDATES = ("fdfe:dcba:9876::1/126", "fdfe:dcba:9877::1/126", "fdfe:dcba:9878::1/126",
+                   "fdfe:dcba:9879::1/126")
 # 172.19.0.1/30 — адрес sing-box по умолчанию, его же берут Throne, Hiddify, NekoBox: при их
 # включённом TUN sing-box падал с «set ipv4 address: The object already exists»
 TUN_CANDIDATES = ("172.19.0.1/30", "172.23.231.1/30", "10.211.97.1/30", "192.168.251.1/30")
 
 
-def free_tun_address(used: list[str] | None = None) -> str:
+def free_tun_address(used: list[str] | None = None, exclude: tuple = ()) -> str:
     """Первый адрес из TUN_CANDIDATES, чья подсеть не пересекается с адресами других
-    адаптеров (used — для проверки; по умолчанию — адреса адаптеров Windows, кроме своего)."""
+    адаптеров (used — для проверки; по умолчанию — адреса всех адаптеров Windows, и своего
+    тоже: перед подключением его быть не должно, а остался — значит, от прежнего sing-box, и
+    его адрес занят). exclude — адреса, на которых sing-box уже не запустился."""
     import ipaddress
     if used is None:
         import psutil
-        used = [a.address for name, addrs in psutil.net_if_addrs().items() if name != TUN_NAME
+        used = [a.address for addrs in psutil.net_if_addrs().values()
                 for a in addrs if a.family.name == "AF_INET"]
     taken = []
     for address in used:
@@ -40,9 +44,16 @@ def free_tun_address(used: list[str] | None = None) -> str:
             continue
     for candidate in TUN_CANDIDATES:
         net = ipaddress.ip_interface(candidate).network
-        if not any(ip in net for ip in taken):
+        if candidate not in exclude and not any(ip in net for ip in taken):
             return candidate
-    return TUN_CANDIDATES[-1]
+    return next((c for c in reversed(TUN_CANDIDATES) if c not in exclude), TUN_CANDIDATES[-1])
+
+
+def tun_address6(address4: str) -> str:
+    """Адрес IPv6 в паре с выбранным IPv4: при смене адреса меняется и он (тот же «уже
+    существует» бывает и у IPv6)."""
+    index = TUN_CANDIDATES.index(address4) if address4 in TUN_CANDIDATES else 0
+    return TUN6_CANDIDATES[index % len(TUN6_CANDIDATES)]
 
 
 # DNS через VPN (vpn/dns_server): в списке окна — только эти; вручную — любой адрес вида
@@ -135,7 +146,8 @@ def find_singbox() -> str:
 def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
                  direct_apps: list[str] | None = None, block_quic: bool = False,
                  block_udp: bool = False, dns_server: str = "1.1.1.1",
-                 windows_dns: dict | None = None, strict_route: bool = True) -> dict:
+                 windows_dns: dict | None = None, strict_route: bool = True,
+                 tun_address: str | None = None) -> dict:
     """TUN sing-box → SOCKS5 127.0.0.1:socks_port (Xray).
 
     xray_exe — полный путь: мимо туннеля пропускается только этот файл (не любой xray.exe).
@@ -166,7 +178,8 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
         if chosen and not (family == "v6" and ip_mode == "ipv4"):  # IPv6 в туннеле закрыт
             servers.append({"type": net, "tag": tag, "server": chosen, "detour": "proxy"})
             dns_rules.append({"query_type": [query], "action": "route", "server": tag})
-    address = [free_tun_address(), TUN_ADDRESS6]
+    address4 = tun_address or free_tun_address()
+    address = [address4, tun_address6(address4)]
     extra = [] if ip_mode in ("prefer_ipv6", "ipv6") else [{"ip_version": 6, "action": "reject"}]
     if block_udp:
         extra.append({"network": "udp", "action": "reject"})

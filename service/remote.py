@@ -270,10 +270,19 @@ class RemoteBackend:
         self._listening = False
 
     def _listen(self) -> None:
-        # слушает только подключение, которое ведёт (окно создаёт и пробные объекты)
-        if not self._listening:
-            self._listening = True
-            self.remote.listen("vpn", self._on_event)
+        # слушает только подключение, которое ведёт (окно создаёт и пробные объекты). Слушатель
+        # один: окно создаёт новый объект на каждое подключение, и прежние слушатели
+        # оставались — каждая строка журнала VPN приходила 2, 3 ... 7 раз (Windows 10)
+        if self._listening:
+            return
+        self._listening = True
+        with self.remote._llock:
+            previous = getattr(self.remote, "_vpn_backend", None)
+            self.remote._vpn_backend = self
+        if previous is not None and previous is not self:
+            self.remote.unlisten("vpn", previous._on_event)
+            previous._listening = False
+        self.remote.listen("vpn", self._on_event)
 
     def _apply(self, status: dict) -> None:
         self.state = status.get("state", self.state)

@@ -1115,10 +1115,15 @@ class VpnWindow(QDialog):
 
     # ---------------- журнал ----------------
     def _append_log(self, text: str) -> None:
+        from vpn.backends import core_problem
         from diag.log import get
         # строки ядер (Xray, sing-box) — подробности, их сотни; свои сообщения — INFO
         core = text.startswith(("Xray: ", "sing-box: "))
         if not core:
+            get("vpn").log(20, "%s", text)
+        elif core_problem(text):
+            # ошибки ядра — INFO: в релизной версии DEBUG не пишется, и причину «sing-box не
+            # создал адаптер TUN» с Windows 10 узнать было не из чего
             get("vpn").log(20, "%s", text)
         elif " accepted " not in text:  # куда ходит пользователь — только в окне, не в файле
             # одна и та же ошибка ядра (тайм-аут до сервера) шла сотнями строк подряд
@@ -1527,7 +1532,8 @@ class VpnWindow(QDialog):
         self.bridge.log.emit("Работает другой VPN с туннелем: " + ", ".join(found))
         answer = QMessageBox.question(
             self, "VPN",
-            "Уже работает другой VPN-клиент со своим туннелем:\n" + "\n".join(found) +
+            "Уже работает другой VPN-клиент или обход блокировок (zapret):\n" +
+            "\n".join(found) +
             "\n\nДва туннеля мешают друг другу: часть соединений обрывается, а при сбое "
             "фильтры другого клиента перекрывают весь интернет — и выключение брандмауэра "
             "этого не снимает. Лучше закрыть его полностью (из трея).\n\nПодключить всё равно?",

@@ -31,6 +31,10 @@ TUN_CLIENTS = {
     "mihomo.exe": "mihomo", "clash.exe": "Clash", "wireguard.exe": "WireGuard",
     "openvpn.exe": "OpenVPN", "outline.exe": "Outline", "amneziavpn.exe": "AmneziaVPN",
     "sing-box.exe": "sing-box", "xray.exe": "Xray",
+    # не туннели, но перехватывают пакеты через WinDivert: с kill switch соединение Xray с
+    # сервером на 443 не проходит — VPN «подключён», а интернета нет (Windows 10, 14.11.2026)
+    "winws.exe": "zapret (перехват пакетов WinDivert)",
+    "goodbyedpi.exe": "GoodbyeDPI (перехват пакетов WinDivert)",
 }
 PROBES = (("1.1.1.1", 443), ("8.8.8.8", 443))
 

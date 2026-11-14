@@ -119,7 +119,14 @@ class VpnHost:
         self._lock = threading.Lock()
 
     def _log(self, text: str) -> None:
-        self.emit("vpn", {"log": str(text)})
+        text = str(text)
+        self.emit("vpn", {"log": text})
+        # и в журнал службы: строки окна теряются, если его закрыли; ядра — только ошибки
+        # (без «accepted» — куда ходит пользователь)
+        from vpn.backends import core_problem
+        if not text.startswith(("Xray: ", "sing-box: ")) or core_problem(text):
+            from diag.log import get
+            get("vpn").info("%s", text[:400])
 
     def _make(self, kind: str, mode: str):
         if self.factory is not None:

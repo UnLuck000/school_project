@@ -88,7 +88,23 @@ def _issuer(cert: dict) -> str:
     return ""
 
 
-def probe(host: str, route: tuple, timeout: float = 10.0) -> Probe:
+def windows_trusts(host: str, route: tuple, timeout: float) -> bool:
+    """Доверяет ли сертификату сайта сама Windows (wincerts.build_chain: недостающий корень
+    она докачивает с Windows Update). Сертификат берётся тем же путём, что и у проверки."""
+    try:
+        import wincerts
+        sock = open_tcp(host, 443, route, timeout)
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with context.wrap_socket(sock, server_hostname=host) as tls:
+            der = tls.getpeercert(binary_form=True) or b""
+        return wincerts.build_chain(der) == 0
+    except Exception:  # noqa: BLE001 — не узнали: считаем, что Windows не доверяет
+        return False
+
+
+def probe(host: str, route: tuple, timeout: float = 10.0, _retried: bool = False) -> Probe:
     result = Probe(host)
     t0 = time.perf_counter()
     try:
@@ -109,9 +125,16 @@ def probe(host: str, route: tuple, timeout: float = 10.0) -> Probe:
             result.ok = line.startswith("HTTP/")
             result.total_ms = (time.perf_counter() - t0) * 1000
     except ssl.SSLCertVerificationError as e:
+        result.issuer = _peek_issuer(host, route, timeout)
+        if e.verify_code in (2, 20) and windows_trusts(host, route, timeout):
+            # Python не нашёл корень в хранилище, а Windows цепочку строит (докачав корень):
+            # на Windows 10 так telegram.org (корень GoDaddy) считался «подменённым» и
+            # блокировался. Имя сайта при этом уже совпало (иначе код ошибки другой)
+            result.cert = "ok"
+            result.error = ""
+            return result if _retried else probe(host, route, timeout, _retried=True)
         result.cert = "substituted"
         result.error = f"сертификат не прошёл проверку: {e.verify_message}"
-        result.issuer = _peek_issuer(host, route, timeout)
     except Exception as e:
         result.cert = "unknown"
         result.error = str(e)[:100]

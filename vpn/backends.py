@@ -54,6 +54,16 @@ def tunnel_name(name: str) -> str:
     return clean or "sbit"
 
 
+CORE_PROBLEMS = ("FATAL", "ERROR", "WARN", "failed", "Failed", "denied", "exists", "panic")
+
+
+def core_problem(text: str) -> bool:
+    """Строка ядра (Xray, sing-box) — ошибка или предупреждение, а не обычный ход работы.
+    Обрывы отдельных соединений (i/o timeout до сайта) сюда тоже попадают — их сворачивает
+    журнал окна."""
+    return any(word in text for word in CORE_PROBLEMS) and " accepted " not in text
+
+
 def xray_env(options: dict) -> dict | None:
     """Окружение Xray: у профиля маршрутизации свои файлы .dat — Xray ищет geo-файлы в
     папке options["assets"] (XRAY_LOCATION_ASSET), иначе — рядом с собой."""
@@ -531,10 +541,13 @@ class SingBoxBackend(Backend):
             win_dns = windns.manual_dns()  # до dnsguard.protect: он трогает только роутер
             if win_dns["v4"] or win_dns["v6"]:
                 self.log(windns.describe(win_dns))
-            spath = self._write(self.sb.build_config(
-                x.SOCKS_PORT, self.xray_exe, ip_mode, apps, opts["block_quic"], opts["block_udp"],
-                str(self._get("vpn/dns_server") or "1.1.1.1"), win_dns,
-                strict_route=self._get("vpn/strict_route") is not False), "sing-box.json")
+            def singbox_config(tun_address: str | None = None) -> Path:
+                return self._write(self.sb.build_config(
+                    x.SOCKS_PORT, self.xray_exe, ip_mode, apps, opts["block_quic"],
+                    opts["block_udp"], str(self._get("vpn/dns_server") or "1.1.1.1"), win_dns,
+                    strict_route=self._get("vpn/strict_route") is not False,
+                    tun_address=tun_address), "sing-box.json")
+            spath = singbox_config()
             self.log(describe_options(opts, apps))
         except (OSError, ValueError) as e:
             self._fail(f"VLESS: {e}")
@@ -548,18 +561,39 @@ class SingBoxBackend(Backend):
             errors="replace", creationflags=CREATE_NO_WINDOW, env=xray_env(opts))
         procguard.bind(self.xray_proc, self.log)
         threading.Thread(target=self._read, args=(self.xray_proc, "Xray"), daemon=True).start()
-        if not x.wait_port(x.SOCKS_PORT):
+        if not self._wait_port(x.SOCKS_PORT):
             self._fail(self.error or "Xray не открыл локальный SOCKS (смотрите журнал)")
             return
         features.step("vpn.connect", "xray")
-        self.log("sing-box: запуск TUN (нужны права администратора)...")
-        self.proc = subprocess.Popen(
-            [self.exe, "run", "-c", str(spath)], cwd=str(Path(self.exe).parent),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-            errors="replace", creationflags=CREATE_NO_WINDOW)
-        procguard.bind(self.proc, self.log)
-        threading.Thread(target=self._read, args=(self.proc, "sing-box"), daemon=True).start()
-        if not self._wait_adapter():
+        self._wait_old_adapter()
+        tried: list[str] = []
+        while True:
+            address = self.sb.free_tun_address(exclude=tuple(tried))
+            if tried:  # прежний адрес занят: конфигурация с другим
+                spath = singbox_config(address)
+            tried.append(address)
+            self.log(f"sing-box: запуск TUN, адрес {address} (нужны права администратора)...")
+            self.proc = subprocess.Popen(
+                [self.exe, "run", "-c", str(spath)], cwd=str(Path(self.exe).parent),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                errors="replace", creationflags=CREATE_NO_WINDOW)
+            procguard.bind(self.proc, self.log)
+            reader = threading.Thread(target=self._read, args=(self.proc, "sing-box"),
+                                      daemon=True)
+            reader.start()
+            if self._wait_adapter():
+                break
+            reader.join(timeout=2)  # ядро упало: дочитать его последнюю строку (причину)
+            # «set ipv4 address: The object already exists»: адрес ещё держит адаптер
+            # прежнего sing-box (Windows убирает его не сразу) или чужой клиент — другой адрес
+            if "already exists" in self.error and len(tried) < len(self.sb.TUN_CANDIDATES) \
+                    and self.state == CONNECTING:
+                self.log(f"sing-box: адрес {address} занят — пробую другой")
+                proc, self.proc = self.proc, None
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                self.error = ""
+                continue
             if not self._aborted():
                 self._fail(self.error or "sing-box не создал адаптер TUN (смотрите журнал)")
             return
@@ -611,12 +645,37 @@ class SingBoxBackend(Backend):
         self.log(f"Подключено: весь трафик через {self.sb.TUN_NAME} → Xray → сервер"
                  + ", " + x.IP_MODES.get(ip_mode, ip_mode))
 
-    def _wait_adapter(self, timeout: float = 10.0) -> bool:
+    # ядро ещё живо — ждём дольше: на слабом ПК (Celeron, Windows 10) Xray и sing-box
+    # запускаются дольше 8–10 с, и подключение срывалось «не открыл SOCKS» / «не создал
+    # адаптер». Упавшее ядро обрывает ожидание сразу
+    START_TIMEOUT = 30.0
+
+    def _wait_port(self, port: int) -> bool:
+        end = time.time() + self.START_TIMEOUT
+        while time.time() < end:
+            if self.x.wait_port(port, timeout=1.0):
+                return True
+            if self.xray_proc is None or self.xray_proc.poll() is not None or self.error:
+                return False
+        return False
+
+    def _wait_old_adapter(self, timeout: float = 10.0) -> None:
+        """Адаптер прежнего sing-box ещё есть (ядро завершено принудительно — Windows убирает
+        его не сразу): подождать, пока исчезнет."""
+        import psutil
+        end = time.time() + timeout
+        if self.sb.TUN_NAME not in psutil.net_if_stats():
+            return
+        self.log("sing-box: адаптер прежнего подключения ещё не убран — жду")
+        while time.time() < end and self.sb.TUN_NAME in psutil.net_if_stats():
+            time.sleep(0.5)
+
+    def _wait_adapter(self, timeout: float | None = None) -> bool:
         """Адаптер TUN появился и sing-box после этого жив. Адаптер создаётся раньше, чем ему
         назначается адрес: ошибка («The object already exists») приходит следом, поэтому
         после появления — ещё секунда проверки."""
         import psutil
-        end = time.time() + timeout
+        end = time.time() + (timeout or self.START_TIMEOUT)
         while time.time() < end:
             if self.proc is None or self.proc.poll() is not None or self.error:
                 return False
@@ -649,6 +708,8 @@ class SingBoxBackend(Backend):
             self.log(f"{title}: " + line[-200:])
             if "FATAL" in line or "Failed to start" in line:
                 self.error = f"{title}: " + line.split("FATAL", 1)[-1].strip()[-200:]
+        if self.state == CONNECTING and "already exists" in self.error:
+            return  # connect повторит запуск с другим адресом TUN
         if self.state in (CONNECTED, CONNECTING) and proc in (self.proc, self.xray_proc):
             dropped = self.killswitch
             self._cleanup(keep_block=dropped)  # обрыв: блокировка остаётся — в этом смысл
