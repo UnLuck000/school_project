@@ -99,7 +99,7 @@ class JournalMixin:
                  userdata.EXCLUSIONS_FILE: "Исключения",
                  userdata.OVERRIDES_FILE: "Исключения из баз (хэши, правила, программы)",
                  userdata.SECURE_SETTINGS_FILE: "Защищённые настройки (защита, запреты, "
-                                                "пути к программам VPN и WinDivert)"}
+                                                "пути к программам VPN)"}
         try:
             trustseal.finish_first_run(files)
             changed = trustseal.pending()

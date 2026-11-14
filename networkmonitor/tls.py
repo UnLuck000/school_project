@@ -17,9 +17,7 @@ ClientHello с этого порта получает программу нав�
 Запасной путь (старый WinDivert без уровня SOCKET) — таблица соединений psutil.
 """
 import ctypes
-import glob
 import hashlib
-import os
 import struct
 import sys
 import threading
@@ -136,23 +134,12 @@ def tcp_payload(packet: bytes) -> tuple[str, int, int, bytes] | None:
 
 
 # ---------- WinDivert ----------
-def windivert_candidates(configured: str = "") -> list[Path]:
-    """Где искать WinDivert.dll: настройка, защищённая копия программы, native/windivert,
-    папки zapret."""
-    candidates = []
-    if configured:
-        candidates.append(Path(configured) / "WinDivert.dll")
-    try:
-        import trustseal
-        if trustseal.root_trusted():
-            candidates.append(trustseal.protected_dir() / "windivert" / "WinDivert.dll")
-    except Exception:  # noqa: S110 — без защищённой копии ищем дальше
-        pass
-    candidates.append(PROJECT_DIR / "native" / "windivert" / "WinDivert.dll")
-    for drive_root in ("C:\\", os.environ.get("ProgramFiles", r"C:\Program Files")):
-        candidates += [Path(p) for p in glob.glob(os.path.join(drive_root, "zapret*", "bin",
-                                                               "WinDivert.dll"))]
-    return candidates
+def windivert_candidates() -> list[Path]:
+    """Только своя копия программы: app\\native\\windivert (кладёт сборка) или native/windivert
+    проекта. Папки zapret, выбранная пользователем папка и копия в ProgramData больше не
+    ищутся (14.11.2026): любую из них можно подменить, а библиотека загружается в процесс с
+    правами администратора — и в службу от SYSTEM."""
+    return [PROJECT_DIR / "native" / "windivert" / "WinDivert.dll"]
 
 
 def _from_project(dll: Path) -> bool:
@@ -182,11 +169,12 @@ def windivert_safe(dll: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def find_windivert(configured: str = "") -> Path | None:
+def find_windivert() -> Path | None:
     """WinDivert.dll с драйвером рядом, который меняют только администраторы (см.
-    windivert_safe); небезопасные находки — в find_windivert.unsafe."""
+    windivert_safe); небезопасные находки — в find_windivert.unsafe (программа распакована
+    из .zip в папку, открытую пользователю)."""
     find_windivert.unsafe = []
-    for dll in windivert_candidates(configured):
+    for dll in windivert_candidates():
         if not (dll.is_file() and (dll.parent / "WinDivert64.sys").is_file()):
             continue
         ok, reason = windivert_safe(dll)
@@ -197,24 +185,6 @@ def find_windivert(configured: str = "") -> Path | None:
 
 
 find_windivert.unsafe = []
-
-
-def trust_windivert(folder) -> Path:
-    """Пользователь выбрал папку с WinDivert: копия WinDivert.dll и WinDivert64.sys в
-    защищённую папку программы (%ProgramData%\\StretchBIT\\windivert, запись — только
-    администраторам); дальше загружается копия. Нужны права администратора."""
-    import shutil
-
-    import trustseal
-    src = Path(folder)
-    if not (src / "WinDivert.dll").is_file() or not (src / "WinDivert64.sys").is_file():
-        raise FileNotFoundError("в папке нет WinDivert.dll и WinDivert64.sys")
-    target = trustseal.protected_subdir("windivert")
-    if target is None:
-        raise PermissionError("нужны права администратора")
-    for name in ("WinDivert.dll", "WinDivert64.sys"):
-        shutil.copy2(src / name, target / name)
-    return target
 
 
 def socket_event(addr: bytes) -> tuple[int, int, int] | None:
@@ -314,10 +284,9 @@ class _PortMap:
 class TlsWatcher:
     """on_hello(TlsEvent) вызывается из своего потока."""
 
-    def __init__(self, on_hello, on_status=None, dll_dir: str = ""):
+    def __init__(self, on_hello, on_status=None):
         self.on_hello = on_hello
         self.on_status = on_status or (lambda text: None)
-        self.dll_dir = dll_dir
         self.running = False
         self._stop = threading.Event()
         self._handle = None
@@ -347,16 +316,15 @@ class TlsWatcher:
         """Пустая строка — открыто, иначе причина."""
         if sys.platform != "win32":
             return "только Windows"
-        dll_path = find_windivert(self.dll_dir)
+        dll_path = find_windivert()
         if dll_path is None:
             if find_windivert.unsafe:
                 dll, reason = find_windivert.unsafe[0]
-                return (f"WinDivert найден в {dll.parent}, но не загружен: {reason}. "
-                        "Подменённая библиотека выполнилась бы с правами администратора. "
-                        "Укажите эту папку кнопкой на вкладке «TLS» — программа сделает "
-                        "защищённую копию")
-            return ("не найден WinDivert.dll с драйвером WinDivert64.sys (укажите папку на "
-                    "вкладке «TLS»)")
+                return (f"WinDivert в {dll.parent} не загружен: {reason}. Подменённая "
+                        "библиотека выполнилась бы с правами администратора — установите "
+                        "программу установщиком (папка в Program Files закрыта от записи)")
+            return ("нет WinDivert.dll с драйвером WinDivert64.sys в папке программы "
+                    "(app\\native\\windivert) — переустановите программу")
         try:
             dll = ctypes.WinDLL(str(dll_path), use_last_error=True)
         except OSError as e:

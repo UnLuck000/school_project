@@ -30,9 +30,39 @@ def test_windivert_from_user_folder_is_not_loaded(tmp_path, monkeypatch):
     folder.mkdir(parents=True)
     (folder / "WinDivert.dll").write_bytes(b"MZ")
     (folder / "WinDivert64.sys").write_bytes(b"MZ")
-    monkeypatch.setattr(tls, "windivert_candidates", lambda configured="": [folder / "WinDivert.dll"])
+    monkeypatch.setattr(tls, "windivert_candidates", lambda: [folder / "WinDivert.dll"])
     assert tls.find_windivert() is None
     assert tls.find_windivert.unsafe and tls.find_windivert.unsafe[0][0] == folder / "WinDivert.dll"
+
+
+def test_windivert_only_from_program_folder():
+    """По чужим папкам (zapret, выбранная пользователем, копия в ProgramData) WinDivert
+    больше не ищется: только своя копия в папке программы (14.11.2026)."""
+    from networkmonitor import tls
+    assert tls.windivert_candidates() == [tls.PROJECT_DIR / "native" / "windivert" /
+                                          "WinDivert.dll"]
+    assert not hasattr(tls, "trust_windivert")
+    from ui import settings
+    assert "net/windivert_dir" not in settings.SECURE_KEYS
+
+
+def test_build_includes_windivert_by_default(monkeypatch, tmp_path):
+    import sys
+
+    import build_release
+    monkeypatch.setattr(build_release, "WINDIVERT_SRC", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["build_release.py", "--installer"])
+    with pytest.raises(SystemExit):            # файлов нет — сборка останавливается
+        build_release.check_windivert()
+    monkeypatch.setattr(sys, "argv", ["build_release.py", "--no-windivert"])
+    build_release.check_windivert()
+    for name in build_release.WINDIVERT_FILES:
+        (tmp_path / name).write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "argv", ["build_release.py"])
+    build_release.check_windivert()
+    app = tmp_path / "app"
+    build_release.copy_windivert(app)
+    assert all((app / "native" / "windivert" / n).is_file() for n in build_release.WINDIVERT_FILES)
 
 
 def test_env_overrides_ignored_in_frozen_build(monkeypatch, tmp_path):

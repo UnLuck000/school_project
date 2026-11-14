@@ -6,7 +6,7 @@ import time
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -216,21 +216,11 @@ class DnsPanel(_RecordsPanel):
 class TlsPanel(_RecordsPanel):
     COLUMNS = [("Время", 70), ("Процесс", 150), ("PID", 60), ("Адрес", 150), ("Сайт (SNI)", 240),
                ("JA3", 250), ("ALPN", 60), ("Оценка", 260)]
-    choose_dir = Signal(str)
 
     def __init__(self):
         super().__init__("Начала TLS-соединений (HTTPS): имя сайта и отпечаток программы JA3. "
-                         "Нужны права администратора и WinDivert (используется в режиме "
-                         "«только смотреть», трафик не меняется).")
-        button = QPushButton("Указать папку WinDivert...")
-        button.clicked.connect(self._choose)
-        self.layout().itemAt(0).layout().addWidget(button)
-
-    def _choose(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "Папка с WinDivert.dll и WinDivert64.sys")
-        if folder:
-            self.choose_dir.emit(folder)
+                         "Нужны права администратора и WinDivert из папки программы "
+                         "(режим «только смотреть», трафик не меняется).")
 
     def values(self, r) -> list[str]:
         return [r.time, r.name, str(r.pid or ""), r.remote, r.sni, r.ja3, r.alpn, r.verdict]

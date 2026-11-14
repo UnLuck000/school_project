@@ -59,7 +59,6 @@ class NetworkMixin:
         self.dns_panel = DnsPanel(lambda domain: self.net_monitor.addresses_of(domain)
                                   if self.net_monitor else [])
         self.tls_panel = TlsPanel()
-        self.tls_panel.choose_dir.connect(self._set_windivert_dir)
         self.beacon_panel = BeaconPanel()
         self.block_panel = BlockPanel()
         for panel in (self.dns_panel, self.tls_panel):
@@ -156,39 +155,6 @@ class NetworkMixin:
             self.block_panel.refresh()
             self.journal_page.refresh()
 
-    def _set_windivert_dir(self, folder: str):
-        """Папка, закрытая от записи, — как есть; иначе — защищённая копия (с вопросом)."""
-        import hashlib
-        from pathlib import Path
-
-        from networkmonitor import tls
-        dll = Path(folder) / "WinDivert.dll"
-        if not dll.is_file() or not (dll.parent / "WinDivert64.sys").is_file():
-            QMessageBox.warning(self, "WinDivert", "В папке нет WinDivert.dll и "
-                                                   "WinDivert64.sys.")
-            return
-        safe, reason = tls.windivert_safe(dll)
-        if not safe:
-            digest = hashlib.sha256(dll.read_bytes()).hexdigest()
-            if QMessageBox.question(
-                    self, "WinDivert",
-                    f"В эту папку может писать не только администратор ({reason}).\n\n"
-                    "Программа сделает копию WinDivert.dll и WinDivert64.sys в защищённую "
-                    "папку и будет загружать её. Убедитесь, что это настоящий WinDivert "
-                    f"(SHA-256 библиотеки: {digest}).\n\nСкопировать?") != \
-                    QMessageBox.StandardButton.Yes:
-                return
-            try:
-                folder = str(tls.trust_windivert(folder))
-            except OSError as e:
-                QMessageBox.warning(self, "WinDivert", f"Копия не сделана: {e}")
-                return
-            activity.record("network", f"WinDivert: защищённая копия из {dll.parent}",
-                            sha256=digest)
-        cfg.set_("net/windivert_dir", folder)
-        QMessageBox.information(self, "WinDivert", "Папка сохранена. Выключите и снова "
-                                                   "включите мониторинг сети.")
-
     def toggle_network(self, force: bool = False):
         """force: выключить и при запрете (возврат состояния после замера ресурсов)."""
         if self.net_monitor is not None:
@@ -202,7 +168,6 @@ class NetworkMixin:
         self.net_monitor = NetworkMonitor(
             sig_dir=SIGNATURES.parent, rules_dir=RULES_DIR, netfeeds_dir=NETFEEDS_DIR,
             on_event=lambda kind, payload: self.net_bridge.event.emit(kind, payload),
-            windivert_dir=cfg.get("net/windivert_dir"),
         )
         self.net_monitor.start()
         self.net_btn.setText("Выключить мониторинг сети")

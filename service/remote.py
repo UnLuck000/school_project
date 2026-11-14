@@ -245,7 +245,7 @@ class RemoteSensors:
     def dns(self, on_query, on_status=None) -> RemoteSensor:
         return RemoteSensor(self.remote, "dns", on_query, on_status)
 
-    def tls(self, on_hello, on_status=None, _dll_dir: str = "") -> RemoteSensor:
+    def tls(self, on_hello, on_status=None) -> RemoteSensor:
         return RemoteSensor(self.remote, "tls", on_hello, on_status)
 
 

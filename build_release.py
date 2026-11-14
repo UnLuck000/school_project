@@ -1,4 +1,4 @@
-"""Сборка: python build_release.py [--zip] [--installer] [--sign] [--windivert]
+"""Сборка: python build_release.py [--zip] [--installer] [--sign] [--no-windivert]
 
 1. PyInstaller по StretchBIT.spec → dist/StretchBIT: StretchBIT.exe и папка app со всем остальным.
 2. Рядом кладутся ядра VPN (vpn/bin), инструменты декомпилятора (tools/bin) и из signatures —
@@ -17,11 +17,12 @@
    в ...\\StretchBIT-test (прежнее C:\\Utils\\SBIT переносится); LZMA2, при удалении — флажок
    «Удалить все настройки пользователя».
 
-6. --windivert — WinDivert (native/windivert: WinDivert.dll и WinDivert64.sys, официальный
-   выпуск) в app/native/windivert: TLS на вкладке «Сеть» работает без zapret, из папки,
-   закрытой от записи. По умолчанию НЕ кладётся: Microsoft Defender считает официальный
-   архив WinDivert угрозой (Misleading:Win32/Malgent) и у пользователя мог бы остановить
-   установщик целиком. Без него вкладка TLS предлагает указать папку WinDivert.
+6. WinDivert (native/windivert: WinDivert.dll и WinDivert64.sys, официальный выпуск, вне
+   Git) — в app/native/windivert, по умолчанию: программа загружает только эту копию (в
+   Program Files она закрыта от записи), по чужим папкам (zapret) больше не ищет. Нет файлов —
+   сборка останавливается. --no-windivert — без него (TLS на вкладке «Сеть» тогда не
+   работает). Microsoft Defender считает официальный архив WinDivert угрозой
+   (Misleading:Win32/Malgent) — если остановит установщик у пользователя, см. исключения.
 7. release/SHA256SUMS — хэши архивов и установщиков (по ним проверяет обновление
    updatecheck.py; файл выкладывается в выпуск GitHub вместе с ними).
 8. --sign — подпись Authenticode (signtool из Windows SDK) StretchBIT.exe, библиотек AMSI и
@@ -171,20 +172,30 @@ def copy_signatures(app: Path) -> None:
         raise SystemExit(f"В сборку попали локальные файлы: {leaked}")
 
 
+WINDIVERT_SRC = ROOT / "native" / "windivert"
+WINDIVERT_FILES = ("WinDivert.dll", "WinDivert64.sys")
+
+
+def check_windivert() -> None:
+    """До сборки: WinDivert на месте (иначе — остановка, а не сборка без TLS)."""
+    if "--no-windivert" in sys.argv:
+        return
+    missing = [n for n in WINDIVERT_FILES if not (WINDIVERT_SRC / n).is_file()]
+    if missing:
+        raise SystemExit(f"Нет {', '.join(missing)} в native/windivert (официальный выпуск "
+                         "WinDivert 2.2, см. native/windivert/THIRD_PARTY.md) — положите их или "
+                         "соберите с --no-windivert")
+
+
 def copy_windivert(app: Path) -> None:
     """WinDivert для вкладки «TLS» (native/windivert, вне Git; THIRD_PARTY.md — версия и
-    лицензия LGPL v3) — только с ключом --windivert."""
-    src = ROOT / "native" / "windivert"
-    files = ("WinDivert.dll", "WinDivert64.sys")
+    лицензия LGPL v3) — по умолчанию; --no-windivert — без него."""
+    src, files = WINDIVERT_SRC, WINDIVERT_FILES
     dst = app / "native" / "windivert"
-    if "--windivert" not in sys.argv:
+    if "--no-windivert" in sys.argv:
         shutil.rmtree(dst, ignore_errors=True)
-        print("WinDivert в сборку не кладётся (ключ --windivert): Defender считает его "
-              "угрозой; вкладка TLS предложит указать папку WinDivert")
-        return
-    if not all((src / name).is_file() for name in files):
-        print("! native/windivert без WinDivert.dll и WinDivert64.sys — TLS в сборке только "
-              "с WinDivert, указанным вручную")
+        print("WinDivert в сборку не кладётся (--no-windivert): TLS на вкладке «Сеть» не "
+              "будет работать")
         return
     dst.mkdir(parents=True, exist_ok=True)
     for name in (*files, "LICENSE", "THIRD_PARTY.md"):
@@ -286,6 +297,7 @@ def make_installer(folder: Path, edition: str) -> Path:
 def main() -> None:
     if "--installer" in sys.argv and find_iscc() is None:
         raise SystemExit("Нет Inno Setup 6 (ISCC.exe): winget install JRSoftware.InnoSetup")
+    check_windivert()
     merge_test_baseline()
     merge_test_exclusions()
     build_amsi()

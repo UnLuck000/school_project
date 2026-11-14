@@ -104,7 +104,7 @@ Name: "{app}\app\diag"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "\app\native\windivert"; Flags: ignoreversion recursesubdirs createallsubdirs
-; WinDivert (сборка с --windivert) — отдельно: драйвер WinDivert64.sys, загруженный из этой
+; WinDivert (сборка кладёт по умолчанию) — отдельно: драйвер WinDivert64.sys, загруженный из этой
 ; папки, держит файл, пока работает. Остановка службы не помогает, если к драйверу подключился
 ; zapret (winws.exe): он не грузит свою копию, а берёт уже загруженную. С ignoreversion
 ; установка падала «DeleteFile: код 5» (Windows 10, 14.11.2026). Теперь та же версия не

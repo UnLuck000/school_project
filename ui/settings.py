@@ -93,7 +93,6 @@ DEFAULTS = {
     "scan/mode": "balanced",        # режим проверки файлов: slow | balanced | fast
     "scan/ecores_only": False,      # проверка только на энергоэффективных ядрах
     "scan/revocation": True,        # проверять отзыв сертификатов подписи (нужен интернет)
-    "net/windivert_dir": "",        # папка с WinDivert.dll (пусто — искать самостоятельно)
     "protect/selfguard": True,      # сторож: перезапуск после нештатного завершения
     "process/interval": 2,          # обновление диспетчера процессов, сек
     "stats/last_scan": "",
@@ -112,7 +111,7 @@ DEFAULTS = {
 # программой, не действует, пока пользователь не решит при запуске (check_trust_files).
 SECURE_PREFIXES = ("protect/", "lock/", "scan/")
 SECURE_KEYS = {"startup/autostart", "vpn/autostart", "vpn/xray_path", "vpn/singbox_path",
-               "vpn/killswitch", "vpn/direct_apps", "net/windivert_dir", "general/block_exit"}
+               "vpn/killswitch", "vpn/direct_apps", "general/block_exit"}
 _secure_lock = threading.RLock()
 _secure_cache: tuple[bytes, dict] | None = None
 

@@ -322,9 +322,8 @@ class GuardHost:
             from networkmonitor.tls import TlsWatcher
 
             def factory(on_hello, on_status):
-                # папка WinDivert из окна не берётся: только своя копия программы и защищённая
-                # в ProgramData (tls.find_windivert проверяет права папок)
-                return TlsWatcher(on_hello, on_status, "")
+                # WinDivert — только своя копия в папке программы (tls.find_windivert)
+                return TlsWatcher(on_hello, on_status)
         watcher = factory(lambda ev: self.emit("tls", jsonable(ev)),
                           lambda text: self.emit("net_status", text))
         watcher.start()

@@ -80,7 +80,7 @@ class NetworkMonitor:
     """
 
     def __init__(self, sig_dir: Path, rules_dir: Path, netfeeds_dir: Path,
-                 on_event, interval: float = 2.0, windivert_dir: str = "",
+                 on_event, interval: float = 2.0,
                  watch_dns: bool = True, watch_tls: bool = True):
         self.sig_dir = sig_dir
         self.rules_dir = rules_dir
@@ -115,7 +115,7 @@ class NetworkMonitor:
         dns_cls = sensors.dns if sensors is not None else DnsWatcher
         tls_cls = sensors.tls if sensors is not None else TlsWatcher
         self._dns = dns_cls(self._on_dns, self._substatus) if watch_dns else None
-        self._tls = tls_cls(self._on_tls, self._substatus, windivert_dir) if watch_tls else None
+        self._tls = tls_cls(self._on_tls, self._substatus) if watch_tls else None
 
     def start(self):
         self._stop.clear()
