@@ -6,9 +6,18 @@
 - правила YARA: signature-base (Neo23x0), ReversingLabs, Elastic, bartblaze;
 - C2: Feodo Tracker, SSLBL, ThreatFox (abuse.ch), C2IntelFeeds.
 
+Зеркало (14.11.2026): у пользователей ключа abuse.ch нет (в программе его перехватили бы из
+заголовка), а Feodo из РФ без VPN не открывается. Поэтому MalwareBazaar, ThreatFox, URLhaus,
+Feodo, SSLBL и JA3 сначала берутся из выпуска «feeds» на GitHub (его раз в сутки собирает
+GitHub Actions с ключом из Secrets: tools/feeds_mirror.py, .github/workflows/feeds-mirror.yml) —
+ответы источников как есть, разбор тот же. С ключом (signatures/.abusech_key,
+ABUSECH_AUTH_KEY) — сначала напрямую, зеркало — запасной путь; без ключа источники с ключом —
+только зеркало, остальные — напрямую, если зеркало недоступно.
+
 Запуск вручную: python updater.py [all|hashes|rules|ips|domains]
 """
 import csv
+import hashlib
 import io
 import ipaddress
 import json
@@ -64,6 +73,8 @@ RULE_SOURCES = {  # папка в community/ -> (архив, часть пути
     "bartblaze": ("https://github.com/bartblaze/Yara-rules/archive/refs/heads/master.zip",
                   "/rules/"),
 }
+# вид в зеркале у списков C2 (C2IntelFeeds — на GitHub и так)
+C2_MIRROR = {"feodo.txt": "feodo", "sslbl.txt": "sslbl"}
 C2_TEXT_FEEDS = {  # файл в netfeeds/ -> (адрес, строка, по которой узнаём нужный ответ)
     "feodo.txt": ("https://feodotracker.abuse.ch/downloads/ipblocklist.txt", "Feodo Tracker"),
     "sslbl.txt": ("https://sslbl.abuse.ch/blacklist/sslipblacklist.txt", "SSLBL"),
@@ -76,6 +87,12 @@ URLHAUS_EXPORT = "https://urlhaus-api.abuse.ch/v2/files/exports/{key}/online.csv
 SSLBL_JA3 = "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv"
 DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9_-]{1,63}\.)+[a-z][a-z0-9-]{1,62}$")
 
+# зеркало: выпуск «feeds» репозитория программы (tools/feeds_mirror.py)
+MIRROR_TAG = "feeds"
+MIRROR_MAX_AGE = 3 * 86400      # старше — задание зеркала сломано: не берём, идём напрямую
+MIRROR_MAX_SIZE = 512 * 2**20   # распакованный файл зеркала — не больше (защита от gzip-бомбы)
+MIRROR_MANIFEST_VERSION = 1
+
 
 # ---------- общее ----------
 def _download(url: str, timeout: int = 120, data: bytes | None = None,
@@ -84,6 +101,106 @@ def _download(url: str, timeout: int = 120, data: bytes | None = None,
                                                           **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+# ---------- зеркало на GitHub ----------
+class MirrorError(Exception):
+    pass
+
+
+_manifest_cache: dict = {}
+
+
+def mirror_base() -> str:
+    """Адрес файлов выпуска «feeds»: https://github.com/<владелец>/<репозиторий>/releases/
+    download/feeds/ (репозиторий — appinfo.REPO_URL)."""
+    import appinfo
+    return appinfo.REPO_URL.rstrip("/") + f"/releases/download/{MIRROR_TAG}/"
+
+
+def reset_mirror() -> None:
+    """Перечитать manifest.json при следующем обращении (новое обновление баз)."""
+    _manifest_cache.clear()
+
+
+def _mirror_manifest() -> dict:
+    if "data" in _manifest_cache:
+        return _manifest_cache["data"]
+    if "error" in _manifest_cache:
+        raise MirrorError(_manifest_cache["error"])
+    try:
+        data = json.loads(_download(mirror_base() + "manifest.json", timeout=60))
+        if data.get("version") != MIRROR_MANIFEST_VERSION or not isinstance(
+                data.get("files"), dict):
+            raise MirrorError("незнакомый manifest.json")
+        age = time.time() - float(data.get("generated", 0))
+        if age > MIRROR_MAX_AGE:
+            raise MirrorError(f"зеркало не обновлялось {int(age // 86400)} дн.")
+    except MirrorError as e:
+        _manifest_cache["error"] = str(e)
+        raise
+    except Exception as e:  # нет сети, 404 (выпуска ещё нет), битый JSON
+        _manifest_cache["error"] = _error(e)
+        raise MirrorError(_manifest_cache["error"]) from e
+    _manifest_cache["data"] = data
+    return data
+
+
+def _gunzip(packed: bytes, limit: int = MIRROR_MAX_SIZE) -> bytes:
+    import zlib
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    raw = d.decompress(packed, limit + 1)
+    if len(raw) > limit or d.unconsumed_tail:
+        raise MirrorError("файл зеркала больше допустимого")
+    if not d.eof:
+        raise MirrorError("файл зеркала обрезан")
+    return raw
+
+
+def mirror_file(kind: str) -> bytes:
+    """Ответ источника из зеркала (распакованный), с проверкой SHA-256 по manifest.json."""
+    entry = _mirror_manifest()["files"].get(kind)
+    if not entry:
+        raise MirrorError("в зеркале нет (задание зеркала не скачало)")
+    name = str(entry.get("name", ""))
+    if not re.fullmatch(r"[a-z0-9_-]+-\d{12}\.[a-z]+\.gz", name):
+        raise MirrorError("странное имя файла в manifest.json")
+    packed = _download(mirror_base() + name, timeout=300)
+    if hashlib.sha256(packed).hexdigest() != str(entry.get("sha256", "")).lower():
+        raise MirrorError("SHA-256 не совпал")
+    return _gunzip(packed)
+
+
+def _fetch(kind: str, direct, check=None, prefer_direct: bool = False) -> tuple[bytes, str]:
+    """Ответ источника: из зеркала или напрямую (direct — функция без аргументов или None,
+    если напрямую нельзя: нет ключа). check(raw) поднимает исключение на чужой ответ — тогда
+    пробуется следующий путь. (данные, откуда). Ошибки прямого пути — только тип: в адресе
+    MalwareBazaar и URLhaus ключ."""
+    ways = [("напрямую", direct), ("зеркало", lambda: mirror_file(kind))]
+    if not prefer_direct:
+        ways.reverse()
+    errors = []
+    for where, get in ways:
+        if get is None:
+            continue
+        try:
+            raw = get()
+            if check is not None:
+                check(raw)
+            return raw, where
+        except MirrorError as e:
+            errors.append(f"{where}: {e}")
+        except Exception as e:  # noqa: BLE001 — любой сбой пути: пробуем следующий
+            errors.append(f"{where}: {type(e).__name__}" if where == "напрямую"
+                          else f"{where}: {_error(e)}")
+    raise MirrorError("; ".join(errors) or "нет источника")
+
+
+def _marker(text: str, where: int = 4096):
+    def check(raw: bytes) -> None:
+        if text.encode() not in raw[:where]:
+            raise ValueError("неожиданный ответ сервера")
+    return check
 
 
 def _get_key() -> str:
@@ -124,15 +241,13 @@ def _error(e: Exception) -> str:
 
 # ---------- хэши ----------
 def update_hashes(export_name: str = "recent.csv") -> bool:
-    """MalwareBazaar: файлы за последние двое суток (с ключом abuse.ch)."""
+    """MalwareBazaar: файлы за последние двое суток (с ключом abuse.ch или из зеркала)."""
     key = _get_key()
-    if not key:
-        print("MalwareBazaar: нет Auth-Key (signatures/.abusech_key или ABUSECH_AUTH_KEY)")
-        return False
+    direct = (lambda: _download(MB_URL.format(key=key, name=export_name))) if key else None
     try:
-        raw = _download(MB_URL.format(key=key, name=export_name))
-    except Exception as e:  # ключ в сообщение не выводим: в адресе он есть, в тексте ошибки нет
-        print(f"MalwareBazaar: не удалось скачать: {type(e).__name__}")
+        raw, where = _fetch("malwarebazaar", direct, prefer_direct=bool(key))
+    except MirrorError as e:  # ключ в сообщение не выводим: в адресе он есть, в тексте ошибки нет
+        print(f"MalwareBazaar: не удалось скачать ({e})")
         return False
     new = set()
     for line in raw.decode("utf-8", errors="ignore").splitlines():
@@ -142,29 +257,33 @@ def update_hashes(export_name: str = "recent.csv") -> bool:
         if m:
             new.add(m.group(0).lower())
     added, total = _merge_hashes(FEEDS_DIR / "malwarebazaar.txt", "MalwareBazaar (abuse.ch)", new)
-    print(f"MalwareBazaar: получено {len(new)}, новых {added}, всего {total}")
+    print(f"MalwareBazaar ({where}): получено {len(new)}, новых {added}, всего {total}")
     return True
 
 
-def _threatfox_iocs(key: str) -> list[dict]:
+def _threatfox_check(raw: bytes) -> None:
+    status = json.loads(raw).get("query_status")
+    if status != "ok":
+        raise ValueError(f"ответ {status!r}")
+
+
+def _threatfox_iocs(key: str) -> tuple[list[dict], str]:
+    """IOC за неделю: (список, откуда). Без ключа — только зеркало."""
     body = json.dumps({"query": "get_iocs", "days": THREATFOX_DAYS}).encode()
-    data = json.loads(_download(THREATFOX_API, data=body, headers={"Auth-Key": key}))
-    if data.get("query_status") != "ok":
-        raise ValueError(f"ответ {data.get('query_status')!r}")
-    return data.get("data") or []
+    direct = (lambda: _download(THREATFOX_API, data=body, headers={"Auth-Key": key})) \
+        if key else None
+    raw, where = _fetch("threatfox", direct, _threatfox_check, prefer_direct=bool(key))
+    return json.loads(raw).get("data") or [], where
 
 
 def update_threatfox() -> bool:
     """ThreatFox: хэши файлов (SHA-256, MD5) и адреса C2 (ip:port) за неделю."""
-    key = _get_key()
-    if not key:
-        print("ThreatFox: нет Auth-Key (signatures/.abusech_key или ABUSECH_AUTH_KEY)")
-        return False
     try:
-        iocs = _threatfox_iocs(key)
-    except Exception as e:
-        print(f"ThreatFox: не удалось скачать: {type(e).__name__}")
+        iocs, where = _threatfox_iocs(_get_key())
+    except MirrorError as e:
+        print(f"ThreatFox: не удалось скачать ({e})")
         return False
+    print(f"ThreatFox ({where}): записей {len(iocs)}")
 
     hashes, c2, domains = set(), {}, {}
     today = time.strftime("%Y-%m-%d")
@@ -350,10 +469,15 @@ def _parse_ip(text: str) -> str | None:
 def update_ips() -> bool:
     ok_any = False
     for filename, (url, marker) in C2_TEXT_FEEDS.items():
+        kind = C2_MIRROR.get(filename)
         try:
-            text = _download(url).decode("utf-8", errors="ignore")
+            if kind:  # Feodo из РФ без VPN не открывается: сначала зеркало
+                raw, _where = _fetch(kind, lambda u=url: _download(u), _marker(marker, 1 << 20))
+                text = raw.decode("utf-8", errors="ignore")
+            else:
+                text = _download(url).decode("utf-8", errors="ignore")
         except Exception as e:
-            print(f"C2 {filename}: не удалось скачать: {_error(e)}")
+            print(f"C2 {filename}: не удалось скачать: {e if kind else _error(e)}")
             continue
         if marker not in text:  # защита: пришла не та страница
             print(f"C2 {filename}: неожиданный ответ сервера, файл не изменён")
@@ -373,18 +497,19 @@ def update_ips() -> bool:
 
 # ---------- домены и отпечатки TLS ----------
 def update_domains() -> bool:
-    """URLhaus: домены, с которых раздают вредоносы; SSLBL: отпечатки JA3 вредоносных
-    TLS-клиентов. Без ключа."""
+    """URLhaus: домены, с которых раздают вредоносы (с ключом abuse.ch или из зеркала);
+    SSLBL: отпечатки JA3 вредоносных TLS-клиентов (зеркало, затем напрямую)."""
     ok = False
     key = _get_key()
-    if not key:
-        print("Домены URLhaus: нет Auth-Key (signatures/.abusech_key или ABUSECH_AUTH_KEY)")
+    direct = (lambda: _download(URLHAUS_EXPORT.format(key=key), timeout=300)) if key else None
+    try:
+        raw, where = _fetch("urlhaus", direct, _marker("URLhaus", 500),
+                            prefer_direct=bool(key))
+    except MirrorError as e:  # ключ в адресе: в тексте ошибки только тип
+        print(f"Домены URLhaus: не удалось скачать ({e})")
     else:
         try:
-            text = _download(URLHAUS_EXPORT.format(key=key), timeout=300).decode(
-                "utf-8", errors="ignore")
-            if "URLhaus" not in text[:500]:
-                raise ValueError("неожиданный ответ сервера")
+            text = raw.decode("utf-8", errors="ignore")
             hosts = set()
             rows = csv.reader(line for line in text.splitlines() if not line.startswith("#"))
             for row in rows:  # id, dateadded, url, url_status, ...
@@ -395,14 +520,13 @@ def update_domains() -> bool:
             _write_atomic(DOMAINS_DIR / "urlhaus.txt",
                           "# URLhaus (abuse.ch), домены из ссылок online\n"
                           + "\n".join(sorted(hosts)) + "\n")
-            print(f"Домены URLhaus: {len(hosts)}")
+            print(f"Домены URLhaus ({where}): {len(hosts)}")
             ok = True
-        except Exception as e:  # ключ в адресе: печатаем только тип ошибки
-            print(f"Домены URLhaus: не удалось скачать: {type(e).__name__}")
+        except Exception as e:
+            print(f"Домены URLhaus: не удалось разобрать: {type(e).__name__}")
     try:
-        text = _download(SSLBL_JA3).decode("utf-8", errors="ignore")
-        if "ja3_md5" not in text:
-            raise ValueError("неожиданный ответ сервера")
+        raw, _where = _fetch("ja3", lambda: _download(SSLBL_JA3), _marker("ja3_md5", 1 << 20))
+        text = raw.decode("utf-8", errors="ignore")
         rows = []
         for line in text.splitlines():
             parts = line.strip().split(",")
@@ -438,6 +562,7 @@ def update_drivers() -> bool:
 # ---------- всё сразу ----------
 def update_all(progress=None) -> bool:
     """Обновляет все базы. True, если удалось хоть что-то (иначе нет сети)."""
+    reset_mirror()  # manifest.json зеркала — один раз за обновление
     steps = [("адреса C2", update_ips), ("домены и JA3", update_domains),
              ("правила YARA", update_rules), ("уязвимые драйверы", update_drivers),
              ("MalwareBazaar", update_hashes), ("ThreatFox", update_threatfox),

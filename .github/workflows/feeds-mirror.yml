@@ -1,0 +1,62 @@
+# Зеркало баз abuse.ch (tools/feeds_mirror.py): раз в сутки скачивает MalwareBazaar, ThreatFox,
+# URLhaus (по ключу) и Feodo, SSLBL, JA3 и выкладывает их в выпуск «feeds» этого репозитория.
+# Программа (updater.py) качает их оттуда без ключа.
+#
+# Настройка (один раз): Settings → Secrets and variables → Actions → New repository secret,
+# имя ABUSECH_AUTH_KEY, значение — ключ abuse.ch. Сменить ключ — поменять этот секрет.
+# Запустить вручную: Actions → «Зеркало баз» → Run workflow.
+# Выпуск «feeds» — предварительный (prerelease): «последним выпуском» программы он не считается
+# (updatecheck смотрит releases/latest).
+name: Зеркало баз
+
+on:
+  schedule:
+    - cron: "17 2 * * *"   # раз в сутки, 02:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write          # выпуск и его файлы
+
+concurrency:
+  group: feeds-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/feeds_mirror.py
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Скачать источники
+        env:
+          ABUSECH_AUTH_KEY: ${{ secrets.ABUSECH_AUTH_KEY }}
+        run: python tools/feeds_mirror.py out
+
+      - name: Выложить в выпуск feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if ! gh release view feeds >/dev/null 2>&1; then
+            gh release create feeds --prerelease --latest=false --title "Зеркало баз" \
+              --notes "Базы abuse.ch для StretchBIT, обновляются раз в сутки (tools/feeds_mirror.py). Не выпуск программы."
+          fi
+          old=$(gh release view feeds --json assets -q '.assets[].name')
+          # сначала файлы с новыми именами, manifest.json — последним: клиент со старым
+          # manifest.json ещё получает прежние файлы
+          gh release upload feeds out/*.gz --clobber
+          gh release upload feeds out/SHA256SUMS out/manifest.json --clobber
+          for name in $old; do
+            case "$name" in
+              manifest.json|SHA256SUMS) ;;
+              *) [ -f "out/$name" ] || gh release delete-asset feeds "$name" -y ;;
+            esac
+          done
