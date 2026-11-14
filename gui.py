@@ -52,6 +52,26 @@ import userdata  # noqa: E402 — настройки и журнал в %APPDATA
 for _line in userdata.migrate():  # прежние данные из папки программы и реестра — туда
     _dlog.info("Конфигурация: %s", _line)
 
+
+def _transfer_now() -> bool:
+    """Перенос данных другой версии (service/transfer.py) — до первого чтения настроек.
+    Ручной запуск без прав сейчас перезапустится через UAC: перенос сделает процесс с
+    правами (ключ подписи журнала другой версии читают только администраторы)."""
+    import trustseal
+    if any(a in sys.argv for a in ("--uninstall", "--tool", "--undo")):
+        return False
+    elevating = not ({"--autostart", "--analyze", "--alarm"} & set(sys.argv))
+    return trustseal.is_admin() or not elevating
+
+
+if _transfer_now():
+    from service import transfer as _transfer
+    try:
+        for _line in _transfer.window():
+            _dlog.info("Конфигурация: %s", _line)
+    except Exception:  # noqa: BLE001 — без переноса программа всё равно запустится
+        _dlog.exception("Конфигурация: перенос данных другой версии не удался")
+
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFrame, QLabel, QMainWindow, QMessageBox, QScrollArea, QSystemTrayIcon,

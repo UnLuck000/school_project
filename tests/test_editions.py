@@ -81,7 +81,7 @@ def test_installer_handles_other_edition():
     assert "config {#OtherService} start= demand" in text
     assert "stop {#OtherService}" in text
     # тихая установка другую версию не удаляет
-    assert "not WizardSilent then\n    RemoveOther();" in text
+    assert "not WizardSilent then\n  begin\n    TakeOtherData();\n    RemoveOther();" in text
 
 
 def test_single_instance_name_per_edition():

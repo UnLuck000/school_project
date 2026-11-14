@@ -275,7 +275,8 @@ begin
     'Две версии сразу мешают друг другу (общие сеансы слежения Windows, проверка скриптов, ' +
     'kill switch VPN, меню Проводника), поэтому защиту ведёт только одна. Что сделать с ' +
     'установленной?', True, False);
-  OtherPage.Add('Удалить её (рекомендуется; её настройки в AppData останутся)');
+  OtherPage.Add('Удалить её (рекомендуется): её настройки, журналы, белый список и карантин ' +
+    'перейдут в эту версию');
   OtherPage.Add('Оставить: её служба защиты будет остановлена и переведена в ручной запуск. ' +
     'Сделать её снова основной можно из её окна (кнопка «Включить защиту»)');
   OtherPage.SelectedValueIndex := 0;
@@ -307,6 +308,53 @@ begin
       break;
     Sleep(500);
   end;
+end;
+
+{ данные удаляемой версии, которые лежат в её папке программы (деинсталлятор удалит папку):
+  карантин — файлы, которых здесь ещё нет; своя база хэшей (удалённое из карантина) —
+  недостающие строки. Остальное (AppData, данные службы в ProgramData) остаётся на месте и
+  переносится самой программой при первом запуске — по метке app\transfer_from.txt
+  (service/transfer.py): метку меняют только администраторы }
+procedure TakeOtherData();
+var
+  Code, I: Integer;
+  Dir, Mine: String;
+  Theirs, Ours: TStringList;
+begin
+  Dir := OtherDir();
+  if (Dir = '') or not DirExists(Dir + '\app') then
+    exit;
+  Mine := ExpandConstant('{app}\app');
+  ForceDirectories(Mine + '\signatures');
+  if DirExists(Dir + '\app\quarantine_data') then
+    Exec(ExpandConstant('{sys}\robocopy.exe'),
+         '"' + Dir + '\app\quarantine_data" "' + Mine + '\quarantine_data" /E /XC /XN /XO ' +
+         '/R:1 /W:1 /NFL /NDL /NJH /NJS /NP', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if FileExists(Dir + '\app\signatures\hashes.txt') then
+  begin
+    Theirs := TStringList.Create;
+    Ours := TStringList.Create;
+    try
+      Theirs.LoadFromFile(Dir + '\app\signatures\hashes.txt');
+      if FileExists(Mine + '\signatures\hashes.txt') then
+        Ours.LoadFromFile(Mine + '\signatures\hashes.txt');
+      for I := 0 to Theirs.Count - 1 do
+        if (Trim(Theirs[I]) <> '') and (Ours.IndexOf(Theirs[I]) < 0) then
+          Ours.Add(Theirs[I]);
+      Ours.SaveToFile(Mine + '\signatures\hashes.txt');
+    finally
+      Theirs.Free;
+      Ours.Free;
+    end;
+  end;
+end;
+
+{ просьба перенести данные удалённой версии: отметка времени — один перенос на установку }
+procedure RequestTransfer();
+begin
+  ForceDirectories(ExpandConstant('{app}\app'));
+  SaveStringToFile(ExpandConstant('{app}\app\transfer_from.txt'),
+                   GetDateTimeString('yyyymmddhhnnss', #0, #0), False);
 end;
 
 { оставить: служба — ручной запуск и остановлена, окно и сторож той версии закрыты (метка
@@ -343,9 +391,15 @@ begin
   MoveOldInstall();
   MoveX86Install();
   { тихая установка (/SILENT) другую версию не удаляет — только переводит в ручной запуск }
-  if OtherFound and (OtherPage.SelectedValueIndex = 0) and not WizardSilent then
-    RemoveOther();
+  { сначала служба и окно той версии останавливаются (её файлы больше не меняются), затем
+    её данные — сюда, и только потом её удаление }
   DeactivateOther();
+  if OtherFound and (OtherPage.SelectedValueIndex = 0) and not WizardSilent then
+  begin
+    TakeOtherData();
+    RemoveOther();
+    RequestTransfer();
+  end;
 end;
 
 { окно перед удалением: флажок «Удалить все настройки пользователя» }

@@ -57,7 +57,11 @@ SIGNED_FIELDS = ("id", "time", "title", "op", "data")
 def signature(record: dict) -> str:
     """Подпись записи; пустая — ключа нет (программа без прав администратора)."""
     import trustseal
-    key = trustseal.mac_key()
+    return signature_with(record, trustseal.mac_key())
+
+
+def signature_with(record: dict, key: bytes) -> str:
+    """Подпись записи данным ключом (перенос журнала другой версии: service/transfer.py)."""
     if not key:
         return ""
     body = json.dumps({k: record.get(k) for k in SIGNED_FIELDS}, sort_keys=True,

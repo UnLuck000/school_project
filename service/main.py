@@ -83,6 +83,13 @@ def entry(argv: list[str]) -> int:
     holder = {}
 
     def start_core():
+        # данные другой версии (релизной/тестовой) — до ядра: оно сразу читает свои
+        from service import transfer
+        try:
+            for line in transfer.service(folder):
+                log.info("Данные: %s", line)
+        except Exception:  # noqa: BLE001 — без переноса служба всё равно работает
+            log.exception("Данные: перенос из другой версии не удался")
         holder["core"] = ServiceCore(folder)
         holder["core"].start()
 
