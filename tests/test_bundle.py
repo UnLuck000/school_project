@@ -23,6 +23,7 @@ def sandbox(tmp_path, monkeypatch):
         encoding="utf-8")
     (feedback / "20261109-120000_scan.png").write_bytes(b"\x89PNG fake")
     monkeypatch.setattr(bundle, "LOGS", logs)
+    monkeypatch.setattr(bundle, "SERVICE_LOGS", tmp_path / "program" / "logs")
     monkeypatch.setattr(bundle, "FEEDBACK", feedback)
     monkeypatch.setattr(bundle, "_snapshot", lambda: "снимок\n")
     monkeypatch.setattr(bundle, "windows_info", lambda: {
@@ -96,3 +97,24 @@ def test_import_rejects_escape_and_foreign_zip(tmp_path):
         z.writestr("readme.txt", "x")
     with pytest.raises(ValueError):
         import_reports.import_zip(other, tmp_path / "dest")
+
+
+def test_service_logs_in_bundle(sandbox, monkeypatch):
+    """Окно без прав пишет журналы в %LOCALAPPDATA%, служба — в папку программы: в архив
+    сведений попадают оба (иначе причину сбоя службы не узнать)."""
+    tmp, user = sandbox
+    service_logs = tmp / "program" / "logs"
+    service_logs.mkdir(parents=True)
+    (service_logs / "service.log").write_text(f"Базы: из C:\\Users\\{user}\\x\n",
+                                              encoding="utf-8")
+    (service_logs / "service-stdout.log").write_text("VirusShare: ошибка\n", encoding="utf-8")
+    (service_logs / "yara_errors.log").write_text("не служба\n", encoding="utf-8")
+    monkeypatch.setattr(edition, "_edition", edition.RELEASE)
+    out = tmp / "info.zip"
+    manifest = bundle.collect(out)
+    names = _names(out)
+    assert {"service-logs/service.log", "service-logs/service-stdout.log"} <= names
+    assert "service-logs/yara_errors.log" not in names and manifest["files"]["service-logs"] == 2
+    with zipfile.ZipFile(out) as z:
+        log = z.read("service-logs/service.log").decode("utf-8")
+    assert f"\\{user}\\" not in log and "%USERPROFILE%" in log

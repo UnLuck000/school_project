@@ -206,12 +206,16 @@ class ServiceCore:
         """Запуск службы: канал, базы (автообновление раз в сутки — у окна без прав
         администратора нет доступа к папке баз) и, если защита была включена, защита
         файлов."""
+        if self.auto_update:  # настоящая служба (не тест с подставным монитором)
+            # первым делом — сеть: блокировка kill switch могла остаться после сбоя или
+            # выключения питания, а защита файлов (правила YARA) на слабом ПК грузится
+            # десятки секунд и отнимала бы процессор у возврата сети
+            threading.Thread(target=self._recover_vpn, daemon=True, name="svc-vpn-recover").start()
         if self.config["enabled"]:
             with self._lock:
                 self._start_monitor()
-        if self.auto_update:  # настоящая служба (не тест с подставным монитором)
+        if self.auto_update:
             self._start_db_updates()
-            threading.Thread(target=self._recover_vpn, daemon=True, name="svc-vpn-recover").start()
         if pipe:
             self.start_pipe()
 
@@ -227,6 +231,8 @@ class ServiceCore:
                 self.log.exception("VPN: не удалось вернуть %s после сбоя", name)
 
     DB_CHECK_INTERVAL = 15 * 60  # с: сама проверка update_due — не чаще раза в сутки
+    DB_RETRY = 120               # с: обновление не удалось (сеть ещё не поднялась) — повтор
+    DB_RETRIES = 5
 
     def _start_db_updates(self) -> None:
         self._db_stop = threading.Event()
@@ -235,25 +241,41 @@ class ServiceCore:
         self._db_thread.start()
 
     def _db_loop(self) -> None:
+        failed = 0
         while not self._db_stop.is_set():
-            self.update_bases_if_due()
-            self._db_stop.wait(self.DB_CHECK_INTERVAL)
+            result = self.update_bases_if_due()
+            # служба стартует раньше, чем Windows подключится к Wi-Fi: первая попытка при
+            # загрузке или сразу после установки часто без сети (getaddrinfo failed, Windows 10
+            # 14.11.2026) — повторить вскоре, а не через 15 минут
+            failed = failed + 1 if result is False else 0
+            retry = result is False and failed <= self.DB_RETRIES
+            self._db_stop.wait(self.DB_RETRY if retry else self.DB_CHECK_INTERVAL)
 
     def update_bases_if_due(self, now: float | None = None) -> bool | None:
         """Одна проверка: прошли сутки — обновить базы. None — не пора или нет прав на папку
         баз; True/False — удалось ли (событие «db» уходит окнам)."""
+        import contextlib
+        import io
+
         import updater
-        if not updater.update_due(self.config.get("db_last_update", 0.0), now) or \
+        if not updater.needs_update(self.config.get("db_last_update", 0.0), now) or \
                 not updater.can_update():
             return None
-        self.log.info("Базы: начинаю автообновление")
+        self.log.info("Базы: начинаю автообновление%s",
+                      " (баз на диске нет)" if updater.bases_missing() else "")
+        output = io.StringIO()
         try:
-            ok = updater.update_all()
+            with contextlib.redirect_stdout(output):  # updater пишет итог каждого источника
+                ok = updater.update_all()
         except Exception:  # noqa: BLE001 — сбой обновления не должен остановить службу
             ok = False
             self.log.exception("Базы: автообновление упало")
+        for line in output.getvalue().splitlines():   # раньше — только в service-stdout.log
+            if line.strip():
+                self.log.info("Базы: %s", line.strip()[:300])
         if not ok:
-            self.log.warning("Базы: автообновление не удалось (нет сети?)")
+            self.log.warning("Базы: автообновление не удалось — ни один источник не ответил "
+                             "(причины — строками выше)")
             self.emit("db", "fail")
             return False
         with self._lock:
@@ -293,6 +315,9 @@ class ServiceCore:
         return server
 
     def stop(self) -> None:
+        # сначала VPN: отключение снимает kill switch и подмену DNS. При выключении Windows
+        # время ограничено — пусть его не съедят остановка защиты и ETW
+        self.vpn.stop()
         if self.server is not None:
             self.server.stop()
             self.server = None
@@ -302,7 +327,6 @@ class ServiceCore:
         with self._lock:
             self._stop_monitor()
         self.guards.stop_all()
-        self.vpn.stop()
 
     def _default_monitor(self, folders, on_event):
         from monitor import RealtimeMonitor
@@ -727,7 +751,7 @@ def _launch_window(session: int) -> int | None:
     if not getattr(sys, "frozen", False):
         return None
     from service import winapi
-    return winapi.launch_in_session(session, sys.executable)
+    return winapi.launch_in_session(session, sys.executable, "--alarm")  # без окна UAC
 
 
 class _NullGuard:

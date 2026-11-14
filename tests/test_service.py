@@ -371,6 +371,7 @@ def test_service_updates_bases_once_a_day(core, monkeypatch):
     import updater
     calls = []
     monkeypatch.setattr(updater, "can_update", lambda: True)
+    monkeypatch.setattr(updater, "bases_missing", lambda: False)
     monkeypatch.setattr(updater, "update_all", lambda: calls.append(1) or True)
     core.handle(user(), "protection.set", {"on": True})
     assert core.update_bases_if_due(now=10 * 86400.0) is True
@@ -386,3 +387,27 @@ def test_service_updates_bases_once_a_day(core, monkeypatch):
     assert core.update_bases_if_due(now=12 * 86400.0) is False
     assert core.op_events(user(), {"since": 0})["events"][-1]["text"] == "fail"
 
+
+
+def test_service_updates_missing_bases_and_logs_reasons(core, monkeypatch, caplog):
+    """Баз на диске нет (переустановка, перенос папки) — обновить, хоть сутки и не прошли;
+    причины сбоя каждого источника — в журнале службы, а не только в service-stdout.log."""
+    import logging
+
+    import updater
+    monkeypatch.setattr(updater, "can_update", lambda: True)
+    core.config["db_last_update"] = 10 * 86400.0
+    monkeypatch.setattr(updater, "bases_missing", lambda: False)
+    assert core.update_bases_if_due(now=10 * 86400.0 + 60) is None
+    monkeypatch.setattr(updater, "bases_missing", lambda: True)
+
+    def failing():
+        print("MalwareBazaar: ошибка URLError: CERTIFICATE_VERIFY_FAILED")
+        return False
+    monkeypatch.setattr(updater, "update_all", failing)
+    monkeypatch.setattr(core.log, "propagate", True)
+    monkeypatch.setattr(core.log.parent, "propagate", True)
+    with caplog.at_level(logging.INFO, logger="sbit"):
+        assert core.update_bases_if_due(now=10 * 86400.0 + 120) is False
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "баз на диске нет" in text and "CERTIFICATE_VERIFY_FAILED" in text

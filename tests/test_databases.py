@@ -103,3 +103,15 @@ def test_native_reader_finds_marker():
     assert any(bytes(marker) in data for _, data in chunks)
     with pytest.raises(OSError):
         memscan.read_regions(4)  # System: нет доступа даже у администратора к памяти
+
+
+def test_missing_bases_are_due(tmp_path, monkeypatch):
+    """Время обновления пережило переустановку, а базы — нет: обновлять сразу."""
+    monkeypatch.setattr(updater, "COMMUNITY_RULES_DIR", tmp_path / "rules" / "community")
+    monkeypatch.setattr(updater, "FEEDS_DIR", tmp_path / "feeds")
+    now = 10 * updater.UPDATE_INTERVAL
+    assert updater.bases_missing() and updater.needs_update(now - 60, now=now)
+    (tmp_path / "feeds").mkdir()
+    (tmp_path / "feeds" / "virusshare_00001.md5.bin").write_bytes(bytes(16))
+    assert not updater.bases_missing() and not updater.needs_update(now - 60, now=now)
+    assert updater.needs_update(0, now=now)

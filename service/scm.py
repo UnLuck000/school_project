@@ -28,6 +28,11 @@ SERVICE_CONTROL_SHUTDOWN = 5
 SERVICE_CONTROL_PRESHUTDOWN = 0xF
 SERVICE_ACCEPT_STOP = 1
 SERVICE_ACCEPT_SHUTDOWN = 4
+SERVICE_ACCEPT_PRESHUTDOWN = 0x100
+SERVICE_CONFIG_PRESHUTDOWN_INFO = 7
+# выключение Windows: на SHUTDOWN службам дают ~5 с на всех, на PRESHUTDOWN — сколько попросят;
+# отключение VPN (ядра, kill switch, DNS через PowerShell) на слабом ПК идёт десятки секунд
+PRESHUTDOWN_TIMEOUT_MS = 60000
 STOPPED, START_PENDING, STOP_PENDING, RUNNING = 1, 2, 3, 4
 STATE_TEXT = {1: "остановлена", 2: "запускается", 3: "останавливается", 4: "работает",
               5: "продолжается", 6: "приостанавливается", 7: "приостановлена"}
@@ -72,6 +77,10 @@ class SERVICE_FAILURE_ACTIONSW(ctypes.Structure):
 
 class SERVICE_FAILURE_ACTIONS_FLAG(ctypes.Structure):
     _fields_ = [("fFailureActionsOnNonCrashFailures", wintypes.BOOL)]
+
+
+class SERVICE_PRESHUTDOWN_INFO(ctypes.Structure):
+    _fields_ = [("dwPreshutdownTimeout", wintypes.DWORD)]
 
 
 SERVICE_MAIN = ctypes.WINFUNCTYPE(None, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR))
@@ -197,6 +206,8 @@ def install(name: str, display: str, description: str, binpath: str) -> str:
             a.ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, ctypes.byref(failure))
             flag = SERVICE_FAILURE_ACTIONS_FLAG(True)  # и при выходе с ошибкой, а не только падении
             a.ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, ctypes.byref(flag))
+            pre = SERVICE_PRESHUTDOWN_INFO(PRESHUTDOWN_TIMEOUT_MS)
+            a.ChangeServiceConfig2W(svc, SERVICE_CONFIG_PRESHUTDOWN_INFO, ctypes.byref(pre))
         finally:
             a.CloseServiceHandle(svc)
     return what
@@ -290,7 +301,7 @@ def run_as_service(name: str, start_core, stop_core, log) -> int:
     def handler(control, _event_type, _data, _ctx):
         if control in (SERVICE_CONTROL_STOP, SERVICE_CONTROL_SHUTDOWN,
                        SERVICE_CONTROL_PRESHUTDOWN):
-            report(STOP_PENDING, wait_hint=20000)
+            report(STOP_PENDING, wait_hint=PRESHUTDOWN_TIMEOUT_MS)
             stop_event.set()
             return 0
         if control == SERVICE_CONTROL_INTERROGATE:
@@ -309,7 +320,10 @@ def run_as_service(name: str, start_core, stop_core, log) -> int:
             log.exception("Служба: не запустилась")
             report(STOPPED, exit_code=1064)  # ERROR_EXCEPTION_IN_SERVICE — перезапуск
             return
-        report(RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN)
+        # PRESHUTDOWN вместо SHUTDOWN: при выключении Windows служба получает время отключить
+        # VPN. Раньше её завершали раньше, чем снимался kill switch, — блокировка брандмауэра
+        # переживала перезагрузку, и до запуска службы интернета не было (14.11.2026)
+        report(RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN)
         log.info("Служба: работает")
         stop_event.wait()
         try:

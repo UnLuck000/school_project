@@ -52,8 +52,17 @@ def bases() -> list[str]:
     out = []
     try:
         last = float(cfg.get("db/last_update") or 0)
+        source = ""
+        try:  # со службой базы обновляет она: время — из её настроек, не окна
+            from service import remote
+            if remote.REMOTE is not None:
+                last = float(remote.REMOTE.client.call("status").get("db_last_update") or 0)
+                source = " (служба)"
+        except Exception:  # noqa: BLE001 — служба не ответила: время окна
+            from diag.log import swallowed
+            swallowed("снимок: время обновления баз службой")
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if last else "не было"
-        out.append("Обновление баз: " + when)
+        out.append("Обновление баз" + source + ": " + when)
     except (TypeError, ValueError):
         pass
     for folder in ("feeds", "netfeeds"):

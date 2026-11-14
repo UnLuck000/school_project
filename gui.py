@@ -44,6 +44,8 @@ if sys.stdout is None or sys.stderr is None:  # pythonw или exe без кон
 from diag import log as diag_log  # технический журнал logs/app.log (diag/log.py)
 diag_log.setup()
 _dlog = diag_log.get("app")
+import wincerts  # noqa: E402 — HTTPS: недостающий корень Windows докачивается (wincerts.py)
+wincerts.install()
 from diag import features  # noqa: E402 — исправность функций (эталон «Исправно»)
 
 import userdata  # noqa: E402 — настройки и журнал в %APPDATA%\StretchBitConfiguration
@@ -704,15 +706,17 @@ if __name__ == "__main__":
     if guard.already_running(notify=not autostart, wait=wait, message=message):
         sys.exit(0)
 
-    # служба Windows установлена и отвечает: защита файлов, карантин и журнал защиты — в
-    # ней, окну права администратора не нужны (service/DESIGN.md)
+    # ручной запуск — сразу с запросом UAC, и при работающей службе: без прав инструменты
+    # (диспетчер процессов, память, флешки, расширения, точки восстановления...) только
+    # показывают (Windows 10, 14.11.2026). Без окна UAC: автозапуск (задание планировщика),
+    # меню Проводника и окно, которое служба открыла по тревоге (--alarm): там важнее
+    # показать тревогу сразу. Отказ в UAC — работа без прав, защита — в службе
+    if not autostart and not analyze_path and "--alarm" not in sys.argv and elevate_on_start():
+        sys.exit(0)
+    # служба Windows установлена и отвечает: защита файлов, карантин и журнал защиты — в ней
+    # (service/DESIGN.md)
     from service import client as _svc_client
     service_client = _svc_client.connect()
-    # без службы (исходники, прежняя установка) — как раньше: запуск пользователем сразу с
-    # запросом UAC; из автозапуска (задание планировщика уже с наивысшими правами) и из меню
-    # Проводника окно UAC не показываем
-    if service_client is None and not autostart and not analyze_path and elevate_on_start():
-        sys.exit(0)
     if service_client is not None:
         from service import remote as _svc_remote
         _svc_remote.install(service_client)  # до окна: оно сразу читает карантин и журнал

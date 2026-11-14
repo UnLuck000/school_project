@@ -21,6 +21,8 @@ def _prepare():
     diag_log.LOG_FILE = diag_log.LOG_DIR / "service.log"
     diag_log.setup(worker=True)
     log = diag_log.get("service")
+    import wincerts
+    wincerts.install()  # базы качает служба: на «чистой» Windows нет части корней
     import appinfo
     from diag import edition
     log.info("=" * 70)

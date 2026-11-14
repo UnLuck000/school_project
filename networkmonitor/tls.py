@@ -155,10 +155,25 @@ def windivert_candidates(configured: str = "") -> list[Path]:
     return candidates
 
 
+def _from_project(dll: Path) -> bool:
+    """Запуск из исходников (python gui.py) и WinDivert из native/windivert проекта. Папка
+    проекта открыта на запись пользователю, но из неё же с правами выполняется весь код
+    программы (.py): проверка прав одной библиотеки там ничего не защищает, а запрещала
+    разработчику TLS. В собранной программе — только защищённые папки."""
+    if getattr(sys, "frozen", False):
+        return False
+    try:
+        return Path(dll).resolve().parent == (PROJECT_DIR / "native" / "windivert").resolve()
+    except OSError:
+        return False
+
+
 def windivert_safe(dll: Path) -> tuple[bool, str]:
     """Библиотеку и драйвер рядом с ней меняют только администраторы: программа с правами
     загружает WinDivert.dll в себя — подменённая библиотека выполнила бы свой код с правами
     администратора (папки zapret в корне диска обычно открыты на запись пользователю)."""
+    if _from_project(dll):
+        return True, ""
     import winacl
     for item in (dll, dll.parent / "WinDivert64.sys"):
         ok, reason = winacl.admin_only(item)

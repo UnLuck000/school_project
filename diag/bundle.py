@@ -6,6 +6,8 @@
                      характеристики компьютера (diag/snapshot, diag/specs);
     logs/          — всё из logs/ (app.log с ротацией, crash.log, session.json, specs.json,
                      feature_runs.json, yara_errors.log...);
+    service-logs/  — журналы службы (service.log, service-stdout.log из папки программы:
+                     окно без прав пишет свои журналы в %LOCALAPPDATA%, а служба — туда);
   только тестовая версия (diag/edition.is_test):
     feedback/      — комментарии testpanel (comments.jsonl, .log, снимки .png);
     features/      — статусы функций: status.json и status.txt (как на странице
@@ -27,6 +29,7 @@ from diag.anon import scrub
 import datadirs
 
 LOGS = datadirs.LOGS
+SERVICE_LOGS = datadirs.APP_CACHE.parent / "logs"   # папка программы: журналы службы
 FEEDBACK = datadirs.REPORTS / "feedback"
 TEXT_EXTS = {".log", ".txt", ".json", ".jsonl", ".csv"}
 MAX_FILE = 64 * 2 ** 20   # больше — обрезается до последних MAX_FILE байт (журнал разросся)
@@ -159,6 +162,15 @@ def collect(target: Path, progress=None) -> dict:
     tmp = target.with_name(target.name + ".part")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         manifest["files"]["logs"] = _add_folder(z, LOGS, "logs", progress)
+        if SERVICE_LOGS.resolve() != LOGS.resolve():
+            count = 0
+            for path in sorted(SERVICE_LOGS.glob("service*.log*")):
+                try:
+                    _add_file(z, path, f"service-logs/{path.name}")
+                    count += 1
+                except OSError:
+                    continue  # файл занят службой или нет прав на чтение
+            manifest["files"]["service-logs"] = count
         z.writestr("snapshot.txt", _snapshot())
         if test:
             manifest["files"]["feedback"] = _add_folder(z, FEEDBACK, "feedback", progress)

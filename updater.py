@@ -453,6 +453,25 @@ def update_all(progress=None) -> bool:
     return ok
 
 
+def bases_missing() -> bool:
+    """На диске нет скачанных баз (ни правил YARA, ни списков хэшей VirusShare). Время
+    последнего обновления хранится отдельно (у службы — в ProgramData, у окна — в
+    настройках) и переживает переустановку и перенос папки программы, а базы — нет: так
+    13.11.2026 после переезда из Program Files (x86) служба сутки считала базы свежими."""
+    try:
+        has_rules = any(COMMUNITY_RULES_DIR.rglob("*.yar*")) if COMMUNITY_RULES_DIR.is_dir() \
+            else False
+        has_md5 = any(FEEDS_DIR.glob("*.md5.bin")) if FEEDS_DIR.is_dir() else False
+    except OSError:
+        return False
+    return not (has_rules or has_md5)
+
+
+def needs_update(last_update: float, now: float | None = None) -> bool:
+    """Пора обновлять: прошли сутки или баз на диске нет."""
+    return update_due(last_update, now) or bases_missing()
+
+
 def update_due(last_update: float, now: float | None = None) -> bool:
     """Пора ли обновлять: прошло не меньше суток с последнего обновления. Отсчёт без
     обновлений ведётся от 1 января 1970 года (last_update = 0), поэтому первый запуск

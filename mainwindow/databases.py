@@ -168,7 +168,7 @@ class DatabasesMixin:
     def auto_update_check(self):
         if getattr(self, "service", None) is not None:
             return  # базы обновляет служба (service/core.py): окно без прав — не может
-        if self._updating or not updater.update_due(cfg.get("db/last_update")):
+        if self._updating or not updater.needs_update(cfg.get("db/last_update")):
             return
         if not updater.can_update():
             if not getattr(self, "_update_denied", False):  # сообщить один раз за запуск
