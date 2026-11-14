@@ -379,7 +379,7 @@ def md5_bin(raw: bytes) -> bytes:
     return b"".join(sorted(items))
 
 
-def update_virusshare(files: int = VIRUSSHARE_FILES, progress=None) -> bool:
+def update_virusshare(files: int = VIRUSSHARE_FILES, progress=None, part=None) -> bool:
     """VirusShare: списки MD5. Каждый список не меняется, поэтому качаем только новые.
     Хранятся двоичными файлами feeds/virusshare_NNNNN.md5.bin."""
     state_file = FEEDS_DIR / "virusshare.json"
@@ -401,6 +401,8 @@ def update_virusshare(files: int = VIRUSSHARE_FILES, progress=None) -> bool:
     for i, n in enumerate(missing, 1):
         if progress:
             progress(f"VirusShare: список {i} из {len(missing)}")
+        if part:
+            part((i - 1) / len(missing))
         try:
             data = md5_bin(_download(VIRUSSHARE_URL.format(n=n), timeout=300))
         except Exception as e:
@@ -422,16 +424,63 @@ def update_virusshare(files: int = VIRUSSHARE_FILES, progress=None) -> bool:
 
 
 # ---------- правила YARA ----------
-def update_rules() -> bool:
+RULES_ETAGS = ".etags.json"   # в community/: источник -> ETag последнего разобранного архива
+
+
+def _download_changed(url: str, etag: str, timeout: int = 300) -> tuple[bytes | None, str]:
+    """Скачать, только если файл изменился: If-None-Match с прежним ETag (архивы GitHub —
+    codeload — отвечают 304 без тела). None — не изменился. Сервер, не понявший заголовок,
+    но вернувший тот же ETag, тоже «не изменился»: тело тогда не читается."""
+    headers = {"User-Agent": "StretchBIT-updater/1.0"}
+    if etag:
+        headers["If-None-Match"] = etag
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            new = resp.headers.get("ETag") or ""
+            if etag and new == etag:
+                return None, etag
+            return resp.read(), new
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            return None, etag
+        raise
+
+
+def _load_etags() -> dict:
+    try:
+        data = json.loads((COMMUNITY_RULES_DIR / RULES_ETAGS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
+
+
+def _has_rules(folder: Path) -> bool:
+    return folder.is_dir() and any(folder.glob("*.yar*"))
+
+
+def update_rules(part=None) -> bool:
+    """Архивы правил с GitHub. Каждый раз целиком они качались зря (десятки МБ в сутки):
+    теперь — только изменившиеся (ETag). Папки правил нет — качается без ETag.
+    part(доля 0..1) — ход по архивам (шкала на главной)."""
     ok_any = False
     COMMUNITY_RULES_DIR.mkdir(parents=True, exist_ok=True)
-    for name, (url, inner) in RULE_SOURCES.items():
+    etags = _load_etags()
+    for index, (name, (url, inner)) in enumerate(RULE_SOURCES.items()):
+        if part:
+            part(index / len(RULE_SOURCES))
+        target = COMMUNITY_RULES_DIR / name
+        known = etags.get(name, "") if _has_rules(target) else ""
         try:
-            data = _download(url, timeout=300)
+            data, etag = _download_changed(url, known)
         except Exception as e:
             print(f"Правила {name}: не удалось скачать: {_error(e)}")
             continue
-        target = COMMUNITY_RULES_DIR / name
+        if data is None:
+            ok_any = True
+            print(f"Правила {name}: без изменений")
+            continue
+        etags.pop(name, None)
         fresh = COMMUNITY_RULES_DIR / f".{name}.new"
         shutil.rmtree(fresh, ignore_errors=True)
         fresh.mkdir(parents=True)
@@ -452,7 +501,13 @@ def update_rules() -> bool:
         shutil.rmtree(target, ignore_errors=True)
         fresh.rename(target)
         ok_any = True
+        if etag:
+            etags[name] = etag
         print(f"Правила {name}: файлов {count}")
+    try:
+        _write_atomic(COMMUNITY_RULES_DIR / RULES_ETAGS, json.dumps(etags, indent=1))
+    except OSError as e:
+        print(f"Правила: ETag не сохранены: {_error(e)}")
     # прежняя версия складывала signature-base прямо в community/
     for old in list(COMMUNITY_RULES_DIR.glob("*.yar")) + list(COMMUNITY_RULES_DIR.glob("*.yara")):
         if (COMMUNITY_RULES_DIR / "signature-base").is_dir():
@@ -563,21 +618,40 @@ def update_drivers() -> bool:
 
 
 # ---------- всё сразу ----------
-def update_all(progress=None) -> bool:
-    """Обновляет все базы. True, если удалось хоть что-то (иначе нет сети)."""
+def update_all(progress=None, fraction=None) -> bool:
+    """Обновляет все базы. True, если удалось хоть что-то (иначе нет сети).
+    progress(текст) — что делается; fraction(доля 0..1) — для шкалы на главной: шаги с
+    весами по объёму при первом скачивании (VirusShare — ~110 МБ, правила — десятки МБ),
+    внутри правил и VirusShare — по архивам и спискам."""
     reset_mirror()  # manifest.json зеркала — один раз за обновление
-    steps = [("адреса C2", update_ips), ("домены и JA3", update_domains),
-             ("правила YARA", update_rules), ("уязвимые драйверы", update_drivers),
-             ("MalwareBazaar", update_hashes), ("ThreatFox", update_threatfox),
-             ("VirusShare", lambda: update_virusshare(progress=progress))]
+    done = [0.0]
+
+    def part(weight: float):
+        def report(value: float) -> None:
+            if fraction:
+                fraction(min(1.0, (done[0] + weight * max(0.0, min(1.0, value))) / total))
+        return report
+
+    steps = [("адреса C2", lambda p: update_ips(), 3),
+             ("домены и JA3", lambda p: update_domains(), 4),
+             ("правила YARA", lambda p: update_rules(part=p), 25),
+             ("уязвимые драйверы", lambda p: update_drivers(), 4),
+             ("MalwareBazaar", lambda p: update_hashes(), 2),
+             ("ThreatFox", lambda p: update_threatfox(), 2),
+             ("VirusShare", lambda p: update_virusshare(progress=progress, part=p), 60)]
+    total = float(sum(weight for _t, _s, weight in steps))
     ok = False
-    for title, step in steps:
+    for title, step, weight in steps:
         if progress:
             progress(f"Обновляю: {title}...")
+        part(weight)(0.0)
         try:
-            ok = step() or ok
+            ok = step(part(weight)) or ok
         except Exception as e:  # сбой одного источника не мешает остальным
             print(f"{title}: ошибка {_error(e)}")
+        done[0] += weight
+        if fraction:
+            fraction(done[0] / total)
     return ok
 
 

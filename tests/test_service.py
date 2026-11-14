@@ -372,18 +372,28 @@ def test_service_updates_bases_once_a_day(core, monkeypatch):
     calls = []
     monkeypatch.setattr(updater, "can_update", lambda: True)
     monkeypatch.setattr(updater, "bases_missing", lambda: False)
-    monkeypatch.setattr(updater, "update_all", lambda: calls.append(1) or True)
+    def update_all(fraction=None):
+        for value in (0.0, 0.004, 0.3, 0.6, 1.0):
+            fraction(value)
+            calls.append(core.op_status(user(), {})["db_progress"])
+        return True
+    monkeypatch.setattr(updater, "update_all", update_all)
     core.handle(user(), "protection.set", {"on": True})
     assert core.update_bases_if_due(now=10 * 86400.0) is True
-    assert calls == [1] and FakeMonitor.instances[-1].reloaded == 1
+    assert calls == [0.0, 0.0, 0.3, 0.6, 1.0] and FakeMonitor.instances[-1].reloaded == 1
     status = core.op_status(user(), {})
-    assert status["db_last_update"] == 10 * 86400.0
-    assert core.op_events(user(), {"since": 0})["events"][-1]["kind"] == "db"
+    assert status["db_last_update"] == 10 * 86400.0 and status["db_progress"] is None
+    events = core.op_events(user(), {"since": 0})["events"]
+    assert events[-1]["kind"] == "db" and events[-1]["text"] == "ok"
+    # ход обновления — одним событием (последним), начало — «db start»
+    progress = [e for e in events if e["kind"] == "db_progress"]
+    assert len(progress) == 1 and progress[0]["data"]["value"] == 1.0
+    assert [e["text"] for e in events if e["kind"] == "db"] == ["start", "ok"]
     assert core.update_bases_if_due(now=10 * 86400.0 + 3600) is None   # ещё не сутки
     from service.core import ServiceCore
     again = ServiceCore(core.folder, monitor_factory=FakeMonitor)        # время сохранено
     assert again.config["db_last_update"] == 10 * 86400.0
-    monkeypatch.setattr(updater, "update_all", lambda: False)
+    monkeypatch.setattr(updater, "update_all", lambda fraction=None: False)
     assert core.update_bases_if_due(now=12 * 86400.0) is False
     assert core.op_events(user(), {"since": 0})["events"][-1]["text"] == "fail"
 
@@ -401,7 +411,7 @@ def test_service_updates_missing_bases_and_logs_reasons(core, monkeypatch, caplo
     assert core.update_bases_if_due(now=10 * 86400.0 + 60) is None
     monkeypatch.setattr(updater, "bases_missing", lambda: True)
 
-    def failing():
+    def failing(fraction=None):
         print("MalwareBazaar: ошибка URLError: CERTIFICATE_VERIFY_FAILED")
         return False
     monkeypatch.setattr(updater, "update_all", failing)

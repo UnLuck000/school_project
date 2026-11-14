@@ -126,6 +126,7 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
     сигналы Qt, устройство окна, трей, события и выход."""
     update_finished = Signal(str, bool, bool)  # вывод, успех, тихое (автообновление)
     update_progress = Signal(str)
+    update_fraction = Signal(float)         # доля готовности обновления баз (шкала на главной)
     usb_checked = Signal(object, object)    # DriveReport автопроверки флешки, итог лечения
     usb_drives = Signal(object)             # [(корень, метка)] съёмных дисков (опрос в фоне)
     db_stats_ready = Signal(object)         # счётчики баз, посчитанные в фоне
@@ -156,6 +157,8 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         self.passive_other = ""
         self._service_pump = None
         self._service_db_last_update = 0.0  # db_last_update из последнего op_status службы
+        self._service_db_progress = None    # служба обновляет базы: доля готовности
+        self._db_fraction = 0.0             # окно само обновляет базы (без службы)
         self.bridge = MonitorBridge()
         self.bridge.event.connect(self.on_monitor_event)
         self.net_monitor: NetworkMonitor | None = None
@@ -290,6 +293,7 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         self.settings_page.changed.connect(self.on_setting_changed)
         self.update_finished.connect(self._on_update_finished)
         self.update_progress.connect(self._on_update_progress)
+        self.update_fraction.connect(self._on_update_fraction)
         self.shell.page_changed.connect(self._on_page_changed)
         self.journal_page.undone.connect(self.on_undone)
         self.journal_page.goto.connect(self.goto_action_place)
@@ -475,7 +479,9 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
             "whitelist": len(load_whitelist()),
             "last_scan": cfg.get("stats/last_scan"),
             "db_updated": db_updated,
-            "db_updating": self._updating,
+            "db_updating": self._updating or self._service_db_progress is not None,
+            "db_progress": (self._service_db_progress if self._service_db_progress is not None
+                            else self._db_fraction),
             "protection_text": protection_text,
             "events": self.recent_events,
         })

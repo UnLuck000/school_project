@@ -184,6 +184,7 @@ class DatabasesMixin:
         if self._updating:
             return
         self._updating = True
+        self._db_fraction = 0.0
         features.begin("db.update")
         self._update_silent = silent
         if not silent:
@@ -199,7 +200,8 @@ class DatabasesMixin:
         ok = False
         try:
             with contextlib.redirect_stdout(buffer):
-                ok = updater.update_all(progress=self.update_progress.emit)
+                ok = updater.update_all(progress=self.update_progress.emit,
+                                        fraction=self.update_fraction.emit)
         except Exception as e:
             buffer.write(f"Ошибка: {e}\n")
         self.update_finished.emit(buffer.getvalue(), ok, silent)
@@ -207,6 +209,10 @@ class DatabasesMixin:
     def _on_update_progress(self, text: str):
         if not self._update_silent:
             self.statusBar().showMessage(text)
+
+    def _on_update_fraction(self, value: float):
+        self._db_fraction = value
+        self.dashboard.set_db_progress(value)
 
     def _on_update_finished(self, text: str, ok: bool, silent: bool):
         from analyzer.folderview import reset_bases

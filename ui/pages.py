@@ -1,11 +1,12 @@
 import time
 
-from PySide6.QtCore import QSize, QUrl, Signal
+from PySide6.QtCore import QSize, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QGroupBox, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QStyle,
+    QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
+    QSpinBox, QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -120,6 +121,39 @@ class DashboardPage(_UiPage):
             button.clicked.connect(lambda checked=False, s=signal: s.emit())
         self.btn_protection.clicked.connect(lambda checked=False: self.toggle_protection.emit())
 
+        # обновление баз: текст «Обновляются» с бегущими точками и шкала под ним — видно, что
+        # обновление идёт, а не стоит на месте
+        self.db_bar = QProgressBar()
+        self.db_bar.setRange(0, 1000)
+        self.db_bar.setTextVisible(False)
+        self.db_bar.setFixedHeight(8)
+        self.db_bar.hide()
+        card = child(ui, QFrame, "cardDatabases")
+        card.layout().addWidget(self.db_bar)
+        self._db_dots = 0
+        self._db_timer = QTimer(self)
+        self._db_timer.setInterval(450)
+        self._db_timer.timeout.connect(self._tick_db_dots)
+
+    def _tick_db_dots(self) -> None:
+        self._db_dots = self._db_dots % 3 + 1
+        self.labels["databases"].setText("Обновляются" + "." * self._db_dots)
+
+    def set_db_progress(self, value: float) -> None:
+        """Доля готовности обновления баз (0..1)."""
+        self.db_bar.setValue(int(max(0.0, min(1.0, value)) * 1000))
+
+    def _show_db_updating(self, on: bool, value: float = 0.0) -> None:
+        self.db_bar.setVisible(on)
+        if on:
+            self.set_db_progress(value)
+            if not self._db_timer.isActive():
+                self._db_dots = 0
+                self._tick_db_dots()
+                self._db_timer.start()
+        else:
+            self._db_timer.stop()
+
     def set_button_visible(self, name: str, on: bool) -> None:
         """Кнопка быстрого действия (скрывается, если её инструмент запрещён)."""
         child(self.ui, QPushButton, name).setVisible(on)
@@ -151,15 +185,15 @@ class DashboardPage(_UiPage):
 
         updated = info.get("db_updated") or 0
         stale = not updated or time.time() - updated > 3 * 86400
-        if info.get("db_updating"):
-            db_text = "обновляются..."
-        elif updated:
-            db_text = time.strftime("обновлены %d.%m.%Y %H:%M", time.localtime(updated))
-        else:
-            db_text = "ещё не обновлялись"
-        self.labels["databases"].setText(db_text)
+        updating = bool(info.get("db_updating"))
+        self._show_db_updating(updating, info.get("db_progress") or 0.0)
+        if not updating:
+            self.labels["databases"].setText(
+                time.strftime("обновлены %d.%m.%Y %H:%M", time.localtime(updated)) if updated
+                else "ещё не обновлялись")
         self.labels["databases"].setStyleSheet(
-            "font-size: 11pt; font-weight: 600;" + (f" color: {self.WARN};" if stale else ""))
+            "font-size: 11pt; font-weight: 600;" +
+            (f" color: {self.WARN};" if stale and not updating else ""))
 
         icons = QStyle.StandardPixmap
         if not info["protection"]:

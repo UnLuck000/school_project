@@ -690,6 +690,7 @@ class ProtectionMixin:
             for folder in status["folders"]:
                 self._add_watch_item(folder)
         self._service_db_last_update = status["db_last_update"]
+        self._service_db_progress = status.get("db_progress")  # окно открыли посреди обновления
         remote = getattr(self.monitor, "remote", False)
         if status["running"]:
             if self.monitor is None:
@@ -728,6 +729,9 @@ class ProtectionMixin:
         if kind == "link":
             if text == "down":
                 self._protect_line("[Служба] нет связи со службой защиты", "", "darkorange")
+                if self._service_db_progress is not None:  # шкала не висит до переподключения
+                    self._service_db_progress = None
+                    self.refresh_dashboard()
             else:
                 self._sync_service_state()
             return
@@ -743,7 +747,20 @@ class ProtectionMixin:
             self._sync_service_state()
             return
         if kind == "db":
-            self._on_service_db_update(ok=text == "ok")
+            if text == "start":
+                self._service_db_progress = 0.0
+                self.refresh_dashboard()
+            else:
+                self._service_db_progress = None
+                self._on_service_db_update(ok=text == "ok")
+                if text != "ok":
+                    self.refresh_dashboard()
+            return
+        if kind == "db_progress":
+            value = (ev.get("data") or {}).get("value")
+            if isinstance(value, (int, float)):
+                self._service_db_progress = float(value)
+                self.dashboard.set_db_progress(float(value))
             return
         if kind == "guard":
             self._on_service_guard(ev.get("data") or {})

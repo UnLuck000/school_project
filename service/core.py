@@ -156,6 +156,7 @@ class ServiceCore:
         self._monitor = None
         self._run = 0
         self._status = "Защита файлов выключена."
+        self._db_progress: float | None = None   # идёт обновление баз — доля готовности
         self.server = None
         from diag.log import get
         self.log = get("service")
@@ -264,12 +265,16 @@ class ServiceCore:
         self.log.info("Базы: начинаю автообновление%s",
                       " (баз на диске нет)" if updater.bases_missing() else "")
         output = io.StringIO()
+        self._db_progress = 0.0   # окна показывают шкалу (op_status, события db_progress)
+        self.emit("db", "start")
         try:
             with contextlib.redirect_stdout(output):  # updater пишет итог каждого источника
-                ok = updater.update_all()
+                ok = updater.update_all(fraction=self._report_db_progress)
         except Exception:  # noqa: BLE001 — сбой обновления не должен остановить службу
             ok = False
             self.log.exception("Базы: автообновление упало")
+        finally:
+            self._db_progress = None
         for line in output.getvalue().splitlines():   # раньше — только в service-stdout.log
             if line.strip():
                 self.log.info("Базы: %s", line.strip()[:300])
@@ -295,6 +300,13 @@ class ServiceCore:
         self.log.info("Базы обновлены")
         self.emit("db", "ok")
         return True
+
+    def _report_db_progress(self, value: float) -> None:
+        """Ход обновления баз — окнам, не чаще чем на 1%."""
+        if self._db_progress is not None and value - self._db_progress < 0.01 and value < 1:
+            return
+        self._db_progress = value
+        self.emit("db_progress", data={"value": round(value, 3)})
 
     def start_pipe(self, name: str | None = None, allowed=None, sddl: str | None = None):
         from service import pipeserver, winapi
@@ -377,6 +389,11 @@ class ServiceCore:
 
     def emit(self, kind: str, text: str = "", run: int = 0, data=None) -> None:
         with self._cond:
+            # ход обновления баз — до сотни событий подряд: в буфере остаётся последнее,
+            # иначе они вытеснили бы события защиты, которые окно показывает при подключении
+            if kind == "db_progress" and self._events and \
+                    self._events[-1]["kind"] == "db_progress":
+                self._events.pop()
             self._seq += 1
             event = {"seq": self._seq, "kind": kind, "text": text, "run": run,
                      "time": time.strftime("%H:%M:%S")}
@@ -455,7 +472,8 @@ class ServiceCore:
                     "folders": self.config["folders"].get(client.sid or "?", []),
                     "watched": len(self.all_folders()),
                     "lock_protection": self.config["lock_protection"], "boot": self.boot,
-                    "seq": self._seq, "db_last_update": self.config["db_last_update"]}
+                    "seq": self._seq, "db_last_update": self.config["db_last_update"],
+                    "db_progress": self._db_progress}
 
     def op_events(self, client, args):
         since = int(args.get("since", 0))
