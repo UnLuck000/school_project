@@ -8,7 +8,7 @@
 
 Зеркало (14.11.2026): у пользователей ключа abuse.ch нет (в программе его перехватили бы из
 заголовка), а Feodo из РФ без VPN не открывается. Поэтому MalwareBazaar, ThreatFox, URLhaus,
-Feodo, SSLBL и JA3 сначала берутся из выпуска «feeds» на GitHub (его раз в сутки собирает
+Feodo, SSLBL и JA3 сначала берутся из ветки «feeds» на GitHub (его раз в сутки собирает
 GitHub Actions с ключом из Secrets: tools/feeds_mirror.py, .github/workflows/feeds-mirror.yml) —
 ответы источников как есть, разбор тот же. С ключом (signatures/.abusech_key,
 ABUSECH_AUTH_KEY) — сначала напрямую, зеркало — запасной путь; без ключа источники с ключом —
@@ -87,8 +87,9 @@ URLHAUS_EXPORT = "https://urlhaus-api.abuse.ch/v2/files/exports/{key}/online.csv
 SSLBL_JA3 = "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv"
 DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9_-]{1,63}\.)+[a-z][a-z0-9-]{1,62}$")
 
-# зеркало: выпуск «feeds» репозитория программы (tools/feeds_mirror.py)
-MIRROR_TAG = "feeds"
+# зеркало: ветка «feeds» репозитория программы (tools/feeds_mirror.py; в выпусках его нет —
+# пользователю в «Releases» оно не нужно)
+MIRROR_BRANCH = "feeds"
 MIRROR_MAX_AGE = 3 * 86400      # старше — задание зеркала сломано: не берём, идём напрямую
 MIRROR_MAX_SIZE = 512 * 2**20   # распакованный файл зеркала — не больше (защита от gzip-бомбы)
 MIRROR_MANIFEST_VERSION = 1
@@ -112,10 +113,12 @@ _manifest_cache: dict = {}
 
 
 def mirror_base() -> str:
-    """Адрес файлов выпуска «feeds»: https://github.com/<владелец>/<репозиторий>/releases/
-    download/feeds/ (репозиторий — appinfo.REPO_URL)."""
+    """Адрес файлов ветки «feeds»: https://raw.githubusercontent.com/<владелец>/<репозиторий>/
+    refs/heads/feeds/ (репозиторий — appinfo.REPO_URL; refs/heads/ — чтобы не спутать с
+    меткой того же имени)."""
     import appinfo
-    return appinfo.REPO_URL.rstrip("/") + f"/releases/download/{MIRROR_TAG}/"
+    repo = appinfo.REPO_URL.rstrip("/").removesuffix(".git").split("github.com/", 1)[-1]
+    return f"https://raw.githubusercontent.com/{repo}/refs/heads/{MIRROR_BRANCH}/"
 
 
 def reset_mirror() -> None:

@@ -154,7 +154,14 @@ def test_gunzip_limit():
     assert updater._gunzip(gzip.compress(b"ok")) == b"ok"
 
 
-def test_workflow_uses_secret_and_prerelease():
+def test_workflow_uses_secret_and_branch():
     text = (ROOT / ".github" / "workflows" / "feeds-mirror.yml").read_text(encoding="utf-8")
-    assert "secrets.ABUSECH_AUTH_KEY" in text and "--prerelease" in text
-    assert "--latest=false" in text and "tools/feeds_mirror.py out" in text
+    assert "secrets.ABUSECH_AUTH_KEY" in text and "tools/feeds_mirror.py out" in text
+    assert "feeds:refs/heads/feeds" in text            # ветка, а не выпуск
+    assert "gh release upload" not in text and "gh release delete feeds" in text
+
+
+def test_mirror_base_is_branch(monkeypatch):
+    import appinfo
+    monkeypatch.setattr(appinfo, "REPO_URL", "https://github.com/Owner/repo")
+    assert updater.mirror_base() ==         "https://raw.githubusercontent.com/Owner/repo/refs/heads/feeds/"

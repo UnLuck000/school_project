@@ -1,12 +1,12 @@
 # Зеркало баз abuse.ch (tools/feeds_mirror.py): раз в сутки скачивает MalwareBazaar, ThreatFox,
-# URLhaus (по ключу) и Feodo, SSLBL, JA3 и выкладывает их в выпуск «feeds» этого репозитория.
-# Программа (updater.py) качает их оттуда без ключа.
+# URLhaus (по ключу) и Feodo, SSLBL, JA3 и кладёт их в отдельную ветку «feeds» этого
+# репозитория (не в выпуски: пользователю в «Releases» они не нужны). Программа (updater.py)
+# качает их с raw.githubusercontent.com без ключа.
 #
 # Настройка (один раз): Settings → Secrets and variables → Actions → New repository secret,
 # имя ABUSECH_AUTH_KEY, значение — ключ abuse.ch. Сменить ключ — поменять этот секрет.
 # Запустить вручную: Actions → «Зеркало баз» → Run workflow.
-# Выпуск «feeds» — предварительный (prerelease): «последним выпуском» программы он не считается
-# (updatecheck смотрит releases/latest).
+# Ветка «feeds» каждый раз записывается заново одним коммитом (история не копится).
 name: Зеркало баз
 
 on:
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write          # выпуск и его файлы
+  contents: write          # запись ветки feeds
 
 concurrency:
   group: feeds-mirror
@@ -40,23 +40,22 @@ jobs:
           ABUSECH_AUTH_KEY: ${{ secrets.ABUSECH_AUTH_KEY }}
         run: python tools/feeds_mirror.py out
 
-      - name: Выложить в выпуск feeds
+      # до 14.11.2026 (вечер) зеркало было выпуском «feeds»: выпуск и метка с тем же именем, что у
+      # ветки, не нужны (программа берёт refs/heads/feeds)
+      - name: Убрать прежний выпуск feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete feeds --cleanup-tag -y --repo "$GITHUB_REPOSITORY" || true
+
+      - name: Записать в ветку feeds
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          if ! gh release view feeds >/dev/null 2>&1; then
-            gh release create feeds --prerelease --latest=false --title "Зеркало баз" \
-              --notes "Базы abuse.ch для StretchBIT, обновляются раз в сутки (tools/feeds_mirror.py). Не выпуск программы."
-          fi
-          old=$(gh release view feeds --json assets -q '.assets[].name')
-          # сначала файлы с новыми именами, manifest.json — последним: клиент со старым
-          # manifest.json ещё получает прежние файлы
-          gh release upload feeds out/*.gz --clobber
-          gh release upload feeds out/SHA256SUMS out/manifest.json --clobber
-          for name in $old; do
-            case "$name" in
-              manifest.json|SHA256SUMS) ;;
-              *) [ -f "out/$name" ] || gh release delete-asset feeds "$name" -y ;;
-            esac
-          done
+          cd out
+          git init -q -b feeds
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Базы $(date -u '+%Y-%m-%d %H:%M') UTC"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" feeds:refs/heads/feeds
