@@ -14,6 +14,11 @@
 ; заменой файлов служба останавливается (net stop ждёт остановки: иначе StretchBIT.exe занят),
 ; после — «StretchBIT.exe --service-install» создаёт или обновляет её и запускает. Удаление:
 ; шаги uninstall.py останавливают и удаляют службу; на крайний случай — sc delete.
+; Другая версия (релизная при установке тестовой и наоборот, 14.11.2026): две службы сразу
+; мешают друг другу (общие сеансы ETW, канал AMSI, kill switch, меню Проводника). Установщик
+; спрашивает: удалить её (её деинсталлятором, тихо; настройки в AppData остаются) или оставить —
+; тогда её служба останавливается и переводится в ручной запуск, её окно закрывается, а окно
+; той версии при запуске работает без своих защит (service/editions.py).
 
 #ifndef Edition
   #define Edition "release"
@@ -36,6 +41,9 @@
   #define InstallDir "{autopf}\StretchBIT-test"
   #define OldDir "C:\Utils\SBIT-test"
   #define ConfigName "StretchBitConfiguration-test"
+  #define OtherService "StretchBITService"
+  #define OtherKey "StretchBIT"
+  #define OtherName "релизная версия StretchBIT"
 #else
   #define ServiceName "StretchBITService"
   #define AppKey "StretchBIT"
@@ -43,7 +51,11 @@
   #define InstallDir "{autopf}\StretchBIT"
   #define OldDir "C:\Utils\SBIT"
   #define ConfigName "StretchBitConfiguration"
+  #define OtherService "StretchBITService-test"
+  #define OtherKey "StretchBIT-test"
+  #define OtherName "тестовая версия StretchBIT"
 #endif
+#define OtherUninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\" + OtherKey + "_is1"
 
 [Setup]
 ; 64-битный режим: без него {autopf} — «Program Files (x86)», а записи реестра установщика —
@@ -135,6 +147,8 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 var
   WipeSettings: Boolean;
+  OtherPage: TInputOptionWizardPage;
+  OtherFound: Boolean;
 
 { прежний установщик (installer.py) писал запись «Приложения» под именем без _is1;
   версии до 1.0.0 ставились без прав администратора: их запись «Приложения» и ярлыки были
@@ -226,12 +240,10 @@ end;
   Manager их не закрывает, и обновление откатывалось («не удалось закрыть приложения»).
   Закрываются процессы StretchBIT.exe только из папки этой установки (по пути, не по имени —
   другая версия и чужие программы не трогаются); метка no_restart уже стоит }
-procedure CloseRunning();
+procedure CloseFolder(const App: String);
 var
   Code: Integer;
-  App: String;
 begin
-  App := ExpandConstant('{app}');
   if not FileExists(App + '\{#ExeName}') then
     exit;
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
@@ -240,6 +252,81 @@ begin
        'Where-Object { $_.Path -and $_.Path.StartsWith($d, ''OrdinalIgnoreCase'') } | ' +
        'Stop-Process -Force -ErrorAction SilentlyContinue"',
        '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+procedure CloseRunning();
+begin
+  CloseFolder(ExpandConstant('{app}'));
+end;
+
+{ ---------- другая версия (релизная/тестовая) ---------- }
+function OtherDir(): String;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM64, '{#OtherUninstallKey}', 'InstallLocation', Result) then
+    Result := RemoveBackslashUnlessRoot(Result);
+end;
+
+procedure InitializeWizard();
+begin
+  OtherFound := RegKeyExists(HKLM64, '{#OtherUninstallKey}');
+  OtherPage := CreateInputOptionPage(wpWelcome, 'Другая версия StretchBIT',
+    'На компьютере уже установлена {#OtherName}',
+    'Две версии сразу мешают друг другу (общие сеансы слежения Windows, проверка скриптов, ' +
+    'kill switch VPN, меню Проводника), поэтому защиту ведёт только одна. Что сделать с ' +
+    'установленной?', True, False);
+  OtherPage.Add('Удалить её (рекомендуется; её настройки в AppData останутся)');
+  OtherPage.Add('Оставить: её служба защиты будет остановлена и переведена в ручной запуск. ' +
+    'Сделать её снова основной можно из её окна (кнопка «Включить защиту»)');
+  OtherPage.SelectedValueIndex := 0;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = OtherPage.ID) and not OtherFound;
+end;
+
+{ её же деинсталлятор, тихо (без --wipe: настройки остаются). Деинсталлятор Inno запускает
+  свою копию из временной папки и сразу выходит, поэтому ждём, пока исчезнет его запись
+  «Приложения» (он удаляет её последней), — до 3 минут }
+procedure RemoveOther();
+var
+  Uninstaller: String;
+  Code, I: Integer;
+begin
+  if not RegQueryStringValue(HKLM64, '{#OtherUninstallKey}', 'UninstallString', Uninstaller) then
+    exit;
+  Uninstaller := RemoveQuotes(Uninstaller);
+  if not FileExists(Uninstaller) then
+    exit;
+  Exec(Uninstaller, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+  for I := 1 to 360 do
+  begin
+    if not RegKeyExists(HKLM64, '{#OtherUninstallKey}') then
+      break;
+    Sleep(500);
+  end;
+end;
+
+{ оставить: служба — ручной запуск и остановлена, окно и сторож той версии закрыты (метка
+  no_restart — чтобы сторож её не вернул). Службы нет — sc/net просто вернут ошибку }
+procedure DeactivateOther();
+var
+  Code: Integer;
+  Dir: String;
+begin
+  Exec(ExpandConstant('{sys}\sc.exe'), 'config {#OtherService} start= demand', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\net.exe'), 'stop {#OtherService}', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+  Dir := OtherDir();
+  if (Dir <> '') and DirExists(Dir + '\app') then
+  begin
+    ForceDirectories(Dir + '\app\cache');
+    SaveStringToFile(Dir + '\app\cache\no_restart', 'setup', False);
+    CloseFolder(Dir);
+  end;
 end;
 
 { перед заменой файлов программу закроют: её сторож (selfguard.py) не должен вернуть её }
@@ -255,6 +342,10 @@ begin
   CloseRunning();
   MoveOldInstall();
   MoveX86Install();
+  { тихая установка (/SILENT) другую версию не удаляет — только переводит в ручной запуск }
+  if OtherFound and (OtherPage.SelectedValueIndex = 0) and not WizardSilent then
+    RemoveOther();
+  DeactivateOther();
 end;
 
 { окно перед удалением: флажок «Удалить все настройки пользователя» }

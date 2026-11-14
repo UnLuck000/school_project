@@ -6,7 +6,7 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -31,6 +31,8 @@ class ProtectionMixin:
 
     def apply_decoys(self):
         """Ловушки работают вместе с защитой файлов (настройка protect/decoys)."""
+        if self.passive_other:  # папка ловушек общая у версий — её ведёт основная
+            return
         from toolbox import decoys
         self.decoy_watcher.stop()
         if not cfg.get("protect/decoys"):
@@ -573,6 +575,66 @@ class ProtectionMixin:
             self.watch_list.takeItem(row)
             self._save_watch_folders()
 
+    # ---------- другая версия (релизная/тестовая) ведёт защиту: service/editions.py ----------
+    def show_passive(self) -> None:
+        other = self.passive_other
+        text = (f"Защиту сейчас ведёт {other}. Эта версия работает без защиты, мониторинга "
+                "сети и VPN: две версии сразу мешают друг другу. Сделать основной эту — "
+                "кнопка «Включить защиту».")
+        self.protect_status.setText(f"Защиту ведёт {other}")
+        self.protection_page.protect_status.setToolTip(text)
+        self.net_status.setText(f"Мониторинг сети ведёт {other}")
+        self.add_event(text, "warning")
+
+    def offer_activate(self) -> None:
+        """Сделать эту версию основной: StretchBIT.exe --service-activate с правами (UAC),
+        затем окно перезапускается и подключается к своей службе."""
+        other = self.passive_other
+        parent = self if self.isVisible() else None
+        answer = QMessageBox.question(
+            parent, "Другая версия StretchBIT",
+            f"Защиту, мониторинг сети и VPN на этом компьютере ведёт {other}. Две версии "
+            "сразу мешают друг другу, поэтому работает одна.\n\nСделать основной эту версию? "
+            f"Служба {other} будет остановлена и переведена в ручной запуск, программа "
+            "перезапустится. Вернуть можно так же — из окна другой версии.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        from service import elevate
+        try:
+            handle = elevate.start(["--service-activate"])
+        except OSError as e:
+            QMessageBox.warning(parent, "Другая версия StretchBIT", str(e))
+            return
+        if handle is None:  # окно UAC закрыли «Нет»
+            return
+        self.protect_status.setText("Переключаю службу защиты...")
+        timer = QTimer(self)
+
+        def poll():
+            code = elevate.exit_code(handle)
+            if code is None:
+                return
+            timer.stop()
+            if code != 0:
+                QMessageBox.warning(parent, "Другая версия StretchBIT",
+                                    f"Не удалось сделать эту версию основной (код {code}). "
+                                    "Переустановите программу установщиком.")
+                self.show_passive()
+                return
+            self.restart_window()
+        timer.timeout.connect(poll)
+        timer.start(500)
+
+    def restart_window(self) -> None:
+        """Новый экземпляр (ждёт освобождения имени — --relaunched), этот закрывается."""
+        import subprocess
+
+        from service import elevate
+        exe, params = elevate.command(["--relaunched"])
+        subprocess.Popen(f'"{exe}" {params}', close_fds=True,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        self.quit_app(force=True)
+
     # ---------- служба Windows (service/): защита файлов, карантин, журнал защиты ----------
     def attach_service(self, client) -> None:
         """Окно работает со службой: события защиты — длинным опросом в фоне (EventPump),
@@ -781,6 +843,9 @@ class ProtectionMixin:
 
     def toggle_protection(self, force: bool = False):
         """force: выключить и при запрете (возврат состояния после замера ресурсов)."""
+        if self.monitor is None and self.passive_other:
+            self.offer_activate()
+            return
         if self.monitor is not None:
             if access.protection_locked() and not force:
                 self._off_blocked("защиту файлов")

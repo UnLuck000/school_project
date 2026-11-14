@@ -157,6 +157,9 @@ class NetworkMixin:
 
     def toggle_network(self, force: bool = False):
         """force: выключить и при запрете (возврат состояния после замера ресурсов)."""
+        if self.net_monitor is None and self.passive_other:
+            self.offer_activate()  # mainwindow/protection.py
+            return
         if self.net_monitor is not None:
             if access.network_locked() and not force:
                 self._off_blocked("мониторинг сети")

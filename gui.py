@@ -131,6 +131,9 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         self._fit_to_screen()
         self.monitor: RealtimeMonitor | None = None  # или service.client.RemoteMonitor
         self.service = None  # service.client.ServiceClient: защита и карантин — в службе
+        # защиту ведёт служба другой версии (релизной/тестовой): окно своих защит, сети и VPN
+        # не запускает (service/editions.py); здесь — её название
+        self.passive_other = ""
         self._service_pump = None
         self._service_db_last_update = 0.0  # db_last_update из последнего op_status службы
         self.bridge = MonitorBridge()
@@ -699,7 +702,9 @@ if __name__ == "__main__":
 
     autostart = "--autostart" in sys.argv
     analyze_path = _argument("--analyze")  # файл из меню Проводника
-    guard = SingleInstance("StretchBIT")
+    # у релизной и тестовой — свои имена: иначе окно второй версии считало канал «занятым
+    # чужой программой»
+    guard = SingleInstance("StretchBIT-test" if edition.is_test() else "StretchBIT")
     wait = 10.0 if "--relaunched" in sys.argv else 0.0  # ждём закрытия прежнего экземпляра
     message = (b"open\n" + analyze_path.encode("utf-8")) if analyze_path else b"show"
     # уже запущена: передаём ей файл или просьбу показать окно и выходим
@@ -716,12 +721,25 @@ if __name__ == "__main__":
     # служба Windows установлена и отвечает: защита файлов, карантин и журнал защиты — в ней
     # (service/DESIGN.md)
     from service import client as _svc_client
+    from service import editions as _editions
+    if is_admin():
+        # служба этой версии стоит в ручном запуске, а другой версии уже нет (удалили) —
+        # вернуть свою, иначе окно запустило бы защиты у себя (service/editions.py)
+        _editions.revive_own()
     service_client = _svc_client.connect()
     if service_client is not None:
         from service import remote as _svc_remote
         _svc_remote.install(service_client)  # до окна: оно сразу читает карантин и журнал
         _dlog.info("Служба защиты: подключено, окно без прав администратора: %s",
                    not is_admin())
+    # своя служба не отвечает, а служба другой версии работает: две версии сразу мешают друг
+    # другу (общие сеансы ETW, kill switch...) — окно пассивное (service/editions.py)
+    passive = service_client is None and _editions.passive()
+    if passive:
+        _dlog.info("Защиту ведёт %s — окно без своих защит, сети и VPN",
+                   _editions.other_title())
+        if autostart:  # при входе в Windows запускается окно основной версии
+            sys.exit(0)
 
     def _ensure_registration():
         # schtasks — до секунды на вызов (а с проверкой прежнего задания их три): в фоне
@@ -729,14 +747,15 @@ if __name__ == "__main__":
             cfg.ensure_autostart()  # задание планировщика (создаётся только с правами)
         cfg.ensure_explorer_menu()  # пункт «Проверить в ...» в меню файлов — всегда
 
-    threading.Thread(target=_ensure_registration, name="startup-registration",
-                     daemon=True).start()
+    if not passive:  # задание и меню Проводника общие у версий — их ведёт основная
+        threading.Thread(target=_ensure_registration, name="startup-registration",
+                         daemon=True).start()
     if not guard.listen() and guard.squatted is None:  # другой экземпляр успел занять имя
         sys.exit(0)
     crash.start_session()  # метка сеанса: аварийный выход заметен при следующем запуске
     links = userdata.remove_links() if is_admin() else []  # см. userdata.remove_links
     import selfguard
-    if cfg.get("protect/selfguard"):
+    if cfg.get("protect/selfguard") and not passive:
         selfguard.start()  # сторож вернёт программу, если её снимут или она упадёт
         _guard_timer = QTimer()
         _guard_timer.timeout.connect(selfguard.start)  # сняли сторожа — запустить снова
@@ -745,6 +764,8 @@ if __name__ == "__main__":
 
     window = MainWindow()
     window.guard = guard
+    if passive:
+        window.passive_other = _editions.other_title()
     if service_client is not None:
         window.attach_service(service_client)
     guard.activated.connect(lambda: window.show_main())
@@ -772,12 +793,15 @@ if __name__ == "__main__":
         window.show()
     if analyze_path:
         window.open_analyzer(analyze_path)
-    window.start_protection_on_launch()
+    if passive:
+        window.show_passive()
+    else:
+        window.start_protection_on_launch()
+        window.start_usb_watch()
+        window.start_schedule()
+        window.start_vpn_on_launch()
     window.start_activity_report()
-    window.start_usb_watch()
     window.start_auto_update()
-    window.start_schedule()
-    window.start_vpn_on_launch()
     if edition.is_test():
         from diag import testpanel
         testpanel.bridge()

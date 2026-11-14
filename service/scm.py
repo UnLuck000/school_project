@@ -213,6 +213,27 @@ def install(name: str, display: str, description: str, binpath: str) -> str:
     return what
 
 
+SERVICE_DEMAND_START = 3
+
+
+def set_start_type(name: str, start_type: int) -> bool:
+    """Тип запуска службы (SERVICE_AUTO_START / SERVICE_DEMAND_START). False — службы нет."""
+    a = api()
+    with _manager() as scm:
+        svc = a.OpenServiceW(scm, name, SERVICE_CHANGE_CONFIG)
+        if not svc:
+            if ctypes.get_last_error() == ERROR_SERVICE_DOES_NOT_EXIST:
+                return False
+            raise _err("служба")
+        try:
+            if not a.ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, start_type, SERVICE_NO_CHANGE,
+                                          None, None, None, None, None, None, None):
+                raise _err("изменение типа запуска службы")
+        finally:
+            a.CloseServiceHandle(svc)
+    return True
+
+
 def start(name: str) -> None:
     a = api()
     with _manager() as scm, _Handle(a.OpenServiceW(scm, name, SERVICE_START), "служба") as svc:

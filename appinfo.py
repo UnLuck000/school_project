@@ -1,6 +1,6 @@
 APP_NAME = "StretchBIT"
 SHORT_NAME = "SBIT"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 YEAR = 2026
 AUTHOR = "Владимир"                         # TODO: впишите автора
 ORGANIZATION = ""                           # TODO: школа или университет

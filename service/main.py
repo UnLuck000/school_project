@@ -5,6 +5,8 @@
     --service-install   создать или обновить службу и запустить её (установщик, с правами)
     --service-remove    остановить и удалить службу (удаление программы, с правами)
     --service-stop      остановить службу и дождаться (установщик перед заменой файлов)
+    --service-activate  эта версия — основная: служба другой (релизной/тестовой) — в ручной
+                        запуск, своя — автозапуск (service/editions.py; окно через UAC)
 """
 import sys
 import time
@@ -68,6 +70,9 @@ def entry(argv: list[str]) -> int:
     if "--service-remove" in argv:
         print("удалена" if scm.remove(name) else "службы не было")
         return 0
+    if "--service-activate" in argv:
+        from service import editions
+        return editions.activate()
     if "--service-stop" in argv:
         print("остановлена" if scm.stop(name) else "не работала")
         return 0

@@ -139,6 +139,9 @@ class ToolsMixin:
     def open_tool(self, name: str):
         if self.tool_blocked(self.TOOL_BUTTONS[name]):
             return
+        if name == "vpn" and self.passive_other and "vpn" not in self.tool_windows:
+            self.offer_activate()  # VPN другой версии и этой — общий kill switch
+            return
         from toolbox import windows
         window = self.tool_windows.get(name)
         if window is None and name == "drivers" and self._open_elevated("drivers"):
