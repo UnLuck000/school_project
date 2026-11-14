@@ -143,6 +143,20 @@ def find_singbox() -> str:
     return next((c for c in candidates if c and os.path.isfile(c)), "")
 
 
+# «Только IPv4»: IPv6 в интернет отклоняется ДО установки соединения (pre-match: правило раньше
+# sniff — sing-box отвечает TCP RST на SYN). Правило после sniff срабатывало, когда
+# рукопожатие уже прошло: браузер видел ERR_CONNECTION_RESET и на IPv4 не переходил — сайты с
+# IPv6 (docs.github.com, оформление github, yandex.ru, mail.ru) не открывались, а github.com
+# (без IPv6) — открывался (ноутбук с IPv6 у провайдера, 14.11.2026). Адреса IPv6 браузер берёт
+# мимо DNS sing-box: «Безопасный DNS» (DoH) при DNS адаптера 1.1.1.1. Локальная сеть и DNS
+# (порт 53 — hijack-dns ниже) этим правилом не трогаются; прежнее правило после sniff остаётся
+IPV6_EARLY_REJECT = {
+    "type": "logical", "mode": "and", "action": "reject",
+    "rules": [{"ip_version": 6}, {"ip_is_private": True, "invert": True},
+              {"port": 53, "invert": True}],
+}
+
+
 def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
                  direct_apps: list[str] | None = None, block_quic: bool = False,
                  block_udp: bool = False, dns_server: str = "1.1.1.1",
@@ -180,7 +194,8 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
             dns_rules.append({"query_type": [query], "action": "route", "server": tag})
     address4 = tun_address or free_tun_address()
     address = [address4, tun_address6(address4)]
-    extra = [] if ip_mode in ("prefer_ipv6", "ipv6") else [{"ip_version": 6, "action": "reject"}]
+    only_ipv4 = ip_mode not in ("prefer_ipv6", "ipv6")
+    extra = [{"ip_version": 6, "action": "reject"}] if only_ipv4 else []
     if block_udp:
         extra.append({"network": "udp", "action": "reject"})
     elif block_quic:
@@ -206,6 +221,7 @@ def build_config(socks_port: int, xray_exe: str, ip_mode: str = "ipv4",
         ],
         "route": {
             "rules": [
+                *([IPV6_EARLY_REJECT] if only_ipv4 else []),
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
                 {"process_path": [os.path.normpath(xray_exe)], "outbound": "direct"},

@@ -88,9 +88,43 @@ def _issuer(cert: dict) -> str:
     return ""
 
 
+# коды OpenSSL «цепочка не доходит до известного корня»: 2, 20 — корня нет в хранилище;
+# 19 — сервер прислал корень сам, а в хранилище его нет (telegram.org, GoDaddy, Windows 10)
+CHAIN_CODES = (2, 19, 20)
+
+
+def _decode(der: bytes) -> dict:
+    """Разбор сертификата средствами самого ssl (пакета cryptography нет)."""
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
+        f.write(ssl.DER_cert_to_PEM_cert(der))
+        path = f.name
+    try:
+        return ssl._ssl._test_decode_cert(path)
+    finally:
+        os.unlink(path)
+
+
+def name_matches(cert: dict, host: str) -> bool:
+    """Сертификат выдан на этот сайт: DNS-имена subjectAltName, «*.» — ровно одна метка."""
+    host = host.lower().rstrip(".")
+    for kind, name in cert.get("subjectAltName", ()):
+        if kind != "DNS":
+            continue
+        name = name.lower().rstrip(".")
+        if name == host:
+            return True
+        if name.startswith("*.") and "." in host and host.split(".", 1)[1] == name[2:]:
+            return True
+    return False
+
+
 def windows_trusts(host: str, route: tuple, timeout: float) -> bool:
     """Доверяет ли сертификату сайта сама Windows (wincerts.build_chain: недостающий корень
-    она докачивает с Windows Update). Сертификат берётся тем же путём, что и у проверки."""
+    она докачивает с Windows Update) и выдан ли он на этот сайт: при ошибке цепочки OpenSSL
+    до проверки имени не доходит, а Windows имя не проверяет. Сертификат берётся тем же
+    путём, что и у проверки."""
     try:
         import wincerts
         sock = open_tcp(host, 443, route, timeout)
@@ -99,7 +133,7 @@ def windows_trusts(host: str, route: tuple, timeout: float) -> bool:
         context.verify_mode = ssl.CERT_NONE
         with context.wrap_socket(sock, server_hostname=host) as tls:
             der = tls.getpeercert(binary_form=True) or b""
-        return wincerts.build_chain(der) == 0
+        return wincerts.build_chain(der) == 0 and name_matches(_decode(der), host)
     except Exception:  # noqa: BLE001 — не узнали: считаем, что Windows не доверяет
         return False
 
@@ -126,10 +160,10 @@ def probe(host: str, route: tuple, timeout: float = 10.0, _retried: bool = False
             result.total_ms = (time.perf_counter() - t0) * 1000
     except ssl.SSLCertVerificationError as e:
         result.issuer = _peek_issuer(host, route, timeout)
-        if e.verify_code in (2, 20) and windows_trusts(host, route, timeout):
-            # Python не нашёл корень в хранилище, а Windows цепочку строит (докачав корень):
-            # на Windows 10 так telegram.org (корень GoDaddy) считался «подменённым» и
-            # блокировался. Имя сайта при этом уже совпало (иначе код ошибки другой)
+        if e.verify_code in CHAIN_CODES and windows_trusts(host, route, timeout):
+            # Python не нашёл корень в хранилище, а Windows цепочку строит (докачав корень)
+            # и имя сайта совпало: на Windows 10 так telegram.org (корень GoDaddy) считался
+            # «подменённым» и блокировался. Повтор — уже с докачанным корнем
             result.cert = "ok"
             result.error = ""
             return result if _retried else probe(host, route, timeout, _retried=True)
@@ -153,15 +187,7 @@ def _peek_issuer(host: str, route: tuple, timeout: float) -> str:
         with context.wrap_socket(sock, server_hostname=host) as tls:
             der = tls.getpeercert(binary_form=True)
         # разбор сертификата средствами самого ssl: без сторонних пакетов
-        import os
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
-            f.write(ssl.DER_cert_to_PEM_cert(der))
-            path = f.name
-        try:
-            return _issuer(ssl._ssl._test_decode_cert(path)) or "неизвестен"
-        finally:
-            os.unlink(path)
+        return _issuer(_decode(der)) or "неизвестен"
     except Exception:
         return "неизвестен"
 

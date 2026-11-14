@@ -554,7 +554,7 @@ class SingBoxBackend(Backend):
             return
         from diag import features
         features.step("vpn.connect", "конфигурация")
-        self.log("Xray: запуск (VLESS, локальный SOCKS для туннеля)...")
+        self.log("Запуск Xray (VLESS, локальный SOCKS для туннеля)...")
         self.xray_proc = subprocess.Popen(
             [self.xray_exe, "run", "-c", str(xpath)], cwd=str(Path(self.xray_exe).parent),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -572,7 +572,7 @@ class SingBoxBackend(Backend):
             if tried:  # прежний адрес занят: конфигурация с другим
                 spath = singbox_config(address)
             tried.append(address)
-            self.log(f"sing-box: запуск TUN, адрес {address} (нужны права администратора)...")
+            self.log(f"Запуск sing-box (TUN, адрес {address})...")
             self.proc = subprocess.Popen(
                 [self.exe, "run", "-c", str(spath)], cwd=str(Path(self.exe).parent),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -588,7 +588,8 @@ class SingBoxBackend(Backend):
             # прежнего sing-box (Windows убирает его не сразу) или чужой клиент — другой адрес
             if "already exists" in self.error and len(tried) < len(self.sb.TUN_CANDIDATES) \
                     and self.state == CONNECTING:
-                self.log(f"sing-box: адрес {address} занят — пробую другой")
+                self.log(f"sing-box не запустился ({self.error[-120:]}) — повтор с адресом, "
+                         "отличным от " + address)
                 proc, self.proc = self.proc, None
                 if proc is not None and proc.poll() is None:
                     proc.kill()
@@ -633,6 +634,13 @@ class SingBoxBackend(Backend):
             if self.killswitch:
                 features.step("vpn.connect", "kill switch")
                 self.log("Kill switch: интернет только через туннель")
+        if self.state != CONNECTING:
+            # «Отключить» нажали, пока шли подмена DNS и kill switch (на слабом ПК — 10–20 с):
+            # disconnect уже убрал ядра и адаптер, kill switch падал на несуществующем
+            # интерфейсе (New-NetFirewallRule: HRESULT 0x80070057) — это не ошибка
+            # подключения, а отмена. То, что успели включить, возвращаем (_aborted → _cleanup)
+            self._aborted()
+            return
         if dns_error is not None:
             self._fail(f"DNS не защищён, VPN отключён: {dns_error}")
             return
@@ -666,7 +674,7 @@ class SingBoxBackend(Backend):
         end = time.time() + timeout
         if self.sb.TUN_NAME not in psutil.net_if_stats():
             return
-        self.log("sing-box: адаптер прежнего подключения ещё не убран — жду")
+        self.log("Адаптер прежнего подключения ещё не убран — жду")
         while time.time() < end and self.sb.TUN_NAME in psutil.net_if_stats():
             time.sleep(0.5)
 
@@ -693,7 +701,9 @@ class SingBoxBackend(Backend):
         alive = all(p is not None and p.poll() is None for p in (self.proc, self.xray_proc))
         if self.state == CONNECTING and alive and not self.error:
             return False
-        if self.killswitch or self.dns_changed or alive:
+        # ядро, запущенное повтором уже после «Отключить», тоже не оставлять
+        leftover = any(p is not None and p.poll() is None for p in (self.proc, self.xray_proc))
+        if self.killswitch or self.dns_changed or leftover:
             self._cleanup()
         if self.state == CONNECTING:
             self._set(ERROR, self.error or "ядро VPN завершилось во время подключения")

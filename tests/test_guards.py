@@ -387,10 +387,17 @@ def test_singbox_config_and_modes():
     assert {"process_path": [r"C:\x\xray.exe"], "outbound": "direct"} in config["route"]["rules"]
     # «Только IPv4» — IPv6 заходит в туннель и отклоняется; иначе — идёт через сервер
     assert {"ip_version": 6, "action": "reject"} in config["route"]["rules"]
+    # ...и до установки соединения: правило раньше sniff (иначе браузер видел
+    # ERR_CONNECTION_RESET и не переходил на IPv4); локальная сеть и DNS — не им
+    rules = config["route"]["rules"]
+    assert rules[0] == singbox.IPV6_EARLY_REJECT and rules[1] == {"action": "sniff"}
+    inner = rules[0]["rules"]
+    assert {"ip_is_private": True, "invert": True} in inner and {"port": 53, "invert": True} in inner
     assert config["dns"]["strategy"] == "ipv4_only"
     for mode in ("prefer_ipv6", "ipv6"):
         with6 = singbox.build_config(xray.SOCKS_PORT, r"C:\x\xray.exe", ip_mode=mode)
         assert {"ip_version": 6, "action": "reject"} not in with6["route"]["rules"]
+        assert singbox.IPV6_EARLY_REJECT not in with6["route"]["rules"]
         assert with6["dns"]["strategy"] == "prefer_ipv6"
         assert any(":" in a for a in with6["inbounds"][0]["address"])
     assert set(xray.IP_MODES) == {"ipv4", "prefer_ipv6", "ipv6"}

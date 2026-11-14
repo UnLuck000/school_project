@@ -79,6 +79,53 @@ class FakeProc:
         return 1
 
 
+def _tun_backend(tmp_path, monkeypatch):
+    """SingBoxBackend с подставными ядрами: sing-box и Xray запускаются и живут."""
+    monkeypatch.setattr(backends, "TUNNEL_DIR", tmp_path)
+    b = backends.SingBoxBackend(lambda text: None)
+    b.exe, b.xray_exe, b.available = r"C:\sb\sing-box.exe", r"C:\x\xray.exe", True
+    b.options = {"block_quic": True, "block_udp": False}
+    b.settings = {"vpn/killswitch": True}
+    from vpn import procguard, windns, xray
+    monkeypatch.setattr(xray, "parse_vless", lambda cfg: {
+        "address": "1.2.3.4", "sni": "x", "security": "reality"})
+    monkeypatch.setattr(xray, "ensure_free", lambda port: None)
+    monkeypatch.setattr(xray, "server_address", lambda host, mode: host)
+    monkeypatch.setattr(xray, "build_config", lambda v, mode: {
+        "inbounds": [{"protocol": "socks", "port": 10808}], "outbounds": []})
+    monkeypatch.setattr(xray, "apply_options", lambda *a: None)
+    monkeypatch.setattr(xray, "wait_port", lambda port, timeout=8.0: True)
+    monkeypatch.setattr(backends, "add_local_proxy", lambda cfg, log: {})
+    monkeypatch.setattr(windns, "manual_dns", lambda: {"v4": [], "v6": []})
+    monkeypatch.setattr(procguard, "bind", lambda proc, log: None)
+    monkeypatch.setattr(backends.subprocess, "Popen", lambda args, **_kw: FakeProc([]))
+    monkeypatch.setattr(b, "_wait_old_adapter", lambda: None)
+    monkeypatch.setattr(b, "_wait_adapter", lambda timeout=None: True)
+    return b
+
+
+def test_disconnect_during_dns_and_killswitch_is_not_error(tmp_path, monkeypatch):
+    """«Отключить», пока шли подмена DNS и kill switch (Windows 10, 18:58): раньше kill
+    switch падал на убранном адаптере (HRESULT 0x80070057) и окно показывало ошибку."""
+    b = _tun_backend(tmp_path, monkeypatch)
+    from vpn import dnsguard, killswitch
+    restored = []
+
+    def protect():
+        b.disconnect()                       # пользователь нажал «Отключить»
+        return ["Беспроводная сеть"]
+    monkeypatch.setattr(dnsguard, "protect", protect)
+    monkeypatch.setattr(dnsguard, "restore", lambda: restored.append("dns"))
+    monkeypatch.setattr(killswitch, "enable", lambda *a: None)
+    monkeypatch.setattr(killswitch, "disable", lambda: restored.append("ks") or True)
+
+    class P:
+        config, server, name = "vless://x", "1.2.3.4:443", "p"
+    b.connect(P())
+    assert b.state == backends.DISCONNECTED, b.error
+    assert not b.dns_changed and not b.killswitch and "dns" in restored
+
+
 def test_singbox_retries_with_other_address(tmp_path, monkeypatch):
     """Первый sing-box падает с «already exists» — второй запуск с другим адресом."""
     monkeypatch.setattr(backends, "TUNNEL_DIR", tmp_path)
@@ -155,6 +202,34 @@ def test_cert_trusted_by_windows_is_not_substituted(monkeypatch):
     assert result.cert == "ok" and len(calls) == 2           # повтор после докачки корня
     monkeypatch.setattr(checks, "windows_trusts", lambda *a: False)
     assert checks.probe("telegram.org", ("direct",)).cert == "substituted"
+
+
+def test_root_sent_by_server_code_19(monkeypatch):
+    """«self-signed certificate in certificate chain» (код 19) — тот же случай: корень
+    прислал сервер, в хранилище Python его нет (telegram.org, Windows 10, 19:00)."""
+    class Sock:
+        def close(self):
+            pass
+
+    def wrap(self, sock, server_hostname=None):
+        e = ssl.SSLCertVerificationError("self-signed certificate in certificate chain")
+        e.verify_code, e.verify_message = 19, "self-signed certificate in certificate chain"
+        raise e
+    monkeypatch.setattr(checks, "open_tcp", lambda *a, **k: Sock())
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", wrap)
+    monkeypatch.setattr(checks, "_peek_issuer", lambda *a: "GoDaddy.com, Inc.")
+    monkeypatch.setattr(checks, "windows_trusts", lambda *a: True)
+    assert checks.probe("telegram.org", ("direct",)).cert == "ok"
+
+
+def test_name_is_checked_when_windows_trusts_chain():
+    """При ошибке цепочки OpenSSL имя не проверяет, Windows — тоже: проверяем сами."""
+    cert = {"subjectAltName": (("DNS", "telegram.org"), ("DNS", "*.telegram.org"))}
+    assert checks.name_matches(cert, "telegram.org")
+    assert checks.name_matches(cert, "core.telegram.org")
+    assert not checks.name_matches(cert, "a.b.telegram.org")
+    assert not checks.name_matches(cert, "evil.org")
+    assert not checks.name_matches({"subjectAltName": (("DNS", "evil.org"),)}, "telegram.org")
 
 
 def test_wrong_name_is_substituted_even_if_windows_trusts(monkeypatch):
