@@ -18,45 +18,32 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(quarantine, "QUARANTINE_DIR", tmp_path / "quarantine")
     monkeypatch.setattr(activity, "ACTIVITY_DIR", tmp_path / "activity")
     monkeypatch.setattr(activity, "EVENTS_FILE", tmp_path / "activity" / "events.jsonl")
-    monkeypatch.setattr(activity, "OUTBOX_DIR", tmp_path / "activity" / "outbox")
     return tmp_path
 
 
-def test_activity_report_and_periods(sandbox, monkeypatch):
+def test_activity_events(sandbox):
     activity.record("threat", r"C:\x\bad.exe: hash match", action="найдено")
-    activity.record("scan_folder", r"C:\x: Найдено угроз: 1", found=[r"C:\x\bad.exe: Угроза"])
     activity.record("custom", "событие без раздела")
-    text = activity.build_report()
-    assert "Угрозы, найденные защитой файлов (1)" in text
-    assert r"C:\x\bad.exe: hash match" in text  # имена файлов остаются (п. 1.3)
-    assert "Сканирование папок (1)" in text and "событие без раздела" in text
-    assert "== Карантин сейчас: 0 ==" in text
-
-    day = activity.DAY
-    first = 1_000_000.0
-    assert activity.due_periods(first, 0, first + 2 * day) == []
-    assert activity.due_periods(first, 0, first + 7 * day) == [
-        (first, first + 3 * day), (first + 3 * day, first + 6 * day)]
-    assert activity.due_periods(first, first + 6 * day, first + 7 * day) == []
-    end = activity.prepare_outbox(time.time() - 4 * day, 0)
-    assert end and len(list(activity.OUTBOX_DIR.glob("report_*.txt"))) == 1
+    events = activity.read_events()
+    assert [e["kind"] for e in events] == ["threat", "custom"]
+    assert events[0]["details"] == {"action": "найдено"}
+    activity.trim(now=time.time() + (activity.KEEP_DAYS + 1) * activity.DAY)
+    assert activity.read_events() == []                     # старше 90 дней — удалены
 
 
-def test_activity_anonymize(sandbox):
+def test_anonymize_user_paths():
+    """Обезличивание путей профиля (diag.anon: журнал app.log и архив сведений)."""
+    from diag import anon
     env = {"USERPROFILE": r"C:\Users\Ivan", "LOCALAPPDATA": r"C:\Users\Ivan\AppData\Local",
            "APPDATA": r"C:\Users\Ivan\AppData\Roaming", "USERNAME": "Ivan",
            "COMPUTERNAME": "IVAN-PC", "PUBLIC": r"C:\Users\Public"}
     text = (r"C:\Users\ivan\Downloads\x.exe; C:\Users\Ivan\AppData\Local\Temp\a.vbs; "
             r"C:\Users\Petr\Desktop\b.exe; C:\Users\Public\c.exe; user Ivan on IVAN-PC; "
             r"Ivanov.docx")
-    assert activity.anonymize(text, env) == (
+    assert anon.anonymize_user(text, env) == (
         r"%USERPROFILE%\Downloads\x.exe; %LOCALAPPDATA%\Temp\a.vbs; "
         r"C:\Users\%OTHERUSER%\Desktop\b.exe; %PUBLIC%\c.exe; "
         r"user %USERNAME% on %COMPUTERNAME%; Ivanov.docx")
-    activity.record("threat", os.path.join(os.environ["USERPROFILE"], "bad.exe") + ": hash")
-    report = activity.build_report()
-    assert os.environ["USERPROFILE"].lower() not in report.lower()
-    assert r"%USERPROFILE%\bad.exe: hash" in report
 
 
 def test_pwned_offline():
@@ -176,12 +163,6 @@ def test_usb_auto_fixes_only_for_infected():
     infected = DriveReport("E:\\", findings=clean.findings + [
         Finding("E:\\FLASH.lnk", "shortcut", "threat", "Ярлык-вирус", fix="quarantine")])
     assert [f.path for f in auto_fixes(infected)] == ["E:\\\u00a0", "E:\\FLASH.lnk"]
-
-
-def test_data_description_paragraphs():
-    text = activity.description()
-    assert "в нём нет ничего, кроме" in text                # строки абзаца склеены
-    assert "\n• найденные угрозы" in text and "\n\n\n" not in text
 
 
 def test_decoy_culprit_ranking(monkeypatch):

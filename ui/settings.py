@@ -99,8 +99,6 @@ DEFAULTS = {
     "db/last_update": 0.0,          # время последнего обновления баз (секунды с 1970 года)
     "update/last_check": 0.0,       # последняя проверка выпуска программы (updatecheck.py)
     "update/skipped": "",           # версия, которую пользователь решил пропустить
-    "report/first_run": 0.0,        # первый запуск: от него считаются периоды отчёта
-    "report/last_end": 0.0,         # конец последнего периода, отчёт за который готов
 }
 
 
@@ -203,8 +201,7 @@ def set_(key: str, value) -> None:
     store().setValue(key, value)
 
 
-KEEP_ON_RESET = ("stats/last_scan", "db/last_update", "report/first_run", "report/last_end",
-                 "schedule/last_run", "advanced/warned")
+KEEP_ON_RESET = ("stats/last_scan", "db/last_update", "schedule/last_run", "advanced/warned")
 
 
 def reset() -> None:

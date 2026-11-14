@@ -273,10 +273,9 @@ class MainWindow(JournalMixin, ToolsMixin, UsbMixin, ProtectionMixin, ScansMixin
         settings_scroll.setWidget(self.settings_page)
         self.shell.add_page("Настройки", settings_scroll)  # часть разделов — режим администратора
         self.shell.add_page("О программе", self.about_page)
-        # режим администратора: пароль — в «Настройках», отчёт о работе — в «О программе»;
-        # вкладка «Отладка» — только в тестовой версии
+        # режим администратора: пароль — в «Настройках»; вкладка «Отладка» — только в
+        # тестовой версии
         self.settings_page.add_admin_group(self.debug_page.group_access)
-        self.about_page.add_admin_group(self.debug_page.group_activity)
         self.shell.add_page("Отладка", self.debug_page, hidden=True)
         self.setCentralWidget(self.shell)
 
@@ -826,7 +825,7 @@ if __name__ == "__main__":
         window.start_usb_watch()
         window.start_schedule()
         window.start_vpn_on_launch()
-    window.start_activity_report()
+    window.start_activity()
     window.start_auto_update()
     if edition.is_test():
         from diag import testpanel

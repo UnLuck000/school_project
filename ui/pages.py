@@ -681,10 +681,9 @@ class AboutPage(_UiPage):
 
 
 class DebugPage(_UiPage):
-    """Служебная страница: только в тестовой версии, в режиме администратора. Разделы
-    «Отчёт о работе программы» (group_activity) и «Пароль администратора» (group_access)
-    создаются здесь, а показываются на страницах «О программе» и «Настройки» — во всех
-    версиях, тоже только в режиме администратора."""
+    """Служебная страница: только в тестовой версии, в режиме администратора. Раздел
+    «Пароль администратора» (group_access) создаётся здесь, а показывается на странице
+    «Настройки» — во всех версиях, тоже только в режиме администратора."""
     UI_NAME = "debug_page"
     password_changed = Signal(bool)  # True: пароль задан
 
@@ -704,51 +703,7 @@ class DebugPage(_UiPage):
         self.btn_default_password.clicked.connect(lambda checked=False: self.toggle_default())
         bind_features(self, self.ui, window)
         self.update_password_state()
-        self.lbl_activity = child(self.ui, QLabel, "lblActivityState")
-        child(self.ui, QPushButton, "btnOpenActivity").clicked.connect(
-            lambda checked=False: self.open_activity())
-        child(self.ui, QPushButton, "btnActivityInfo").clicked.connect(
-            lambda checked=False: self.show_activity_info())
-        child(self.ui, QPushButton, "btnActivityFolder").clicked.connect(
-            lambda checked=False: self._open_path(self._activity_dir()))
-        self.group_activity = child(self.ui, QGroupBox, "groupActivity")
         self.group_access = child(self.ui, QGroupBox, "groupAccess")
-
-    @staticmethod
-    def _activity_dir():
-        from recovery import activity
-        activity.ACTIVITY_DIR.mkdir(parents=True, exist_ok=True)
-        return activity.ACTIVITY_DIR
-
-    def _open_path(self, path) -> None:
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-            QMessageBox.warning(self, "Отчёт", f"Не удалось открыть {path}")
-
-    def open_activity(self) -> None:
-        from recovery import activity
-        try:
-            path = activity.write_report()
-        except OSError as e:
-            QMessageBox.warning(self, "Отчёт", f"Не удалось составить отчёт: {e}")
-            return
-        self._open_path(path)
-
-    def show_activity_info(self) -> None:
-        from recovery import activity
-        from toolbox.windows import info_dialog
-        info_dialog(self, "Какие данные собираются", activity.description(), 660)
-
-    def set_activity_state(self, first_run: float, last_end: float) -> None:
-        from recovery import activity
-        period = activity.PERIOD_DAYS * activity.DAY
-        ends = activity.due_periods(first_run, last_end, time.time() + period)
-        next_end = ends[-1][1] if ends else time.time()
-        events = len(activity.read_events())
-        self.lbl_activity.setText(
-            f"Программа записывает свои действия и находки в отчёт (событий сейчас: "
-            f"{events}). Раз в {activity.PERIOD_DAYS} дня готовится отчёт за период для "
-            f"отправки автору; следующий — {time.strftime('%d.%m.%Y %H:%M', time.localtime(next_end))}. "
-            "Отправка пока не включена: отчёты остаются в папке reports\\activity\\outbox.")
 
     def update_password_state(self) -> None:
         own = self.gate is not None and self.gate.has_own_password()

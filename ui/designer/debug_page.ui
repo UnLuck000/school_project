@@ -42,21 +42,6 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="groupActivity">
-     <property name="title"><string>Отчёт о работе программы</string></property>
-     <layout class="QVBoxLayout" name="layoutActivity">
-      <item><widget class="QLabel" name="lblActivityState"><property name="text"><string>—</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
-      <item>
-       <layout class="QHBoxLayout" name="rowActivity">
-        <item><widget class="QPushButton" name="btnOpenActivity"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="toolTip"><string>Составить отчёт по всем сохранённым событиям и открыть его в Блокноте.</string></property><property name="text"><string>Открыть отчёт</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnActivityInfo"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Какие данные собираются</string></property></widget></item>
-        <item><widget class="QPushButton" name="btnActivityFolder"><property name="minimumSize"><size><width>0</width><height>36</height></size></property><property name="text"><string>Папка отчётов</string></property></widget></item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
     <widget class="QGroupBox" name="groupAccess">
      <property name="title"><string>Пароль администратора</string></property>
      <layout class="QVBoxLayout" name="layoutAccess">

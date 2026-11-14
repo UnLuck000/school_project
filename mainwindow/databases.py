@@ -1,4 +1,4 @@
-"""Базы и отчёт о работе: обновление баз, счётчики, отчёт за период. Часть главного окна: методы
+"""Базы и события работы: обновление баз, счётчики, запись о запуске. Часть главного окна: методы
 MainWindow (gui.py)."""
 import threading
 import time
@@ -22,26 +22,10 @@ from mainwindow.common import NETFEEDS_DIR, RULES_DIR, SIGNATURES, _dlog
 class DatabasesMixin:
     """Атрибуты и сигналы — у MainWindow (gui.py)."""
 
-    def start_activity_report(self):
-        """Отчёт о работе: отсчёт периодов от первого запуска, проверка раз в час."""
-        if not cfg.get("report/first_run"):
-            cfg.set_("report/first_run", time.time())
+    def start_activity(self):
+        """Событие о запуске и очистка событий старше 90 дней (recovery/activity.py)."""
         activity.record("program", f"Программа запущена ({appinfo.VERSION})")
         activity.trim()
-        self.check_activity_report()
-        self._report_timer = QTimer(self)
-        self._report_timer.timeout.connect(self.check_activity_report)
-        self._report_timer.start(3600 * 1000)
-
-    def check_activity_report(self):
-        first, last = cfg.get("report/first_run"), cfg.get("report/last_end")
-        try:
-            end = activity.prepare_outbox(first, last)
-        except OSError:
-            return
-        if end != last:
-            cfg.set_("report/last_end", end)
-        self.debug_page.set_activity_state(first, end)
 
     # ---------- главная страница и настройки ----------
     def _database_stats(self) -> dict | None:
